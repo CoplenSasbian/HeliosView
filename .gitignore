@@ -1,0 +1,11 @@
+# CMake / CLion
+cmake-build-*/
+build/
+out/
+CMakeCache.txt
+CMakeFiles/
+
+# IDE
+.idea/
+.vs/
+*.user
