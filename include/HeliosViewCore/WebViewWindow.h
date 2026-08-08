@@ -146,6 +146,31 @@ public:
         heliosview_webview_broadcast(m_webview, name, data_json);
     }
 
+    // Subscribe to broadcasts the page posts via its BroadcastChannel(name) instances:
+    // callback(name, data_json, userdata) fires on the UI thread for every postMessage
+    // to a channel of that name. Rebinding a name replaces the previous subscription
+    // (running its dtor). userdata_dtor runs when replaced or on destruction (may be
+    // nullptr). UI-thread call (thread-safe: other threads are marshalled).
+    void subscribe(const char* name, heliosview_webview_subscribe_cb callback,
+                   void* userdata = nullptr, heliosview_webview_userdata_dtor userdata_dtor = nullptr)
+    {
+        heliosview_webview_subscribe(m_webview, name, callback, userdata, userdata_dtor);
+    }
+
+    // nlohmann auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):
+    // the page's BroadcastChannel(name).postMessage(data) is deserialized into a Req DTO and
+    // passed to callback(Req) on the UI thread; the callback returns void. Requires
+    // nlohmann::json; include WebViewJson.h before calling. Example:
+    //   win.subscribeJson<StatusReq>("status", [](StatusReq req) { ... });
+    template <class Req, class Fn>
+    void subscribeJson(const char* name, Fn&& callback);
+
+    // Remove the BroadcastChannel(name) subscription (running its dtor). UI-thread call.
+    void unsubscribe(const char* name)
+    {
+        heliosview_webview_unsubscribe(m_webview, name);
+    }
+
 private:
     heliosview_webview_t* m_webview = nullptr;
 };

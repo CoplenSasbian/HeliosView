@@ -6,6 +6,7 @@
 //   - each native function prints its 入参 and 返回值 with std::println (C++23)
 //   - a log panel on the page shows the same round-trip
 //   - broadcast() pushes a native -> JS message via BroadcastChannel
+//   - subscribeJson<Req>(): the page's BroadcastChannel postMessage -> native (JS -> native)
 //   - eval() / evalAsync(): run JS from native (output on the terminal)
 // The bridge shim is injected into every page automatically.
 #include <HeliosViewCore/HeliosView.h>
@@ -23,6 +24,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AddReq, a, b)
 
 struct GreetReq { std::string name; };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GreetReq, name)
+
+struct MsgReq { std::string from; int n; };
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MsgReq, from, n)
 
 int main()
 {
@@ -70,6 +74,13 @@ int main()
         co_return helios::JsonResp<bool>{"ok", true};
     });
 
+    // Subscribe to the page's BroadcastChannel("status").postMessage (JS -> native).
+    // The page's JS can send a broadcast on the same channel the native code pushes to;
+    // the value is deserialized into MsgReq and delivered on the UI thread.
+    window->subscribeJson<MsgReq>("status", [](MsgReq req) {
+        std::println("[native] received JS broadcast on 'status': from={} n={}", req.from, req.n);
+    });
+
     /* ---- a page that uses the bridge ---- */
 
     window->navigateHtml(
@@ -84,6 +95,7 @@ int main()
         "<button onclick=\"run('greet', {name:'helios'})\">greet({name:'helios'})</button>"
         "<button onclick=\"run('fail', {})\">fail()</button>"
         "<button onclick=\"run('emit', {})\">emit() → 广播</button>"
+        "<button onclick=\"bcSend()\">bc.postMessage → native</button>"
         "</div>"
         "</div>"
         "<div id='log' style='flex:1;overflow:auto;padding:0 12px 12px;"
@@ -109,6 +121,10 @@ int main()
         "  }"
         "  const bc = new BroadcastChannel('status');"
         "  bc.onmessage = e => line('[bc] ' + JSON.stringify(e.data), 'bc');"
+        "  function bcSend() {"
+        "    bc.postMessage({from: 'js', n: Math.floor(Math.random() * 100)});"
+        "    line('[bc] posted to native', 'bc');"
+        "  }"
         "</script>"
         "</body></html>");
 

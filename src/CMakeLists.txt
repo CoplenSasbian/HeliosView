@@ -10,7 +10,7 @@ if(WIN32)
         win32/heliosview_win32.cpp    # windows / message loop / native message translation / WebView2
         win32/heliosview_io_win32.cpp # IOCP thread pool + async TCP/file I/O
     )
-    target_link_libraries(HeliosView PRIVATE ws2_32)
+    target_link_libraries(HeliosView PRIVATE ws2_32 nlohmann_json::nlohmann_json)
 
     # WebView2 SDK: pulled straight from the official NuGet package (same idea
     # as stdexec: fetch from the package source, no vcpkg).

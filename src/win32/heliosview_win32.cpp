@@ -17,6 +17,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,6 +39,13 @@ struct heliosview_window {
 /* A native function registered for JS calls (window.helios.call) */
 struct hv_webview_binding {
     heliosview_webview_bind_cb callback = nullptr;
+    void* userdata = nullptr;
+    heliosview_webview_userdata_dtor dtor = nullptr;
+};
+
+/* A native subscription to JS BroadcastChannel(name) posts */
+struct hv_webview_subscription {
+    heliosview_webview_subscribe_cb callback = nullptr;
     void* userdata = nullptr;
     heliosview_webview_userdata_dtor dtor = nullptr;
 };
@@ -66,6 +74,7 @@ struct heliosview_webview {
     DWORD ui_thread = GetCurrentThreadId();            /* thread that created the webview */
     EventRegistrationToken message_token{};            /* JS -> native messages */
     std::map<std::string, hv_webview_binding> bindings; /* name -> binding (UI thread only) */
+    std::map<std::string, hv_webview_subscription> subscriptions; /* BroadcastChannel name -> subscription (UI thread only) */
 
     /* eval / eval_async queued while the WebView was still initializing */
     struct pending_op {
@@ -177,7 +186,11 @@ void hv_drain_ui_tasks(heliosview_webview_t* wv)
 }
 
 /* The JS shim, injected into every document. Pure JS, no escaping needed (it is
- * inserted via AddScriptToExecuteOnDocumentCreated which takes raw script text). */
+ * inserted via AddScriptToExecuteOnDocumentCreated which takes raw script text).
+ * window.helios.call invokes native functions; BroadcastChannel is subclassed so
+ * native broadcasts (heliosview_webview_broadcast) dispatch synthetic message
+ * events, and page postMessage()s are forwarded to native subscriptions
+ * (heliosview_webview_subscribe) while still going to other same-origin tabs. */
 const char* kWebView2BridgeScript = R"JS(
 (function () {
   'use strict';
@@ -219,7 +232,8 @@ const char* kWebView2BridgeScript = R"JS(
 
   /* BroadcastChannel: keep the native broadcast and the standard same-origin
      channel working together by subclassing. A native broadcast dispatches a
-     synthetic MessageEvent on matching instances. */
+     synthetic MessageEvent on matching instances; a page postMessage is forwarded
+     to native (subscribe) and still delivered to the other same-origin tabs. */
   var NativeBC = window.BroadcastChannel;
   var live = new Set();
   function dispatchBC(name, data) {
@@ -232,7 +246,12 @@ const char* kWebView2BridgeScript = R"JS(
     var ch = new NativeBC(name);
     ch._hvName = name;
     live.add(ch);
+    var origPost = ch.postMessage.bind(ch);
     var origClose = ch.close.bind(ch);
+    ch.postMessage = function (data) {
+      post({ __hv: 1, kind: 'broadcast', name: name, data: data === undefined ? null : data });
+      return origPost(data);
+    };
     ch.close = function () { live.delete(ch); return origClose(); };
     return ch;
   };
@@ -797,57 +816,45 @@ int heliosview_window_set_opacity(heliosview_window_t* window, float opacity)
 namespace {
 
 /* Parse the JS->native call envelope {__hv, kind, id, name, args} posted by the
- * JS shim. Returns true for a "call" message, filling id/name/args. The shim uses
- * JSON.stringify, which produces compact field order (__hv, kind, id, name, args). */
+ * JS shim. Returns true for a "call" message, filling id/name/args. */
 bool parse_call_envelope(const std::string& msg, uint64_t& id, std::string& name, std::string& args)
 {
-    if (msg.find("\"__hv\":1") == std::string::npos)
-        return false;
-    if (msg.find("\"kind\":\"call\"") == std::string::npos)
-        return false;
+    nlohmann::json env;
+    try {
+        env = nlohmann::json::parse(msg);
+        if (!env.is_object() || env.value("__hv", 0) != 1 || env.value("kind", "") != "call")
+            return false;
 
-    /* id: "id":<digits> */
-    const auto id_key = msg.find("\"id\":");
-    if (id_key == std::string::npos)
+        id = env.value("id", 0ull);
+        name = env.value("name", "");
+        /* args as raw JSON text, so the native side still gets the original string */
+        args = env.contains("args") ? env["args"].dump() : "[]";
+        return !name.empty();
+    } catch (...) {
+        /* page input: any unexpected shape is not a call; never throw into the COM callback */
         return false;
-    size_t i = id_key + 5;
-    id = 0;
-    while (i < msg.size() && msg[i] >= '0' && msg[i] <= '9') {
-        id = id * 10 + static_cast<uint64_t>(msg[i] - '0');
-        ++i;
     }
+}
 
-    /* name: "name":"..." (plain JSON string; collapse escapes) */
-    const auto name_key = msg.find("\"name\":");
-    if (name_key == std::string::npos)
-        return false;
-    i = name_key + 7;
-    if (i >= msg.size() || msg[i] != '"')
-        return false;
-    ++i;
-    name.clear();
-    while (i < msg.size() && msg[i] != '"') {
-        if (msg[i] == '\\' && i + 1 < msg.size())
-            ++i; /* skip the escape: copy the escaped char verbatim */
-        name.push_back(msg[i]);
-        ++i;
-    }
+/* Parse the JS->native broadcast envelope {__hv, kind:'broadcast', name, data} posted by
+ * the shim's BroadcastChannel.postMessage wrapper. Returns true for a "broadcast"
+ * message, filling name and the raw JSON text of the posted value. */
+bool parse_broadcast_envelope(const std::string& msg, std::string& name, std::string& data)
+{
+    nlohmann::json env;
+    try {
+        env = nlohmann::json::parse(msg);
+        if (!env.is_object() || env.value("__hv", 0) != 1 || env.value("kind", "") != "broadcast")
+            return false;
 
-    /* args: "args":[<json array>] — the raw substring to the matching close bracket */
-    const auto args_key = msg.find("\"args\":");
-    if (args_key == std::string::npos)
+        name = env.value("name", "");
+        /* data as raw JSON text, so the native side still gets the original string */
+        data = env.contains("data") ? env["data"].dump() : "";
+        return !name.empty();
+    } catch (...) {
+        /* page input: any unexpected shape is not a broadcast; never throw into the COM callback */
         return false;
-    i = args_key + 7;
-    if (i >= msg.size() || msg[i] != '[')
-        return false;
-    int depth = 0;
-    const size_t start = i;
-    for (; i < msg.size(); ++i) {
-        if (msg[i] == '[') ++depth;
-        else if (msg[i] == ']' && --depth == 0) { ++i; break; }
     }
-    args = msg.substr(start, i - start);
-    return true;
 }
 
 /* Dispatch a JS call to the bound native function. Runs on the UI thread. */
@@ -865,6 +872,20 @@ void hv_dispatch_call(heliosview_webview_t* wv, uint64_t id, const char* name,
     hv_webview_binding& b = it->second;
     if (b.callback)
         b.callback(wv, id, name, args_json ? args_json : "", b.userdata);
+}
+
+/* Dispatch a JS BroadcastChannel.postMessage to the native subscription for that
+ * name. Runs on the UI thread; no subscription is a silent no-op. */
+void hv_dispatch_broadcast(heliosview_webview_t* wv, const std::string& name, const std::string& data)
+{
+    if (!wv || name.empty())
+        return;
+    auto it = wv->subscriptions.find(name);
+    if (it == wv->subscriptions.end())
+        return;
+    hv_webview_subscription& s = it->second;
+    if (s.callback)
+        s.callback(wv, name.c_str(), data.c_str(), s.userdata);
 }
 
 } // namespace
@@ -911,6 +932,11 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                                 std::string name, args_json;
                                 if (parse_call_envelope(msg, id, name, args_json))
                                     hv_dispatch_call(webview, id, name.c_str(), args_json.c_str());
+                                else {
+                                    std::string bc_name, bc_data;
+                                    if (parse_broadcast_envelope(msg, bc_name, bc_data))
+                                        hv_dispatch_broadcast(webview, bc_name, bc_data);
+                                }
                             }
                             return S_OK;
                         });
@@ -988,6 +1014,10 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
         if (binding.dtor)
             binding.dtor(binding.userdata);
     webview->bindings.clear();
+    for (auto& [name, sub] : webview->subscriptions)
+        if (sub.dtor)
+            sub.dtor(sub.userdata);
+    webview->subscriptions.clear();
     webview->controller.Reset(); /* release the controller first; the parent window is destroyed afterwards */
     webview->webview.Reset();
     delete webview;
@@ -1123,5 +1153,45 @@ int heliosview_webview_broadcast(heliosview_webview_t* webview, const char* name
     std::string json = "{\"__hv\":1,\"kind\":\"broadcast\",\"name\":" + json_quote(name)
                      + ",\"data\":" + (data_json ? data_json : "null") + "}";
     hv_post_json(webview, json);
+    return 0;
+}
+
+int heliosview_webview_subscribe(heliosview_webview_t* webview, const char* name,
+                                 heliosview_webview_subscribe_cb callback, void* userdata,
+                                 heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview || !name || !callback)
+        return -1;
+    /* subscriptions are owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, name = std::string(name), callback, userdata, dtor] {
+            heliosview_webview_subscribe(wv, name.c_str(), callback, userdata, dtor);
+        });
+        return 0;
+    }
+    auto it = webview->subscriptions.find(name);
+    if (it != webview->subscriptions.end() && it->second.dtor)
+        it->second.dtor(it->second.userdata); /* replacing an existing subscription */
+    webview->subscriptions[name] = hv_webview_subscription{callback, userdata, dtor};
+    return 0;
+}
+
+int heliosview_webview_unsubscribe(heliosview_webview_t* webview, const char* name)
+{
+    if (!webview || !name)
+        return -1;
+    /* subscriptions are owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, name = std::string(name)] {
+            heliosview_webview_unsubscribe(wv, name.c_str());
+        });
+        return 0;
+    }
+    auto it = webview->subscriptions.find(name);
+    if (it != webview->subscriptions.end()) {
+        if (it->second.dtor)
+            it->second.dtor(it->second.userdata);
+        webview->subscriptions.erase(it);
+    }
     return 0;
 }

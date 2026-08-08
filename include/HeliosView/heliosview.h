@@ -325,6 +325,13 @@ typedef void (*heliosview_webview_bind_cb)(heliosview_webview_t* webview,
  * error code. Runs on the UI thread. */
 typedef void (*heliosview_webview_eval_cb)(int error, const char* result_json, void* userdata);
 
+/* Callback for a broadcast subscription: fires when the page posts a message to
+ * its BroadcastChannel(name) instance(s). data_json is the posted value, which
+ * may be any JSON type ("" when the message had no data). Runs on the UI thread. */
+typedef void (*heliosview_webview_subscribe_cb)(heliosview_webview_t* webview,
+                                                const char* name, const char* data_json,
+                                                void* userdata);
+
 /* Register a native function under `name`, callable from JS via
  * window.helios.call(name, ...). Rebinding a name replaces the previous binding
  * and calls its dtor (if any). dtor(userdata) also runs when the WebView is
@@ -354,6 +361,19 @@ HELIOSVIEW_API int heliosview_webview_eval_async(heliosview_webview_t* webview, 
  * page receives it as a standard 'message' event. Thread-safe. */
 HELIOSVIEW_API int heliosview_webview_broadcast(heliosview_webview_t* webview,
                                                 const char* name, const char* data_json);
+
+/* Subscribe to broadcasts the page posts via its BroadcastChannel(name) instances:
+ * callback(name, data_json, userdata) fires on the UI thread for every postMessage
+ * to a channel of that name. Subscribing to a name replaces the previous
+ * subscription (calling its dtor). dtor(userdata) also runs when the WebView is
+ * destroyed. UI-thread call. */
+HELIOSVIEW_API int heliosview_webview_subscribe(heliosview_webview_t* webview, const char* name,
+                                                heliosview_webview_subscribe_cb callback,
+                                                void* userdata,
+                                                heliosview_webview_userdata_dtor dtor);
+
+/* Remove the subscription for `name` (calling its dtor). UI-thread call. */
+HELIOSVIEW_API int heliosview_webview_unsubscribe(heliosview_webview_t* webview, const char* name);
 
 /* ================= Async I/O (background thread pool + platform multiplexer) =================
  *

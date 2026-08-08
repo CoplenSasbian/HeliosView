@@ -23,6 +23,12 @@
  *     std::execution::task default), so handler exceptions and co_await failures are
  *     catchable.
  *
+ * Broadcasts (the reverse direction) are covered by subscribeJson: the page's
+ * BroadcastChannel(name).postMessage(value) is deserialized into a Req DTO and
+ * delivered to a void(Req) callback on the UI thread. The shim subclassing
+ * BroadcastChannel keeps native broadcasts (broadcast()) and the standard
+ * same-origin channel working together.
+ *
  * Response shapes (the task's value type):
  *   - Resp                    -> resolve with the JSON encoding of Resp
  *   - nlohmann::json          -> resolve with that JSON directly
@@ -38,6 +44,7 @@
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/WebViewWindow.h>
 
+#include <concepts>
 #include <exception>
 #include <string>
 #include <type_traits>
@@ -266,6 +273,53 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
                             &detail::JsonHandler<Sender, Fn, Req>::invoke,
                             fn,
                             [](void* userdata) { delete static_cast<Fn*>(userdata); });
+}
+
+// ---------------------------------------------------------------------------
+// WebViewWindow::subscribeJson implementation (declared in WebViewWindow.h).
+//
+// Req: the DTO to deserialize the page's BroadcastChannel(name) postMessage value
+//      into (any type nlohmann::json can construct). Callback signature:
+//      (Req) -> void, invoked on the UI thread for every JS postMessage on that
+//      channel. A value that fails to parse into Req is dropped (there is no
+//      promise to reject on a broadcast).
+// ---------------------------------------------------------------------------
+namespace detail {
+
+// The C subscribe callback: parse the JS postMessage value into Req and invoke the C++ callback.
+template <class Req, class Fn>
+struct SubscribeHandler {
+    static void invoke(heliosview_webview_t* wv, const char* name,
+                       const char* data_json, void* userdata)
+    {
+        (void)wv;
+        (void)name;
+        auto* fn = static_cast<Fn*>(userdata);
+        try {
+            nlohmann::json data = (data_json && *data_json)
+                                      ? nlohmann::json::parse(data_json)
+                                      : nlohmann::json();
+            Req req = data.get<Req>();
+            (*fn)(std::move(req));
+        } catch (...) { /* unparseable broadcast: dropped (void callback has no error channel) */ }
+    }
+};
+
+} // namespace detail
+
+template <class Req, class Fn>
+void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
+{
+    static_assert(std::invocable<Fn&, Req>,
+                  "subscribeJson callback must be callable with (Req)");
+
+    // The userdata is a heap copy of the callback (lifetime = the subscription);
+    // the C layer destroys it via the userdata_dtor when replaced or the webview dies.
+    auto* fn = new Fn(std::forward<Fn>(callback));
+    heliosview_webview_subscribe(m_webview, name,
+                                 &detail::SubscribeHandler<Req, Fn>::invoke,
+                                 fn,
+                                 [](void* userdata) { delete static_cast<Fn*>(userdata); });
 }
 
 } // namespace helios

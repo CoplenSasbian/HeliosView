@@ -14,7 +14,7 @@
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
  *   - Async.h         background async I/O: thread pool + platform multiplexer (socket/file, sender-based)
  *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
- *   - WebViewJson.h   nlohmann auto-binding sugar for the WebView bridge (bindJson)
+ *   - WebViewJson.h   nlohmann auto-binding sugar for the WebView bridge (bindJson / subscribeJson)
  *
  * Usage (signals/slots):
  *   helios::App app;
