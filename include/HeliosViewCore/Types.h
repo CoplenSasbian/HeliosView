@@ -1,10 +1,11 @@
 #pragma once
 
 /**
- * HeliosView.Core —— 事件类型与事件结构。
+ * HeliosView.Core — event types and event structures.
  *
- * 与 HeliosView.dll 的 C 接口（heliosview.h）中的枚举/结构一一对应，
- * 提供类型安全的 C++ 枚举与事件对象（含 C ←→ C++ 转换）。
+ * These mirror one-to-one the enums/structs of HeliosView.dll's C interface
+ * (heliosview.h), providing type-safe C++ enums and event objects
+ * (with C ←→ C++ conversion).
  */
 
 #include <HeliosView/heliosview.h>
@@ -13,8 +14,9 @@
 
 namespace helios {
 
-/* ---------- 与 C 枚举一一对应的类型 ---------- */
+/* ---------- types mapping 1:1 to the C enums ---------- */
 
+// Event category (mirrors heliosview_event_type_t)
 enum class EventType : int32_t {
     Quit = HELIOSVIEW_EVENT_QUIT,
     WindowClose = HELIOSVIEW_EVENT_WINDOW_CLOSE,
@@ -26,6 +28,7 @@ enum class EventType : int32_t {
     MouseButtonUp = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP,
 };
 
+// Platform-independent keycode (native keycodes are mapped by the C layer)
 enum class KeyCode : int32_t {
     Unknown = HELIOSVIEW_KEY_UNKNOWN,
     Escape = HELIOSVIEW_KEY_ESCAPE,
@@ -85,25 +88,44 @@ enum class KeyCode : int32_t {
     F12 = HELIOSVIEW_KEY_F12,
 };
 
+// Mouse button identifier (mirrors heliosview_mouse_button_t)
 enum class MouseButton : int32_t {
     Left = HELIOSVIEW_MOUSE_LEFT,
     Right = HELIOSVIEW_MOUSE_RIGHT,
     Middle = HELIOSVIEW_MOUSE_MIDDLE,
 };
 
-/* ---------- 事件 ---------- */
+/* predefined window styles */
+enum class WindowStyle : int32_t {
+    Normal = HELIOSVIEW_WINDOW_NORMAL,   /* normal window: title bar + border + system menu */
+    Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn) */
+    Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* bordered, no title bar (custom title-bar style) */
+};
 
+/* window show state */
+// Window show state (mirrors heliosview_show_state_t)
+enum class ShowState : int32_t {
+    Normal = HELIOSVIEW_SHOW_NORMAL,     /* normal (restores minimized/maximized) */
+    Minimized = HELIOSVIEW_SHOW_MINIMIZED,
+    Maximized = HELIOSVIEW_SHOW_MAXIMIZED,
+};
+
+/* ---------- events ---------- */
+
+// A queued event, mirroring heliosview_event_t with type-safe C++ enums.
+// Fields are meaningful only for the event types listed next to them.
 struct Event {
-    EventType type = EventType::Quit;
-    int32_t windowId = 0;            /* 产生事件的窗口 id（0 = 与窗口无关） */
-    int64_t timestampMs = 0;
-    int32_t x = 0;                   /* 鼠标坐标 X（窗口客户区） */
-    int32_t y = 0;                   /* 鼠标坐标 Y */
-    int32_t width = 0;               /* 窗口宽（WindowResize） */
-    int32_t height = 0;              /* 窗口高（WindowResize） */
-    KeyCode key = KeyCode::Unknown;  /* 键码（KeyDown / KeyUp） */
-    MouseButton mouseButton = MouseButton::Left;
+    EventType type = EventType::Quit;         /* event type */
+    int32_t windowId = 0;            /* window that produced the event (0 = none) */
+    int64_t timestampMs = 0;         /* milliseconds since library initialization */
+    int32_t x = 0;                   /* mouse X (MouseMove / MouseButton*) */
+    int32_t y = 0;                   /* mouse Y */
+    int32_t width = 0;               /* new width (WindowResize) */
+    int32_t height = 0;              /* new height (WindowResize) */
+    KeyCode key = KeyCode::Unknown;  /* key code (KeyDown / KeyUp) */
+    MouseButton mouseButton = MouseButton::Left; /* button (MouseButton*) */
 
+    // Convert a C-layer event (heliosview_event_t) to its C++ Event form
     static Event fromC(const heliosview_event_t& c)
     {
         Event e;
@@ -119,6 +141,7 @@ struct Event {
         return e;
     }
 
+    // Convert this Event to the C-layer form (heliosview_event_t)
     heliosview_event_t toC() const
     {
         heliosview_event_t c{};

@@ -1,43 +1,74 @@
-// HeliosView.Core 窗体 feature 示例（信号槽用法）。
-// 程序引用 header-only 的 HeliosView.Core，其内部调用 HeliosView.dll 的 C 接口。
-// 交互：移动鼠标 / 按键（Esc 关闭窗口）/ 点击窗口右上角 X
+// HeliosView.Core example: signals connected to async functions (async slots).
+// The slot returns a std::execution::task coroutine; firing starts it on a
+// separate thread (fire-and-forget), and co_await schedule switches between
+// the Async pool and the UI thread.
+//
+// Important:
+// 1. The async task runs on a separate thread, so captured objects must be
+//    owned by the task (shared ownership via shared_ptr).
+// 2. Write coroutine tasks as plain functions taking parameters: under MSVC,
+//    captures in coroutine lambdas are corrupted after a cross-thread
+//    co_await (compiler/library layout issue); parameters are unaffected.
 #include <HeliosViewCore/HeliosView.h>
 
-#include <cstdio>
+#include <chrono>
+#include <memory>
+#include <print>
+#include <thread>
+
+// Coroutine slot: key handling (plain function, params passed in)
+std::execution::task<void> handleKey(std::shared_ptr<helios::App> app,
+                                     helios::Window& window, helios::KeyCode key)
+{
+    std::println("[slot] key pressed: {}", static_cast<int>(key));
+    if (key == helios::KeyCode::Escape)
+        window.close();
+    co_return;
+}
+
+// Coroutine slot: mouse click -> background pool for slow work -> postTask to UI
+std::execution::task<void> handleMouse(std::shared_ptr<helios::App> app,
+                                       std::shared_ptr<helios::Async> async,
+                                       int32_t x, int32_t y, helios::MouseButton button)
+{
+    std::println("[slot] mouse {} at ({}, {}) -> background...",
+                 static_cast<int>(button), x, y);
+
+    co_await std::execution::schedule(async->get_scheduler()); // switch to the background pool
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    std::println("[slot] background work done (pool thread)");
+
+    // Back to the UI thread (postTask: UI updates without coroutine-resumption races)
+    app->postTask([app] {
+        std::println("[slot] back on UI thread");
+    });
+}
 
 int main()
 {
-    std::printf("HeliosView %s\n", helios::version().c_str());
+    std::println("HeliosView {}", helios::version());
 
-    helios::App app;
-    helios::Window window(800, 600, "HeliosView Demo");
+    // shared_ptr: async slot tasks capture by value; App/Async stay alive until all tasks finish
+    auto app = std::make_shared<helios::App>();
+    auto async = std::make_shared<helios::Async>();
+
+    helios::Window window(800, 600, "HeliosView Async Slot Demo");
     window.show();
 
-    // 信号槽（Qt 风格）：无需子类化 Window，直接 connect lambda
-    window.resized.connect([](int32_t w, int32_t h) {
-        std::printf("[win] resize %d x %d\n", w, h);
-    });
-
-    window.keyPressed.connect([&window](helios::KeyCode key) {
-        std::printf("[win] key down: %d\n", static_cast<int>(key));
-        if (key == helios::KeyCode::Escape)
-            window.close(); // Esc 关闭窗口（消息循环随之退出）
-    });
-
-    window.mouseMoved.connect([](int32_t x, int32_t y) {
-        std::printf("[win] mouse move: %d, %d\n", x, y);
-    });
-
-    window.mouseButtonPressed.connect([](int32_t x, int32_t y, helios::MouseButton button) {
-        std::printf("[win] mouse button %d down at %d, %d\n",
-                    static_cast<int>(button), x, y);
-    });
-
+    // Sync slot: window closed
     window.closed.connect([] {
-        std::printf("[win] close requested\n");
-        // 默认行为：Window::event 发射 closed 后自动销毁窗口，
-        // App::exec 在最后一个窗口关闭后退出
+        std::println("[slot] window closed");
     });
 
-    return app.exec();
+    // Async slot: key (thin lambda forwarding to the coroutine function)
+    window.keyPressed.connect([app, &window](helios::KeyCode key) {
+        return handleKey(app, window, key);
+    });
+
+    window.mouseButtonPressed.connect([app, async](int32_t x, int32_t y, helios::MouseButton button) {
+        return handleMouse(app, async, x, y, button);
+    });
+
+    std::println("[main] entering UI loop (click / press keys / Esc)...");
+    return app->exec();
 }

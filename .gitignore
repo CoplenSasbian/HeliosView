@@ -9,3 +9,8 @@ CMakeFiles/
 .idea/
 .vs/
 *.user
+
+# MSVC build artifacts (stray pdb/ilk at repo root)
+*.ilk
+*.pdb
+__pycache__/

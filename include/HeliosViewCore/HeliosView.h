@@ -1,40 +1,47 @@
 #pragma once
 
 /**
- * HeliosView.Core —— header-only C++ 封装层（统一入口）。
+ * HeliosView.Core -- header-only C++ wrapper layer (single entry point).
  *
- * ABI 稳定性由底层的 HeliosView.dll C 接口保证；
- * 本头文件提供类似 Qt 的类型安全封装。各功能在独立头文件中，
- * 可只 include 需要的部分，或直接 include 本文件（推荐）：
+ * ABI stability comes from the underlying HeliosView.dll C interface;
+ * this header provides a type-safe wrapper. Features live in separate
+ * headers, so you can include only what you need, or this file (recommended):
  *
- *   - Signal.h   信号槽（std::function + C++23 std::flat_set）
- *   - Types.h    事件类型与事件结构（与 C 接口一一对应）
- *   - App.h      消息循环 + 事件队列（Qt: QCoreApplication）
- *   - Window.h   顶层窗口 + 信号（Qt: QWidget）
+ *   - Signal.h        signals/slots (std::function + C++23 std::flat_set)
+ *   - Types.h         event types and structures (1:1 with the C interface)
+ *   - App.h           message loop + event queue
+ *   - Window.h        top-level window + signals
+ *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
+ *   - Async.h         background async I/O: thread pool + platform multiplexer (socket/file, sender-based)
+ *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
+ *   - WebViewJson.h   nlohmann auto-binding sugar for the WebView bridge (bindJson)
  *
- * 用法（Qt 风格，信号槽）：
+ * Usage (signals/slots):
  *   helios::App app;
  *   helios::Window win(800, 600, "title");
  *   win.keyPressed.connect(...);
  *   win.show();
- *   return app.exec();   // 消息循环，最后一个窗口关闭后退出
+ *   return app.exec();   // message loop; exits after the last window closes
  *
- * 所有函数均为 inline，无需链接额外的库（HeliosView.dll 除外，
- * 它由 CMake 目标 HeliosView::Core 自动传递）。
+ * All functions are inline; no extra library to link (except HeliosView.dll,
+ * which comes in via the HeliosView::Core CMake target automatically).
  */
 
 #include <HeliosViewCore/App.h>
+#include <HeliosViewCore/Async.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/Types.h>
+#include <HeliosViewCore/WebViewJson.h>
+#include <HeliosViewCore/WebViewWindow.h>
 #include <HeliosViewCore/Window.h>
 
 #include <string>
 
 namespace helios {
 
-/* ---------- 其他 ---------- */
+/* ---------- misc ---------- */
 
-// 返回库版本号，例如 "0.1.0"
+// The library version as a string, e.g. "0.1.0"
 inline std::string version()
 {
     return heliosview_version();

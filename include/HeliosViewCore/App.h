@@ -1,46 +1,57 @@
 #pragma once
 
 /**
- * HeliosView.Core —— App：消息循环 + 事件队列（Qt: QCoreApplication 简化版）。
+ * HeliosView.Core - App: message loop + event queue + idle task scheduling.
  *
- * 依赖：Types.h。窗口事件分发通过 detail::g_window_handlers 间接进行，
- * 不依赖 Window 的完整定义（由 Window.h 注册/注销）。
+ * Event dispatch goes through the C-layer window userdata (Window object
+ * pointer), so Window's complete definition is not required here
+ * (see the static_cast in loopCallback).
+ *
+ * Also acts as a std::execution::scheduler: senders from get_scheduler()
+ * complete on the UI thread while the loop is idle.
  */
 
+#include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
+#include <deque>
+#include <exception>
 #include <functional>
-#include <map>
+#include <mutex>
+#include <utility>
 
 namespace helios {
 
-namespace detail {
+struct app_scheduler; /* Forward declaration (defined below). */
 
-// 窗口事件分发器：window id → 窗口 event() 的虚调用封装（std::function）。
-// 由 Window 构造/移动时注册、销毁时注销；App::exec 据此把事件分发给对应窗口。
-inline std::map<int32_t, std::function<bool(const Event&)>> g_window_handlers;
-
-} // namespace detail
+class Window; /* Only used for the userdata static_cast. */
 
 class App {
 public:
+    // Create the application object; registers itself as the current instance
+    // (exactly one App is expected per process)
     App() { s_instance = this; }
+    // Destroy the application; clears the current instance if it is this object.
     virtual ~App() { if (s_instance == this) s_instance = nullptr; }
+    // Non-copyable: a process owns a single App
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    // 当前 App 实例（Qt: QApplication::instance）
+    // The current App instance, or nullptr before any App is constructed
     static App* instance() { return s_instance; }
 
-    // 进入消息循环（Qt: exec）。返回 0 正常退出。
-    // 最后一个窗口被销毁后自动退出循环（Qt: quitOnLastWindowClosed）。
+    // Run the message loop. Dispatches queued events to windows and runs idle
+    // tasks. Exits automatically when the last window is destroyed or after
+    // quit(). Returns 0 on normal exit.
     int exec() { return heliosview_run(&App::loopCallback, this); }
 
-    // 请求退出消息循环（Qt: quit）
+    // Request the message loop to exit. exec() returns normally.
     void quit() { heliosview_quit(); }
 
-    // 事件队列（SDL 风格）：从队列取事件，事件到达前 waitEvent 阻塞
+    // Event queue:
+    //   pollEvent - non-blocking fetch of the next pending event.
+    //   Returns true and fills out when an event is available, false when the queue is empty.
     bool pollEvent(Event& out)
     {
         heliosview_event_t c{};
@@ -50,6 +61,9 @@ public:
         }
         return false;
     }
+    //   waitEvent - blocking fetch of the next pending event (1 ms polling granularity).
+    //   Returns true and fills out when an event is available; false on quit request/error.
+    //   Blocks the calling thread; do not call on the message-loop thread.
     bool waitEvent(Event& out)
     {
         heliosview_event_t c{};
@@ -60,50 +74,120 @@ public:
         return false;
     }
 
-    // 任意线程投递事件（SDL: SDL_PushEvent / Qt: QCoreApplication::postEvent）
+    // Post an event to the queue; must be called on the message-loop thread
     void postEvent(const Event& e)
     {
         heliosview_event_t c = e.toC();
         heliosview_post_event(&c);
     }
 
-    // 注册原生消息 → 事件转换委托（C 函数指针，语义见 heliosview.h）
+    // Register a native-message -> event converter callback (see heliosview.h for
+    // the return-value contract). Pass nullptr to fall back to the built-in conversion.
     void setNativeHandler(heliosview_native_handler_fn handler)
     {
         heliosview_set_native_handler(handler);
     }
 
-    // App 级事件：窗口未处理时回调（Qt: QCoreApplication::notify）。
-    // 默认忽略；返回 true 表示已处理。
-    virtual bool event(const Event&) { return false; }
-
-private:
-    static int loopCallback(void* userdata)
+    // Post a task to the message loop; callable from any thread. fn runs on the
+    // UI thread while exec() is idle (this is the backing store of the App scheduler,
+    // the path for background tasks to return to the UI thread).
+    void postTask(std::function<void()> fn)
     {
-        auto* self = static_cast<App*>(userdata);
-
-        // 泵取全部排队事件，分发给目标窗口，未处理的上交 App::event()
-        Event ev;
-        while (self->pollEvent(ev)) {
-            if (ev.type == EventType::Quit) {
-                self->quit();
-                break;
-            }
-            auto it = detail::g_window_handlers.find(ev.windowId);
-            if (it != detail::g_window_handlers.end() && it->second(ev))
-                continue;
-            self->event(ev);
+        {
+            std::lock_guard<std::mutex> lock(m_task_mutex);
+            m_tasks.push_back(std::move(fn));
         }
-
-        // 窗口全部关闭 → 退出循环
-        if (detail::g_window_handlers.empty()) {
-            self->quit();
-            return 1;
-        }
-        return 0;
+        heliosview_wake_loop(); /* Wake the idle message loop. */
     }
 
+    // App-level event callback for unhandled window events.
+    // Ignored by default; override to handle app-wide events.
+    // Return true to mark the event handled.
+    virtual bool event(const Event&) { return false; }
+
+    // Scheduler for the UI thread: senders from schedule(get_scheduler()) complete
+    // on the UI thread while the loop is idle (see app_scheduler).
+    app_scheduler get_scheduler() noexcept;
+
+private:
+    // Run queued scheduler tasks while idle (UI thread only)
+    void drainTasks()
+    {
+        std::deque<std::function<void()>> tasks;
+        {
+            std::lock_guard<std::mutex> lock(m_task_mutex);
+            tasks.swap(m_tasks);
+        }
+        for (auto& fn : tasks)
+            if (fn)
+                fn();
+    }
+
+    static int loopCallback(void* userdata); /* Defined in Window.h (needs Window's complete type). */
+
+    std::mutex m_task_mutex;
+    std::deque<std::function<void()>> m_tasks;
     static inline App* s_instance = nullptr;
 };
+
+/* ---------- App scheduler (std::execution::scheduler) ----------
+ *
+ * A sender from schedule(app.get_scheduler()) completes downstream on the
+ * UI thread while the message loop is idle:
+ *   std::execution::schedule(app.get_scheduler()) | std::execution::then(fn)
+ *
+ * Note: avoid co_await-ing this scheduler inside coroutines (completion
+ * races await_suspend - stdexec frame-lifetime issue); prefer sync_wait/then
+ * or postTask for UI delivery.
+ */
+
+struct app_scheduler {
+    // The App that owns this scheduler; nullptr means an empty (never schedulable) scheduler
+    App* app = nullptr;
+
+    // Two schedulers are equal when they wrap the same App
+    bool operator==(const app_scheduler&) const = default;
+
+    struct sender {
+        using sender_concept = std::execution::sender_t;
+        using completion_signatures = std::execution::completion_signatures<
+            std::execution::set_value_t(),
+            std::execution::set_error_t(std::exception_ptr),
+            std::execution::set_stopped_t()>;
+
+        App* app;
+
+        template <std::execution::receiver Recv>
+        auto connect(Recv recv) const
+        {
+            struct operation_state {
+                using operation_state_concept = std::execution::operation_state_t;
+                App* app;
+                Recv recv;
+
+                void start() & noexcept
+                {
+                    app->postTask([this] {
+                        std::execution::set_value(std::move(recv));
+                    });
+                }
+            };
+            return operation_state{app, std::move(recv)};
+        }
+    };
+
+    // Schedule a task: the downstream of the returned sender completes on the UI
+    // thread while the message loop is idle (see the usage example above).
+    auto schedule() const noexcept { return sender{app}; }
+};
+
+static_assert(std::execution::scheduler<app_scheduler>);
+
+/* ---------- Implementation ---------- */
+
+inline app_scheduler App::get_scheduler() noexcept
+{
+    return {this};
+}
 
 } // namespace helios

@@ -1,10 +1,10 @@
 #pragma once
 
 /**
- * HeliosView.Core —— Window：顶层窗口（Qt: QWidget 简化版）。
+ * HeliosView.Core -- Window: top-level window.
  *
- * 依赖：Signal.h、Types.h、App.h（窗口注册表）。
- * 事件经 event() 分发为信号；信号槽用 window.keyPressed.connect(...) 连接。
+ * Depends on: Signal.h, Types.h, App.h (window registry).
+ * Events are dispatched to signals via event(); connect via window.keyPressed.connect(...).
  */
 
 #include <HeliosViewCore/App.h>
@@ -12,29 +12,35 @@
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
+#include <string>
 
 namespace helios {
 
 class Window {
 public:
-    // 创建窗口（原生窗口在 show() 时创建）
-    Window(int width, int height, const char* title)
-        : m_window(heliosview_window_create(width, height, title))
+    // Construct a window with the given client size, title and preset style.
+    // The native window is created lazily on the first show(). This object is
+    // stored as userdata on the C-layer window, which dispatches events through it.
+    Window(int width, int height, const char* title,
+           WindowStyle style = WindowStyle::Normal)
+        : m_window(heliosview_window_create_ex(width, height, title,
+                                               static_cast<heliosview_window_style_t>(style),
+                                               this))
     {
-        if (m_window)
-            registerHandler();
     }
 
+    // Destroy the window (closes the native window if it was shown)
     virtual ~Window() { close(); }
 
+    // Non-copyable: a Window uniquely owns its native window
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
+    // Move: transfers the native window; event dispatch continues to follow the new object
     Window(Window&& other) noexcept : m_window(other.m_window)
     {
         other.m_window = nullptr;
-        if (m_window)
-            registerHandler();
+        heliosview_window_set_userdata(m_window, this); /* after move, userdata points to the new object (null check lives in C layer) */
     }
 
     Window& operator=(Window&& other) noexcept
@@ -43,41 +49,114 @@ public:
             close();
             m_window = other.m_window;
             other.m_window = nullptr;
-            if (m_window)
-                registerHandler();
+            heliosview_window_set_userdata(m_window, this);
         }
         return *this;
     }
 
-    // 创建并显示原生窗口
+    // Create (if not yet created) and show the native window.
+    // The underlying C call reports errors as a return code (0 = success);
+    // use heliosview_window_show directly if you need to inspect it.
     void show() { heliosview_window_show(m_window); }
 
-    // 关闭并销毁窗口；若这是最后一个窗口，消息循环随之退出
+    // ---- window operations ----
+
+    // Show the window in the given state
+    void showState(ShowState state)
+    {
+        heliosview_window_show_state(m_window, static_cast<heliosview_show_state_t>(state));
+    }
+    // Show normally / minimized / maximized (convenience for showState)
+    void showNormal() { showState(ShowState::Normal); }
+    void showMinimized() { showState(ShowState::Minimized); }
+    void showMaximized() { showState(ShowState::Maximized); }
+
+    // The current show state of the window
+    ShowState state() const
+    {
+        return static_cast<ShowState>(heliosview_window_state(m_window));
+    }
+
+    // Request to close the window; goes through the event pipeline
+    // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
+    void requestClose() { heliosview_window_close(m_window); }
+
+    // Give the window focus (foreground activation + keyboard focus)
+    void focus() { heliosview_window_focus(m_window); }
+
+    // True if the window is currently visible (false when not shown / not created)
+    bool isVisible() const { return heliosview_window_is_visible(m_window) != 0; }
+
+    // ---- position and size ----
+
+    // Move the window so its top-left corner is at screen coordinates (x, y)
+    void move(int32_t x, int32_t y) { heliosview_window_set_position(m_window, x, y); }
+
+    // Query the window position in screen coordinates (top-left corner).
+    // Returns true on success, false on failure (x/y unchanged).
+    bool position(int32_t& x, int32_t& y) const
+    {
+        return heliosview_window_position(m_window, &x, &y) == 0;
+    }
+
+    // Resize the window's client area
+    void resize(int32_t width, int32_t height) { heliosview_window_set_size(m_window, width, height); }
+
+    // Query the window client size. Returns true on success, false on failure (width/height unchanged).
+    bool size(int32_t& width, int32_t& height) const
+    {
+        return heliosview_window_size(m_window, &width, &height) == 0;
+    }
+
+    // Set position and size in one call
+    void setGeometry(int32_t x, int32_t y, int32_t width, int32_t height)
+    {
+        move(x, y);
+        resize(width, height);
+    }
+
+    // Query position and size. Returns true only if both queries succeed.
+    bool geometry(int32_t& x, int32_t& y, int32_t& width, int32_t& height) const
+    {
+        return position(x, y) && size(width, height);
+    }
+
+    // ---- other window operations ----
+
+    // Set the window title (UTF-8). (C string / std::string overloads)
+    void setTitle(const char* title) { heliosview_window_set_title(m_window, title); }
+    void setTitle(const std::string& title) { heliosview_window_set_title(m_window, title.c_str()); }
+
+    // Center the window on the current monitor's work area
+    void center() { heliosview_window_center(m_window); }
+
+    // Set the window opacity (0.0 fully transparent to 1.0 opaque)
+    void setOpacity(float opacity) { heliosview_window_set_opacity(m_window, opacity); }
+
+    // Close and destroy the native window. If it was the last window, the message
+    // loop exits (null check lives in the C layer). Idempotent (also called by the destructor).
     void close()
     {
-        if (!m_window)
-            return;
-        detail::g_window_handlers.erase(id());
         heliosview_window_destroy(m_window);
         m_window = nullptr;
     }
 
-    // 窗口 id（事件中的 windowId）
-    int32_t id() const { return m_window ? heliosview_window_id(m_window) : 0; }
+    // The window id (the windowId field of events targeting this window; 0 before creation)
+    int32_t id() const { return heliosview_window_id(m_window); }
 
-    /* ===== 信号（Qt 风格：window.keyPressed.connect(...)） ===== */
+    /* ===== signals (window.keyPressed.connect(...)) ===== */
 
-    Signal<> closed;                                       // 窗口关闭请求（用户点 X），发射后默认销毁窗口
-    Signal<int32_t, int32_t> resized;                      // 尺寸变化 (w, h)
-    Signal<KeyCode> keyPressed;                            // 按键按下（已过滤自动重复）
-    Signal<KeyCode> keyReleased;                           // 按键抬起
-    Signal<int32_t, int32_t> mouseMoved;                   // 鼠标移动 (x, y)
-    Signal<int32_t, int32_t, MouseButton> mouseButtonPressed;  // 按下 (x, y, button)
-    Signal<int32_t, int32_t, MouseButton> mouseButtonReleased; // 抬起 (x, y, button)
+    Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
+    Signal<int32_t, int32_t> resized;                      // size changed (w, h)
+    Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered)
+    Signal<KeyCode> keyReleased;                           // key released
+    Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
+    Signal<int32_t, int32_t, MouseButton> mouseButtonPressed;  // pressed (x, y, button)
+    Signal<int32_t, int32_t, MouseButton> mouseButtonReleased; // released (x, y, button)
 
-    // 窗口事件处理（Qt: QWidget::event）。默认实现把事件转换为信号发射。
-    // 返回 true 表示已处理；未处理的会交给 App::event()。
-    // 如需阻止关闭（veto），重写本函数拦截 WindowClose 并返回 true。
+    // Window event handler. The default implementation emits signals from events.
+    // Return true if handled; unhandled events go to App::event().
+    // To veto a close, override this function, intercept WindowClose, and return true.
     virtual bool event(const Event& e)
     {
         switch (e.type) {
@@ -101,21 +180,54 @@ public:
             return true;
         case EventType::WindowClose:
             closed();
-            close(); /* 默认：关闭请求 → 销毁窗口（App 在最后一个窗口关闭后退出） */
+            close(); /* default: a close request destroys the window (App exits after the last one closes) */
             return true;
         default:
-            return false; /* Quit 等不属于窗口事件 */
+            return false; /* Quit and other non-window events */
         }
     }
 
-private:
-    // 注册事件分发器：窗口 id → 本对象 event() 的虚调用
-    void registerHandler()
-    {
-        detail::g_window_handlers[id()] = [this](const Event& e) { return event(e); };
-    }
+protected:
+    // The raw C window handle (nullptr if not created/closed); for subclass
+    // extension, e.g. WebViewWindow
+    heliosview_window_t* nativeHandle() const { return m_window; }
 
+private:
     heliosview_window_t* m_window = nullptr;
 };
+
+/* ---------- App message-loop callback (defined here: needs the complete Window type) ----------
+ * Events are dispatched via the C-layer window userdata (a Window object pointer); no C++-side registry */
+
+inline int App::loopCallback(void* userdata)
+{
+    auto* self = static_cast<App*>(userdata);
+
+    // Pump queued events to their target windows; unhandled ones go to App::event()
+    Event ev;
+    while (self->pollEvent(ev)) {
+        if (ev.type == EventType::Quit) {
+            self->quit();
+            break;
+        }
+        if (heliosview_window_t* win = heliosview_window_from_id(ev.windowId)) {
+            if (auto* w = static_cast<Window*>(heliosview_window_userdata(win))) {
+                if (w->event(ev))
+                    continue;
+            }
+        }
+        self->event(ev);
+    }
+
+    // Idle: run scheduled tasks (the path for background tasks to return to the UI thread)
+    self->drainTasks();
+
+    // All windows closed -> exit the loop
+    if (heliosview_window_count() == 0) {
+        self->quit();
+        return 1;
+    }
+    return 0;
+}
 
 } // namespace helios

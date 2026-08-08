@@ -9,23 +9,54 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# DLL 与演示 exe 输出到同一目录，运行时无需手动把 DLL 加到 PATH
+# DLLs and demo exes land in the same directory, so no manual PATH setup at runtime
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# ---------- Third-party dependencies (fetched via git) ----------
+
+include(FetchContent)
+
+# stdexec: reference implementation of P2300 senders/receivers (header-only).
+# HeliosView.Core depends on it; it propagates to consumers (exes) via
+# INTERFACE dependencies. Pinned to a main-branch commit for reproducible builds.
+set(STDEXEC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE) # don't build its own examples when vendored as a dependency
+FetchContent_Declare(
+    stdexec
+    GIT_REPOSITORY https://github.com/NVIDIA/stdexec.git
+    GIT_TAG b783aac907718fa0b92e99123883341142670d3e
+    SYSTEM
+)
+FetchContent_MakeAvailable(stdexec)
+
+# nlohmann/json: header-only JSON library used for the WebView bridge's
+# auto-parameter-binding sugar (WebViewJson.h). Same idea as stdexec: fetched
+# from the source, propagated to consumers via HeliosView::Core INTERFACE deps.
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE) # don't build its own tests when vendored
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    SYSTEM
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_subdirectory(src)
 
-# HeliosView.Core：header-only C++ 封装层（INTERFACE 库，只传播头文件路径与链接依赖）。
-# 使用者只需 target_link_libraries(... HeliosView::Core)，
-# 即可获得 C++ 头文件、C API 头文件路径以及 HeliosView.lib 导入库。
+# HeliosView.Core: header-only C++ wrapper (INTERFACE library; propagates only
+# include paths and link dependencies). Consumers just target_link_libraries(
+# ... HeliosView::Core) to get the C++ headers, C API header paths, and the
+# HeliosView.lib import library.
 add_library(HeliosView.Core INTERFACE)
 add_library(HeliosView::Core ALIAS HeliosView.Core)
 target_include_directories(HeliosView.Core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(HeliosView.Core INTERFACE HeliosView)
+# stdexec + nlohmann propagate via INTERFACE: targets linking HeliosView::Core
+# (e.g. the examples) automatically get their include paths and the C++23 requirement
+target_link_libraries(HeliosView.Core INTERFACE HeliosView STDEXEC::stdexec nlohmann_json::nlohmann_json)
 
 option(HELIOSVIEW_BUILD_EXAMPLES "Build the example executables" ON)
 if(HELIOSVIEW_BUILD_EXAMPLES)

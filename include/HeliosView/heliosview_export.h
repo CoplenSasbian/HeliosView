@@ -2,12 +2,13 @@
 #define HELIOSVIEW_HELIOSVIEW_EXPORT_H
 
 /**
- * HeliosView.dll 的 C 接口导出宏（纯 C 头文件，可被 C/C++ 包含）。
+ * Export macros for HeliosView.dll's C interface (a pure C header, includable
+ * from C/C++).
  *
- *   - HELIOSVIEW_EXPORTS  仅由 DLL 自身构建定义（见 src/CMakeLists.txt），
- *                         展开为 dllexport（MSVC）/ visibility("default")（GCC/Clang）
- *   - 使用者（未定义 HELIOSVIEW_EXPORTS）展开为 dllimport（MSVC）/ 空
- *   - 若以静态库链接，定义 HELIOSVIEW_STATIC 屏蔽两者
+ *   - HELIOSVIEW_EXPORTS  defined only by the DLL's own build (see src/CMakeLists.txt);
+ *                         expands to dllexport (MSVC) / visibility("default") (GCC/Clang)
+ *   - Consumers (HELIOSVIEW_EXPORTS undefined) expand to dllimport (MSVC) / empty
+ *   - When linking against a static library, define HELIOSVIEW_STATIC to disable both
  */
 
 #if defined(_WIN32) || defined(__CYGWIN__)
