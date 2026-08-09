@@ -38,7 +38,7 @@ struct heliosview_window {
     int32_t id = 0;
     int width = 0;
     int height = 0;
-    std::string title; /* UTF-8 */
+    std::wstring title; /* UTF-16 */
     heliosview_window_style_t style = HELIOSVIEW_WINDOW_NORMAL;
     HWND hwnd = nullptr;
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
@@ -472,7 +472,7 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             win->hwnd = hwnd;
             g_windows_by_hwnd[hwnd] = win;
         }
-        return DefWindowProc(hwnd, message, wparam, lparam);
+        return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
     /* WebViews attached to this window resize along with it */
@@ -530,7 +530,7 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     if (def == 0)
         return 0;
 
-    return DefWindowProc(hwnd, message, wparam, lparam);
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 } // namespace
@@ -575,12 +575,12 @@ int heliosview_run(heliosview_loop_callback frame_callback, void* userdata)
 
 /* ================= Window ================= */
 
-heliosview_window_t* heliosview_window_create(int width, int height, const char* title)
+heliosview_window_t* heliosview_window_create(int width, int height, const wchar_t* title)
 {
     return heliosview_window_create_ex(width, height, title, HELIOSVIEW_WINDOW_NORMAL, nullptr);
 }
 
-heliosview_window_t* heliosview_window_create_ex(int width, int height, const char* title,
+heliosview_window_t* heliosview_window_create_ex(int width, int height, const wchar_t* title,
                                                  heliosview_window_style_t style, void* userdata)
 {
     if (!title)
@@ -648,7 +648,7 @@ int heliosview_window_show(heliosview_window_t* window)
     wc.lpszClassName = L"HeliosViewWindow";
     RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
 
-    const std::wstring title = utf8_to_wide(window->title);
+    const std::wstring& title = window->title;
 
     /* compute the window size for the preset style (AdjustWindowRect is the identity for borderless styles) */
     const DWORD style = map_win32_style(window->style);
@@ -775,13 +775,12 @@ int heliosview_window_size(const heliosview_window_t* window, int32_t* out_width
     return 0;
 }
 
-int heliosview_window_set_title(heliosview_window_t* window, const char* title)
+int heliosview_window_set_title(heliosview_window_t* window, const wchar_t* title)
 {
     if (!window || !window->hwnd || !title)
         return -1;
-    const std::wstring wtitle = utf8_to_wide(title);
     window->title = title;
-    return SetWindowTextW(window->hwnd, wtitle.c_str()) ? 0 : -1;
+    return SetWindowTextW(window->hwnd, title) ? 0 : -1;
 }
 
 int heliosview_window_center(heliosview_window_t* window)

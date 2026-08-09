@@ -15,7 +15,7 @@
 // Custom window: subclass core's Window
 class MyWindow : public helios::Window {
 public:
-    MyWindow(int width, int height, const char* title,
+    MyWindow(int width, int height, const wchar_t* title,
              std::shared_ptr<helios::App> app, std::shared_ptr<helios::Async> async,
              helios::WindowStyle style = helios::WindowStyle::Normal)
         : Window(width, height, title, style)
@@ -47,7 +47,7 @@ private:
         case helios::KeyCode::F3: showNormal(); break;
         case helios::KeyCode::F4: center(); break;
         case helios::KeyCode::F5: setOpacity(m_opaque ? 0.5f : 1.0f); m_opaque = !m_opaque; break;
-        case helios::KeyCode::F6: setTitle(m_titleCount++ == 0 ? "Renamed Window" : "HeliosView App Demo"); break;
+        case helios::KeyCode::F6: setTitle(m_titleCount++ == 0 ? L"Renamed Window" : L"HeliosView App Demo"); break;
         case helios::KeyCode::F7: move(100, 100); break;
         case helios::KeyCode::F8: resize(640, 480); break;
         default: break;
@@ -96,10 +96,10 @@ int main()
 
     // One window per built-in style (held via shared_ptr: an async member
     // slot's task may outlive window close)
-    auto normal = std::make_shared<MyWindow>(420, 320, "Normal Window", app, async);
-    auto frameless = std::make_shared<MyWindow>(420, 320, "Frameless (bordered, no title bar)",
+    auto normal = std::make_shared<MyWindow>(420, 320, L"Normal Window", app, async);
+    auto frameless = std::make_shared<MyWindow>(420, 320, L"Frameless (bordered, no title bar)",
                                                 app, async, helios::WindowStyle::Frameless);
-    auto borderless = std::make_shared<MyWindow>(420, 320, "Borderless",
+    auto borderless = std::make_shared<MyWindow>(420, 320, L"Borderless",
                                                  app, async, helios::WindowStyle::Borderless);
     normal->show();
     frameless->show();

@@ -26,6 +26,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <wchar.h>
 
 #include <HeliosView/heliosview_export.h>
 
@@ -220,12 +221,12 @@ typedef enum heliosview_window_style {
  * caller (the C++ wrapper stores an object pointer) and retrieved via
  * heliosview_window_userdata. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_window_t* heliosview_window_create_ex(int width, int height,
-                                                                const char* title,
+                                                                const wchar_t* title,
                                                                 heliosview_window_style_t style,
                                                                 void* userdata);
 
 /* Create a standard window (no user data) */
-HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int height, const char* title);
+HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int height, const wchar_t* title);
 
 /* Window user data (object pointer used for event dispatch) */
 HELIOSVIEW_API void* heliosview_window_userdata(const heliosview_window_t* window);
@@ -280,8 +281,8 @@ HELIOSVIEW_API int heliosview_window_set_size(heliosview_window_t* window,
 HELIOSVIEW_API int heliosview_window_size(const heliosview_window_t* window,
                                           int32_t* out_width, int32_t* out_height);
 
-/* Set the window title (UTF-8). 0 = success */
-HELIOSVIEW_API int heliosview_window_set_title(heliosview_window_t* window, const char* title);
+/* Set the window title (wide chars; UTF-16 on Windows). 0 = success */
+HELIOSVIEW_API int heliosview_window_set_title(heliosview_window_t* window, const wchar_t* title);
 
 /* Center the window on screen (current monitor's work area). 0 = success */
 HELIOSVIEW_API int heliosview_window_center(heliosview_window_t* window);

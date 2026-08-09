@@ -21,7 +21,7 @@ public:
     // Construct a window with the given client size, title and preset style.
     // The native window is created lazily on the first show(). This object is
     // stored as userdata on the C-layer window, which dispatches events through it.
-    Window(int width, int height, const char* title,
+    Window(int width, int height, const wchar_t* title,
            WindowStyle style = WindowStyle::Normal)
         : m_window(heliosview_window_create_ex(width, height, title,
                                                static_cast<heliosview_window_style_t>(style),
@@ -123,9 +123,9 @@ public:
 
     // ---- other window operations ----
 
-    // Set the window title (UTF-8). (C string / std::string overloads)
-    void setTitle(const char* title) { heliosview_window_set_title(m_window, title); }
-    void setTitle(const std::string& title) { heliosview_window_set_title(m_window, title.c_str()); }
+    // Set the window title (wide chars, UTF-16 on Windows).
+    void setTitle(const wchar_t* title) { heliosview_window_set_title(m_window, title); }
+    void setTitle(const std::wstring& title) { heliosview_window_set_title(m_window, title.c_str()); }
 
     // Center the window on the current monitor's work area
     void center() { heliosview_window_center(m_window); }

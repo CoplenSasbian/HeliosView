@@ -52,7 +52,7 @@ int main()
     auto app = std::make_shared<helios::App>();
     auto async = std::make_shared<helios::Async>();
 
-    helios::Window window(800, 600, "HeliosView Async Slot Demo");
+    helios::Window window(800, 600, L"HeliosView Async Slot Demo");
     window.show();
 
     // Sync slot: window closed

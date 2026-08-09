@@ -9,7 +9,7 @@ int main()
     std::printf("HeliosView %s\n", helios::version().c_str());
 
     helios::App app;
-    helios::Window window(800, 600, "HeliosView Demo");
+    helios::Window window(800, 600, L"HeliosView Demo");
     window.show();
 
     // Signal/slot: connect lambdas directly, no Window subclassing
