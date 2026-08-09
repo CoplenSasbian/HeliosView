@@ -46,6 +46,7 @@
 
 #include <concepts>
 #include <exception>
+#include <functional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -275,6 +276,18 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
                             [](void* userdata) { delete static_cast<Fn*>(userdata); });
 }
 
+// Member-function overload of bindJson: wraps (obj, method) into a lambda that returns
+// the member's sender, then forwards to the generic bindJson<Req>.
+template <class Req, class Obj, class MFPtr>
+void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
+{
+    static_assert(std::is_member_function_pointer_v<MFPtr>,
+                  "bindJson member overload expects a member function pointer");
+    bindJson<Req>(name, [obj, method](Req req) {
+        return std::invoke(method, obj, std::move(req));
+    });
+}
+
 // ---------------------------------------------------------------------------
 // WebViewWindow::subscribeJson implementation (declared in WebViewWindow.h).
 //
@@ -320,6 +333,18 @@ void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
                                  &detail::SubscribeHandler<Req, Fn>::invoke,
                                  fn,
                                  [](void* userdata) { delete static_cast<Fn*>(userdata); });
+}
+
+// Member-function overload of subscribeJson: wraps (obj, method) into a lambda that
+// invokes the member, then forwards to the generic subscribeJson<Req>.
+template <class Req, class Obj, class MFPtr>
+void WebViewWindow::subscribeJson(const char* name, Obj* obj, MFPtr method)
+{
+    static_assert(std::is_member_function_pointer_v<MFPtr>,
+                  "subscribeJson member overload expects a member function pointer");
+    subscribeJson<Req>(name, [obj, method](Req req) {
+        std::invoke(method, obj, std::move(req));
+    });
 }
 
 } // namespace helios

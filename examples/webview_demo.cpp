@@ -7,6 +7,7 @@
 //   - a log panel on the page shows the same round-trip
 //   - broadcast() pushes a native -> JS message via BroadcastChannel
 //   - subscribeJson<Req>(): the page's BroadcastChannel postMessage -> native (JS -> native)
+//   - bindJson / subscribeJson also accept a member function: bindJson<Req>(name, obj, &Class::method)
 //   - eval() / evalAsync(): run JS from native (output on the terminal)
 // The bridge shim is injected into every page automatically.
 #include <HeliosViewCore/HeliosView.h>
@@ -27,6 +28,28 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GreetReq, name)
 
 struct MsgReq { std::string from; int n; };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MsgReq, from, n)
+
+struct RepeatReq { std::string s; int times; };
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RepeatReq, s, times)
+
+// A class whose member functions are bound to the JS bridge (member-function overload).
+struct Service {
+    // task<Resp> (Service::*)(RepeatReq)
+    std::execution::task<std::string> repeat(RepeatReq req)
+    {
+        std::string out;
+        for (int i = 0; i < req.times; ++i)
+            out += req.s;
+        std::println("[member] repeat(\"{}\", {}) -> {} chars", req.s, req.times, out.size());
+        co_return out;
+    }
+
+    // void (Service::*)(MsgReq), used by subscribeJson
+    void onStatus(MsgReq req)
+    {
+        std::println("[member] received JS broadcast on 'status': from={} n={}", req.from, req.n);
+    }
+};
 
 int main()
 {
@@ -81,6 +104,11 @@ int main()
         std::println("[native] received JS broadcast on 'status': from={} n={}", req.from, req.n);
     });
 
+    /* ---- member-function overloads: bind a Service member instead of a lambda ---- */
+    auto service = std::make_shared<Service>();
+    window->bindJson<RepeatReq>("repeat", service.get(), &Service::repeat);
+    window->subscribeJson<MsgReq>("status", service.get(), &Service::onStatus);
+
     /* ---- a page that uses the bridge ---- */
 
     window->navigateHtml(
@@ -95,6 +123,7 @@ int main()
         "<button onclick=\"run('greet', {name:'helios'})\">greet({name:'helios'})</button>"
         "<button onclick=\"run('fail', {})\">fail()</button>"
         "<button onclick=\"run('emit', {})\">emit() → 广播</button>"
+        "<button onclick=\"run('repeat', {s: 'ab', times: 3})\">repeat({s:'ab',times:3})</button>"
         "<button onclick=\"bcSend()\">bc.postMessage → native</button>"
         "</div>"
         "</div>"

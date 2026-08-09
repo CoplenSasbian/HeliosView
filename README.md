@@ -237,6 +237,25 @@ int main()
 }
 ```
 
+`bindJson` / `subscribeJson` also accept a **member function** — pass the object
+pointer (usually `this`) and the member pointer instead of a lambda:
+
+```cpp
+struct Service {
+    std::execution::task<std::string> repeat(RepeatReq req) { co_return req.s; }
+    void onStatus(MsgReq req) { /* ... */ }
+};
+
+auto service = std::make_shared<Service>();
+window->bindJson<RepeatReq>("repeat", service.get(), &Service::repeat);       // task<Resp> (Obj::*)(Req)
+window->subscribeJson<MsgReq>("status", service.get(), &Service::onStatus);   // void (Obj::*)(Req)
+```
+
+The member function's signature is the same as the lambda form (a
+`std::execution::task<Resp>` for `bindJson`, `void` for `subscribeJson`); the
+object is captured by pointer and must outlive the binding. const and
+non-const members both work.
+
 The bridge shim is injected into every page automatically and exposes:
 
 - **`window.helios.call(name, ...args)` → `Promise`** — invokes a native

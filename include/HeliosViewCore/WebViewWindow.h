@@ -113,6 +113,14 @@ public:
     template <class Req, class Fn>
     void bindJson(const char* name, Fn&& handler);
 
+    // Member-function overload of bindJson: bind a member function of `obj` (usually
+    // `this`) whose signature is `Sender (Obj::*)(Req)` and returns a sender (e.g.
+    // std::execution::task<Resp>). `obj` is captured by pointer and must outlive the
+    // binding. Example:
+    //   win.bindJson<AddReq>("add", this, &MyClass::add);
+    template <class Req, class Obj, class MFPtr>
+    void bindJson(const char* name, Obj* obj, MFPtr method);
+
     // Resolve a pending JS Promise (call_id from the bind callback). result_json is any
     // valid JSON value. Thread-safe: may be called from any thread.
     void resolve(uint64_t call_id, const char* result_json)
@@ -164,6 +172,13 @@ public:
     //   win.subscribeJson<StatusReq>("status", [](StatusReq req) { ... });
     template <class Req, class Fn>
     void subscribeJson(const char* name, Fn&& callback);
+
+    // Member-function overload of subscribeJson: subscribe a member function of `obj`
+    // (usually `this`) with signature `void (Obj::*)(Req)`. `obj` is captured by pointer
+    // and must outlive the subscription. Example:
+    //   win.subscribeJson<StatusReq>("status", this, &MyClass::onStatus);
+    template <class Req, class Obj, class MFPtr>
+    void subscribeJson(const char* name, Obj* obj, MFPtr method);
 
     // Remove the BroadcastChannel(name) subscription (running its dtor). UI-thread call.
     void unsubscribe(const char* name)
