@@ -280,8 +280,9 @@ struct JsonCallState {
 
 /* ---------- the C bind callback ---------- */
 
-// Parse the JS call's first argument into Req and run the handler as a detached task.
-template <class Sender, class Fn, class Req>
+// Parse each JS call argument (args[i]) into the matching Args[i] and run the
+// handler as a detached task. Supports zero, one, or many parameters.
+template <class Sender, class Fn, class... Args>
 struct JsonHandler {
     static void invoke(heliosview_webview_t* wv, uint64_t call_id,
                        const char* name, const char* args_json, void* userdata)
@@ -292,9 +293,12 @@ struct JsonHandler {
             nlohmann::json args = (args_json && *args_json)
                                       ? nlohmann::json::parse(args_json)
                                       : nlohmann::json::array();
-            Req req = args[0].get<Req>();
 
-            auto coro = fn->operator()(std::move(req));
+            auto make = [&]<std::size_t... I>(std::index_sequence<I...>) {
+                return fn->operator()(args[I].template get<Args>()...);
+            };
+            auto coro = make(std::index_sequence_for<Args...>{});
+
             auto* state = new JsonCallState<Sender>(std::move(coro), wv, call_id);
             std::execution::start(state->op); // state may be deleted inline on sync completion
         } catch (const std::exception& e) {
@@ -306,20 +310,21 @@ struct JsonHandler {
 };
 
 // Member-function bind trampoline removed: the member overloads now wrap (obj, method)
-// into a lambda and forward to the generic bindJson<Req> / subscribeJson<Req>.
+// into a lambda and forward to the generic bindJson<Args...> / subscribeJson<Req>.
 } // namespace detail
 
 // ---------------------------------------------------------------------------
 // WebViewWindow::bindJson implementation (declared in WebViewWindow.h).
 //
-// Req: the DTO to deserialize the JS call's first argument into (any type
-//      nlohmann::json can construct). Handler signature: (Req) -> std::execution::task<Resp>.
+// Args...: the parameter types deserialized from the JS call's arguments array
+//      (args[0] -> Args[0], args[1] -> Args[1], ...), each any type nlohmann::json
+//      can construct. Handler signature: (Args...) -> std::execution::task<Resp>.
 //      The handler may capture anything it needs (e.g. the window or an Async).
 // ---------------------------------------------------------------------------
-template <class Req, class Fn>
+template <class... Args, class Fn>
 void WebViewWindow::bindJson(const char* name, Fn&& handler)
 {
-    using Sender = std::decay_t<decltype(handler(std::declval<Req>()))>;
+    using Sender = std::decay_t<decltype(handler(std::declval<Args>()...))>;
     static_assert(std::execution::sender<Sender>,
                   "bindJson handler must return a sender (e.g. std::execution::task<Resp>)");
 
@@ -328,20 +333,20 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
     // userdata_dtor when the binding is replaced or the webview dies.
     auto* box = detail::pmrAllocate<Fn>(std::forward<Fn>(handler));
     heliosview_webview_bind(m_webview, name,
-                            &detail::JsonHandler<Sender, Fn, Req>::invoke,
+                            &detail::JsonHandler<Sender, Fn, Args...>::invoke,
                             box,
                             [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
 }
 
 // Member-function overload of bindJson: wraps (obj, method) into a lambda and forwards
-// to the generic bindJson<Req>. The object must outlive the binding.
-template <class Req, class Obj, class MFPtr>
+// to the generic bindJson<Args...>. The object must outlive the binding.
+template <class... Args, class Obj, class MFPtr>
 void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
 {
     static_assert(std::is_member_function_pointer_v<MFPtr>,
                   "bindJson member overload expects a member function pointer");
-    bindJson<Req>(name, [obj, method](Req req) {
-        return std::invoke(method, obj, std::move(req));
+    bindJson<Args...>(name, [obj, method](Args... args) {
+        return std::invoke(method, obj, std::move(args)...);
     });
 }
 

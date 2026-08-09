@@ -103,22 +103,22 @@ public:
     }
 
     // nlohmann auto-binding (declared here, defined in <HeliosViewCore/WebViewJson.h>):
-    // parses the JS call's first argument into a Req DTO, runs handler(Req) as a
-    // detached std::execution::task, and resolves the Promise with the serialized Resp
-    // (or rejects it with the error). Requires nlohmann::json; include WebViewJson.h
+    // parses the JS call's argument array into the Args... types, runs handler(Args...)
+    // as a detached std::execution::task, and resolves the Promise with the serialized
+    // Resp (or rejects it with the error). Requires nlohmann::json; include WebViewJson.h
     // before calling. Example:
-    //   win.bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<std::string> {
-    //       co_return std::format("{}", req.a + req.b);
+    //   win.bindJson<int, int>("add", [](int a, int b) -> std::execution::task<int> {
+    //       co_return a + b;
     //   });
-    template <class Req, class Fn>
+    template <class... Args, class Fn>
     void bindJson(const char* name, Fn&& handler);
 
     // Member-function overload of bindJson: bind a member function of `obj` (usually
-    // `this`) whose signature is `Sender (Obj::*)(Req)` and returns a sender (e.g.
+    // `this`) whose signature is `Sender (Obj::*)(Args...)` and returns a sender (e.g.
     // std::execution::task<Resp>). `obj` is captured by pointer and must outlive the
     // binding. Example:
-    //   win.bindJson<AddReq>("add", this, &MyClass::add);
-    template <class Req, class Obj, class MFPtr>
+    //   win.bindJson<int, int>("add", this, &MyClass::add);
+    template <class... Args, class Obj, class MFPtr>
     void bindJson(const char* name, Obj* obj, MFPtr method);
 
     // Resolve a pending JS Promise (call_id from the bind callback). result_json is any
