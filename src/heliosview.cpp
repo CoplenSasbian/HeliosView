@@ -13,10 +13,20 @@ const char* heliosview_version(void)
     return HELIOSVIEW_VERSION_STR;
 }
 
-/* ================= Event queue (lock-free) =================
- * The queue is accessed only by the message-loop thread (push and pop on the same
- * thread); cross-thread push requires external synchronization.
- * Blocking wait polls (1 ms granularity). */
+/* ================= Memory allocation ================= */
+
+void heliosview_set_allocator(const heliosview_allocator_t* allocator)
+{
+    if (allocator)
+        hv::g_allocator = *allocator;
+    else
+        hv::g_allocator = heliosview_allocator_t{}; /* restore malloc/free */
+}
+
+/* ================= Event queue (thread-local) =================
+ * The queue is thread-local: it lives on the message-loop thread (WndProc posts
+ * and poll/wait consume on the same thread). Cross-thread event access is not
+ * supported. */
 
 int heliosview_poll(heliosview_event_t* out_event)
 {

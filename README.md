@@ -25,6 +25,47 @@ boundary — other platforms re-implement `src/<platform>/` behind it.
 
 ---
 
+## Memory allocation
+
+HeliosView routes **all of its allocations through a single configurable
+allocator**, so they can come from a pool, arena, or other allocator instead of
+the process heap. This is one mechanism shared by the C API and the C++
+wrapper: configure it once and everything the library allocates follows.
+
+**The rule of thumb:** whatever you configure, **allocate and free must use the
+same allocator**, and you must configure it **before creating anything**
+(changing it while objects are alive is undefined behavior). Object
+construction and destruction still run normally (placement-new + destructor);
+only the underlying memory comes from the allocator.
+
+- **C** — `heliosview_set_allocator(&heliosview_allocator_t)` replaces the
+  library's default `malloc`/`free` with your own:
+
+  ```c
+  static void* my_alloc(size_t size, void* ctx) { (void)ctx; return pool_alloc(size); }
+  static void  my_free (void* p,    void* ctx) { (void)ctx; pool_free(p); }
+
+  int main(void) {
+      const heliosview_allocator_t a = { my_alloc, my_free, NULL };
+      heliosview_set_allocator(&a);   /* set once, before creating anything */
+      /* ... */
+  }
+  ```
+
+  Passing `NULL` to `heliosview_set_allocator` restores the default `malloc`/`free`.
+
+- **C++** — the wrapper builds on the same C allocator, and where it must store
+  state whose lifetime outlives a single call it uses the **default PMR memory
+  resource** (`std::pmr::get_default_resource()`). Point it at a pool with
+  `std::pmr::set_default_resource(...)` to control those allocations. Bindings
+  that point at a user-owned object are allocation-free.
+
+> **One line:** call `heliosview_set_allocator` (C) and point the PMR default
+> resource (C++) at your allocator before creating anything, and every
+> HeliosView allocation goes through it.
+
+---
+
 ## Building
 
 Requires CMake ≥ 4.3 and a C++23 compiler. Dependencies are vendored
@@ -147,9 +188,9 @@ Everything the pool can do comes in two interchangeable styles:
 | `async.fileOpen(path, write, cb)`       | `co_await async.fileOpenAsync(...)`  | `IoError` at the `co_await`   |
 | `async.fileRead(file, buf, len, off, cb)` | `co_await async.fileReadAsync(...)` | `IoError`                     |
 | `async.fileWrite(file, buf, len, off, cb)`| `co_await async.fileWriteAsync(...)`| `IoError`                     |
-| `async.tcpConnect(host, port, cb)`      | `co_await async.tcpConnectAsync(...)` | `IoError`                     |
-| `async.tcpWrite(socket, buf, len, cb)`  | `co_await async.tcpWriteAsync(...)`  | `IoError`                     |
-| `async.tcpReadStart/Stop`, `tcpReadAsync` | `co_await async.tcpReadAsync(...)` | `IoError`                     |
+| `async.connect(host, port, cb)`      | `co_await async.connectAsync(...)` | `IoError`                     |
+| `async.write(socket, buf, len, cb)`  | `co_await async.writeAsync(...)`  | `IoError`                     |
+| `async.read/Stop`, `readAsync` | `co_await async.readAsync(...)` | `IoError`                     |
 
 The sender APIs throw `helios::IoError` at the `co_await` point on failure
 (`IoError::code()` holds the negated platform error code):
@@ -163,10 +204,10 @@ std::execution::task<void> pipeline(helios::Async& async)
     helios::File f = co_await async.fileOpenAsync("data.bin", /*write=*/true);
     co_await async.fileWriteAsync(f, "hi", 2, 0);
 
-    helios::TcpSocket sock = co_await async.tcpConnectAsync("example.com", 80);
-    co_await async.tcpWriteAsync(sock, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n", 36);
+    helios::Socket sock = co_await async.connectAsync("example.com", 80);
+    co_await async.writeAsync(sock, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n", 36);
     char buf[4096];
-    uint32_t n = co_await async.tcpReadAsync(sock, buf, sizeof buf);
+    uint32_t n = co_await async.readAsync(sock, buf, sizeof buf);
 }
 
 int main()
@@ -177,11 +218,39 @@ int main()
 }
 ```
 
-The callback style is equally complete (`async.tcpConnect(...)` / `async.fileRead(...)`
+The callback style is equally complete (`async.connect(...)` / `async.fileRead(...)`
 / ...), with `int error` + result in the callback; on a synchronous submission
 error the callback fires inline on the calling thread. Handles
-(`TcpSocket`/`File`) are copyable/refcounted and close automatically when the
+(`Socket`/`File`) are copyable/refcounted and close automatically when the
 last copy dies; the `*Async` senders keep the handle alive for the operation.
+
+**Writing with `Buffer`** — `write` / `fileWrite` (callback) and `writeAsync` /
+`fileWriteAsync` (sender) take a `helios::Buffer`, whose construction makes data
+ownership explicit (no implicit borrow), so you control whether the write copies
+or not:
+
+```cpp
+std::vector<char> m_out;      // long-lived member
+
+co_await async.writeAsync(sock, helios::Buffer::copy(m_out));        // allocate + copy (safe)
+co_await async.writeAsync(sock, helios::Buffer::copy(m_out.data(), m_out.size()));
+co_await async.writeAsync(sock, helios::Buffer::ref(m_out));         // borrow, zero-copy; m_out
+                                                                     // MUST outlive the call
+co_await async.writeAsync(sock, m_out.data(), m_out.size());         // convenience: copies
+
+async.fileWrite(f, helios::Buffer::ref(m_out), 0, cb);               // callback form: zero-copy
+async.write(sock, helios::Buffer::copy(payload), cb);                // callback form: copies
+```
+
+- `Buffer::copy(...)` / `Buffer::alloc(n)` / `Buffer::take(pmr::vector)` → **owned**:
+  moved into the operation, zero-copy, always safe.
+- `Buffer::ref(...)` → **borrowed**: points at your data with no copy; the data must
+  stay alive until the write completes. Use it for long-lived members, never temporaries.
+- `copy`/`ref` accept `(pointer, size)`, `std::span`, and any contiguous byte container
+  (`std::vector<char>` / `std::vector<uint8_t>` / `std::string` / `std::array` /
+  `std::string_view`, ...).
+- Both the callback APIs (`write`/`fileWrite`) and the sender APIs (`writeAsync`/
+  `fileWriteAsync`) accept a `Buffer` with the same semantics.
 
 > **Threading:** callbacks and sender completions run on worker threads and may
 > fire concurrently — synchronize shared state. To get back to the UI thread,
@@ -303,9 +372,10 @@ app **without any C++**:
   `heliosview_window_*`)
 - the WebView bridge (`heliosview_webview_*`): JS ⇄ native calls, eval,
   bidirectional BroadcastChannel, all over JSON strings
-- async I/O (`heliosview_loop_*`, `heliosview_tcp_*`, `heliosview_file_*`)
+- async I/O (`heliosview_loop_*`, `heliosview_socket_*`, `heliosview_file_*`)
 
 This is a C translation of the C++ tutorial above (C99, `printf`-style).
+See **Memory allocation** at the top of this page for how the C allocator works.
 
 #### Window + message loop
 
@@ -428,11 +498,11 @@ fire concurrently; error codes are `0` = success, negative = negated platform
 error.
 
 ```c
-static void on_connect(int error, heliosview_tcp_t* tcp, void* userdata)
+static void on_connect(int error, heliosview_socket_t* tcp, void* userdata)
 {
     if (error) { printf("connect failed: %d\n", error); return; }
     static const char req[] = "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n";
-    heliosview_tcp_write(tcp, req, sizeof req - 1, on_write, NULL);
+    heliosview_socket_write(tcp, req, sizeof req - 1, on_write, NULL);
 }
 
 static void on_write(int error, uint32_t bytes, void* userdata)
@@ -450,7 +520,7 @@ static void on_open(int error, heliosview_file_t* file, void* userdata)
 int main(void)
 {
     heliosview_loop_t* loop = heliosview_loop_create(0);  /* 0 = hardware concurrency */
-    heliosview_tcp_connect(loop, "example.com", 80, on_connect, NULL);
+    heliosview_socket_connect(loop, "example.com", 80, on_connect, NULL);
 
     heliosview_file_open(loop, "data.bin", 1, on_open, NULL);  /* write mode */
 
@@ -460,7 +530,7 @@ int main(void)
 ```
 
 `heliosview_file_*` offsets are absolute (`int64_t`); the handle must be closed
-with `heliosview_file_close`/`heliosview_tcp_close`. See
+with `heliosview_file_close`/`heliosview_socket_close`. See
 `src/win32/heliosview_io_win32.cpp` for the reference implementation.
 
 > **Threading recap:** `resolve`/`reject`/`broadcast` may be called from any

@@ -47,6 +47,8 @@
 #include <concepts>
 #include <exception>
 #include <functional>
+#include <memory>
+#include <memory_resource>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -78,6 +80,58 @@ struct JsonError {
 };
 
 namespace detail {
+
+/* ---------- allocation through the default PMR memory resource ---------- */
+
+// The C bridge stores each binding's callable in a void* userdata that must outlive
+// the bind call. The lambda overloads of bindJson/subscribeJson therefore have to
+// store the handler somewhere; they allocate it through the **default PMR memory
+// resource** (std::pmr::get_default_resource()), so the app can redirect where these
+// allocations land with std::pmr::set_default_resource() (e.g. a pool / monotonic
+// buffer). The member-function overloads avoid this entirely (they point the userdata
+// at the user-owned object directly).
+
+// A heap copy of the handler whose first member records the memory_resource that
+// owns it (mirrors Async.h's Ctx pattern): pmrRelease reads it back instead of
+// re-querying the process default, so the binding stays correct even if the default
+// resource is swapped while the binding is alive.
+template <class Fn>
+struct pmr_box {
+    std::pmr::memory_resource* resource;
+    Fn value;
+
+    template <class... Args>
+    pmr_box(std::pmr::memory_resource* r, Args&&... args)
+        : resource(r), value(std::forward<Args>(args)...)
+    {
+    }
+};
+
+// Allocate and construct a callable of type T with the default PMR resource.
+template <class T, class... Args>
+pmr_box<T>* pmrAllocate(Args&&... args)
+{
+    auto* res = std::pmr::get_default_resource();
+    void* p = res->allocate(sizeof(pmr_box<T>), alignof(pmr_box<T>));
+    try {
+        return ::new (p) pmr_box<T>(res, std::forward<Args>(args)...);
+    } catch (...) {
+        res->deallocate(p, sizeof(pmr_box<T>), alignof(pmr_box<T>));
+        throw;
+    }
+}
+
+// Destroy and deallocate a pmr_box that was allocated via pmrAllocate, using the
+// resource recorded inside it (never re-queried from the process default).
+template <class T>
+void pmrRelease(pmr_box<T>* box) noexcept
+{
+    if (!box)
+        return;
+    auto* res = box->resource;
+    box->~pmr_box<T>();
+    res->deallocate(box, sizeof(pmr_box<T>), alignof(pmr_box<T>));
+}
 
 /* ---------- response serialization ---------- */
 
@@ -233,7 +287,7 @@ struct JsonHandler {
                        const char* name, const char* args_json, void* userdata)
     {
         (void)name;
-        auto* fn = static_cast<Fn*>(userdata);
+        auto* fn = &static_cast<pmr_box<Fn>*>(userdata)->value;
         try {
             nlohmann::json args = (args_json && *args_json)
                                       ? nlohmann::json::parse(args_json)
@@ -251,6 +305,8 @@ struct JsonHandler {
     }
 };
 
+// Member-function bind trampoline removed: the member overloads now wrap (obj, method)
+// into a lambda and forward to the generic bindJson<Req> / subscribeJson<Req>.
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -267,17 +323,18 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
     static_assert(std::execution::sender<Sender>,
                   "bindJson handler must return a sender (e.g. std::execution::task<Resp>)");
 
-    // The userdata is a heap copy of the handler (lifetime = the binding); the C layer
-    // destroys it via the userdata_dtor when the binding is replaced or the webview dies.
-    auto* fn = new Fn(std::forward<Fn>(handler));
+    // The userdata is a pmr_box (resource + handler copy) allocated through the
+    // default PMR resource (lifetime = the binding); the C layer destroys it via the
+    // userdata_dtor when the binding is replaced or the webview dies.
+    auto* box = detail::pmrAllocate<Fn>(std::forward<Fn>(handler));
     heliosview_webview_bind(m_webview, name,
                             &detail::JsonHandler<Sender, Fn, Req>::invoke,
-                            fn,
-                            [](void* userdata) { delete static_cast<Fn*>(userdata); });
+                            box,
+                            [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
 }
 
-// Member-function overload of bindJson: wraps (obj, method) into a lambda that returns
-// the member's sender, then forwards to the generic bindJson<Req>.
+// Member-function overload of bindJson: wraps (obj, method) into a lambda and forwards
+// to the generic bindJson<Req>. The object must outlive the binding.
 template <class Req, class Obj, class MFPtr>
 void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
 {
@@ -307,7 +364,7 @@ struct SubscribeHandler {
     {
         (void)wv;
         (void)name;
-        auto* fn = static_cast<Fn*>(userdata);
+        auto* fn = &static_cast<pmr_box<Fn>*>(userdata)->value;
         try {
             nlohmann::json data = (data_json && *data_json)
                                       ? nlohmann::json::parse(data_json)
@@ -326,17 +383,18 @@ void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
     static_assert(std::invocable<Fn&, Req>,
                   "subscribeJson callback must be callable with (Req)");
 
-    // The userdata is a heap copy of the callback (lifetime = the subscription);
-    // the C layer destroys it via the userdata_dtor when replaced or the webview dies.
-    auto* fn = new Fn(std::forward<Fn>(callback));
+    // The userdata is a pmr_box (resource + callback copy) allocated through the
+    // default PMR resource (lifetime = the subscription); the C layer destroys it via
+    // the userdata_dtor when replaced or the webview dies.
+    auto* box = detail::pmrAllocate<Fn>(std::forward<Fn>(callback));
     heliosview_webview_subscribe(m_webview, name,
                                  &detail::SubscribeHandler<Req, Fn>::invoke,
-                                 fn,
-                                 [](void* userdata) { delete static_cast<Fn*>(userdata); });
+                                 box,
+                                 [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
 }
 
-// Member-function overload of subscribeJson: wraps (obj, method) into a lambda that
-// invokes the member, then forwards to the generic subscribeJson<Req>.
+// Member-function overload of subscribeJson: wraps (obj, method) into a lambda and
+// forwards to the generic subscribeJson<Req>. The object must outlive the subscription.
 template <class Req, class Obj, class MFPtr>
 void WebViewWindow::subscribeJson(const char* name, Obj* obj, MFPtr method)
 {

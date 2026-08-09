@@ -14,13 +14,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <flat_map>
 #include <functional>
 #include <map>
+#include <memory_resource>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 #include <vector>
+
+/* flat_map backed by std::pmr::vector, so a WebView's binding/subscription tables
+ * allocate through the default PMR resource (set in main, after these runtime
+ * objects are created). The global tables below keep std::vector: as statics they
+ * are constructed before main, so a PMR default set later would not apply. */
+template <class K, class V>
+using hv_pmr_flat_map = std::flat_map<K, V, std::less<K>,
+                                      std::pmr::vector<K>, std::pmr::vector<V>>;
 
 /* ================= Window (completes the header's opaque declaration; must be at global scope) ================= */
 
@@ -73,8 +83,8 @@ struct heliosview_webview {
     /* JS <-> native bridge */
     DWORD ui_thread = GetCurrentThreadId();            /* thread that created the webview */
     EventRegistrationToken message_token{};            /* JS -> native messages */
-    std::map<std::string, hv_webview_binding> bindings; /* name -> binding (UI thread only) */
-    std::map<std::string, hv_webview_subscription> subscriptions; /* BroadcastChannel name -> subscription (UI thread only) */
+    hv_pmr_flat_map<std::string, hv_webview_binding> bindings; /* name -> binding (UI thread only) */
+    hv_pmr_flat_map<std::string, hv_webview_subscription> subscriptions; /* BroadcastChannel name -> subscription (UI thread only) */
 
     /* eval / eval_async queued while the WebView was still initializing */
     struct pending_op {
@@ -263,10 +273,10 @@ const char* kWebView2BridgeScript = R"JS(
 
 /* ================= WebView2 callbacks (hand-rolled COM: the new SDK's WRL no longer has the Callback helper) ================= */
 
-/* Minimal COM callback base: the IUnknown trio + refcount (created with new; Release to zero self-deletes) */
+/* Minimal COM callback base: the IUnknown trio + refcount (created with hv::hv_alloc; Release to zero self-deletes) */
 template <typename Interface>
 struct com_callback_base : public Interface {
-    virtual ~com_callback_base() = default; /* Release does `delete this` through the abstract base */
+    virtual ~com_callback_base() = default; /* Release does hv::hv_dealloc(this) through the virtual dtor */
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) noexcept override
     {
         if (riid == __uuidof(IUnknown) || riid == __uuidof(Interface)) {
@@ -282,7 +292,7 @@ struct com_callback_base : public Interface {
     {
         const ULONG refs = --m_refs;
         if (refs == 0)
-            delete this;
+            hv::hv_dealloc(this);
         return refs;
     }
     std::atomic<ULONG> m_refs{1};
@@ -377,9 +387,9 @@ HANDLE g_wakeup_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_event); }, true);
 
 std::atomic<int32_t> g_next_window_id{1};
-std::map<HWND, heliosview_window_t*> g_windows_by_hwnd;
-std::map<int32_t, heliosview_window_t*> g_windows_by_id; /* event dispatch: id → window */
-std::map<HWND, heliosview_webview_t*> g_webviews_by_hwnd; /* resize WebViews together with their window */
+std::flat_map<HWND, heliosview_window_t*> g_windows_by_hwnd;
+std::flat_map<int32_t, heliosview_window_t*> g_windows_by_id; /* event dispatch: id → window */
+std::flat_map<HWND, heliosview_webview_t*> g_webviews_by_hwnd; /* resize WebViews together with their window */
 
 /* ================= Default native-message → event conversion (Win32 MSG → event) ================= */
 
@@ -575,7 +585,7 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
 {
     if (!title)
         return nullptr;
-    auto* window = new heliosview_window;
+    auto* window = hv::hv_alloc<heliosview_window>();
     window->id = g_next_window_id.fetch_add(1);
     window->width = width;
     window->height = height;
@@ -617,7 +627,7 @@ void heliosview_window_destroy(heliosview_window_t* window)
         g_windows_by_hwnd.erase(window->hwnd);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */
     }
-    delete window;
+    hv::hv_dealloc(window);
 }
 
 int heliosview_window_show(heliosview_window_t* window)
@@ -895,20 +905,20 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
     if (!parent || !parent->hwnd)
         return nullptr;
 
-    auto* webview = new heliosview_webview;
+    auto* webview = hv::hv_alloc<heliosview_webview>();
     webview->parent = parent->hwnd;
     g_webviews_by_hwnd[parent->hwnd] = webview;
     webview->creating = true;
 
-    /* new + Release: hand the initial reference to the API (Release to zero deletes it when done) */
-    auto* env_handler = new env_completed_handler(
+    /* hv_alloc + Release: hand the initial reference to the API (Release to zero deletes it when done) */
+    auto* env_handler = hv::hv_alloc<env_completed_handler>(
         [webview](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
             if (FAILED(result)) {
                 webview->creating = false;
                 return result;
             }
             /* controller ready: display the WebView in the parent's client area */
-            auto* controller_handler = new controller_completed_handler(
+            auto* controller_handler = hv::hv_alloc<controller_completed_handler>(
                 [webview](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
                     webview->creating = false;
                     if (FAILED(result) || !controller)
@@ -921,7 +931,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                     controller->put_Bounds(rc);
 
                     /* JS -> native messaging */
-                    auto* msg_handler = new web_message_received_handler(
+                    auto* msg_handler = hv::hv_alloc<web_message_received_handler>(
                         [webview](ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
                             (void)sender;
                             LPWSTR raw = nullptr;
@@ -945,7 +955,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
 
                     /* shim: injected into every document (AddScriptToExecuteOnDocumentCreated
                      * runs on all future navigations automatically) */
-                    auto* script_handler = new add_script_completed_handler(
+                    auto* script_handler = hv::hv_alloc<add_script_completed_handler>(
                         [webview](HRESULT errorCode, LPCWSTR result) -> HRESULT {
                             (void)errorCode; (void)result;
                             webview->ready = true;
@@ -953,7 +963,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                             for (auto& op : webview->pending_ops) {
                                 const std::wstring wscript = utf8_to_wide(op.script);
                                 if (op.async) {
-                                    auto* eh = new execute_script_completed_handler(
+                                    auto* eh = hv::hv_alloc<execute_script_completed_handler>(
                                         [webview, op](HRESULT errorCode, LPCWSTR result) -> HRESULT {
                                             if (op.callback) {
                                                 const std::string out = result ? wide_to_utf8(result) : std::string{};
@@ -995,7 +1005,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
 
     if (FAILED(hr)) {
         g_webviews_by_hwnd.erase(webview->parent);
-        delete webview;
+        hv::hv_dealloc(webview);
         return nullptr;
     }
     return webview;
@@ -1010,17 +1020,17 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
     g_webviews_by_hwnd.erase(webview->parent);
     if (webview->webview && webview->message_token.value != 0)
         webview->webview->remove_WebMessageReceived(webview->message_token);
-    for (auto& [name, binding] : webview->bindings)
+    for (const auto& [name, binding] : webview->bindings)
         if (binding.dtor)
             binding.dtor(binding.userdata);
     webview->bindings.clear();
-    for (auto& [name, sub] : webview->subscriptions)
+    for (const auto& [name, sub] : webview->subscriptions)
         if (sub.dtor)
             sub.dtor(sub.userdata);
     webview->subscriptions.clear();
     webview->controller.Reset(); /* release the controller first; the parent window is destroyed afterwards */
     webview->webview.Reset();
-    delete webview;
+    hv::hv_dealloc(webview);
 }
 
 int heliosview_webview_navigate(heliosview_webview_t* webview, const char* url)
@@ -1125,7 +1135,7 @@ int heliosview_webview_eval_async(heliosview_webview_t* webview, const char* scr
         return 0;
     }
     const std::wstring wscript = utf8_to_wide(script);
-    auto* handler = new execute_script_completed_handler(
+    auto* handler = hv::hv_alloc<execute_script_completed_handler>(
         [wv = webview, callback, userdata](HRESULT errorCode, LPCWSTR result) -> HRESULT {
             if (callback) {
                 const std::string out = result ? wide_to_utf8(result) : std::string{};

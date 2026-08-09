@@ -1,6 +1,7 @@
 // HeliosView.dll -- Windows async I/O implementation: IOCP thread pool + async TCP/file.
 // Cross-platform interface: see heliosview.h (async I/O section); this file implements only the win32 part.
 #include <HeliosView/heliosview.h>
+#include "../heliosview_internal.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -22,9 +23,9 @@ enum class OpKind : uint8_t {
     Pool,       /* thread pool task (no OVERLAPPED) */
     Connect,    /* thread pool task: initiate connect (no OVERLAPPED) */
     Open,       /* thread pool task: open file (no OVERLAPPED) */
-    TcpConnect, /* IOCP completion: connect */
-    TcpWrite,   /* IOCP completion: send */
-    TcpRead,    /* IOCP completion: streaming receive */
+    SocketConnect, /* IOCP completion: connect */
+    SocketWrite,   /* IOCP completion: send */
+    SocketRead,    /* IOCP completion: streaming receive */
     FileRead,   /* IOCP completion: file read */
     FileWrite,  /* IOCP completion: file write */
 };
@@ -41,10 +42,10 @@ struct pool_task : task_base {
 
 struct connect_task : task_base {
     heliosview_loop* loop;
-    heliosview_tcp* tcp;
+    heliosview_socket* tcp;
     char host[256];
     uint16_t port;
-    heliosview_tcp_connect_cb cb;
+    heliosview_socket_connect_cb cb;
     void* userdata;
 };
 
@@ -62,28 +63,28 @@ struct io_op {
     OpKind kind;
 };
 
-struct tcp_connect_op : io_op {
+struct socket_connect_op : io_op {
     SOCKET socket;
     SOCKADDR_IN addr{};
-    heliosview_tcp* tcp;
-    heliosview_tcp_connect_cb cb;
+    heliosview_socket* tcp;
+    heliosview_socket_connect_cb cb;
     void* userdata;
 };
 
-struct tcp_write_op : io_op {
+struct socket_write_op : io_op {
     SOCKET socket;
     WSABUF wsa;
     heliosview_transfer_cb cb;
     void* userdata;
 };
 
-struct tcp_read_op : io_op {
+struct socket_read_op : io_op {
     SOCKET socket;
     WSABUF wsa;
     char buf[64 * 1024];
     heliosview_read_cb cb;
     void* userdata;
-    heliosview_tcp* tcp = nullptr;   /* owning tcp (for the termination protocol) */
+    heliosview_socket* tcp = nullptr;   /* owning tcp (for the termination protocol) */
     std::atomic<bool> cancelled{false}; /* set by read_stop/close, read by worker threads */
     bool tcp_owned = false;          /* close() transfers tcp ownership: freed together on cancellation */
 };
@@ -103,10 +104,10 @@ struct heliosview_loop {
     std::atomic<bool> stopping{false};
 };
 
-struct heliosview_tcp {
+struct heliosview_socket {
     heliosview_loop* loop;
     SOCKET socket = INVALID_SOCKET;
-    tcp_read_op* read_op = nullptr;  /* active streaming read (user-side access only) */
+    socket_read_op* read_op = nullptr;  /* active streaming read (user-side access only) */
     bool read_finished = false;      /* read finished (EOF/error): read_op may already be freed; close must not touch it */
 };
 
@@ -144,22 +145,22 @@ void release_winsock()
 
 /* ================= Worker threads ================= */
 
-/* TcpRead termination protocol:
+/* SocketRead termination protocol:
  *   - cancelled and close() transferred ownership (tcp_owned) -> worker frees tcp together with the op
  *   - cancelled via read_stop only (!tcp_owned) -> clear read_op, allow read_start again
  *   - EOF/error (not cancelled) -> set read_finished; close() no longer touches this op */
-void finish_read_op(tcp_read_op* r)
+void finish_read_op(socket_read_op* r)
 {
     if (r->cancelled.load()) {
         if (r->tcp_owned) {
-            delete r->tcp; /* close() has transferred tcp ownership to this op */
+            hv::hv_dealloc(r->tcp); /* close() has transferred tcp ownership to this op */
         } else {
             r->tcp->read_op = nullptr; /* read_stop(): reading can be restarted */
         }
     } else {
         r->tcp->read_finished = true; /* EOF/error: op is finished */
     }
-    delete r;
+    hv::hv_dealloc(r);
 }
 
 void worker_main(heliosview_loop* loop)
@@ -181,7 +182,7 @@ void worker_main(heliosview_loop* loop)
             case OpKind::Pool: {
                 auto* t = static_cast<pool_task*>(task);
                 t->cb(0, t->userdata);
-                delete t;
+                hv::hv_dealloc(t);
                 break;
             }
             case OpKind::Connect:
@@ -191,7 +192,7 @@ void worker_main(heliosview_loop* loop)
                 do_open(static_cast<open_task*>(task));
                 break;
             default:
-                delete task;
+                hv::hv_dealloc(task);
                 break;
             }
             continue;
@@ -202,29 +203,29 @@ void worker_main(heliosview_loop* loop)
         const int error = ok ? 0 : -(int)GetLastError();
 
         switch (op->kind) {
-        case OpKind::TcpConnect: {
-            auto* c = static_cast<tcp_connect_op*>(op);
+        case OpKind::SocketConnect: {
+            auto* c = static_cast<socket_connect_op*>(op);
             if (error == 0) {
                 setsockopt(c->socket, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, nullptr, 0);
                 c->cb(0, c->tcp, c->userdata);
             } else {
                 closesocket(c->socket);
-                delete c->tcp;
+                hv::hv_dealloc(c->tcp);
                 c->cb(error, nullptr, c->userdata);
             }
-            delete c;
+            hv::hv_dealloc(c);
             break;
         }
 
-        case OpKind::TcpWrite: {
-            auto* w = static_cast<tcp_write_op*>(op);
+        case OpKind::SocketWrite: {
+            auto* w = static_cast<socket_write_op*>(op);
             w->cb(error, bytes, w->userdata);
-            delete w;
+            hv::hv_dealloc(w);
             break;
         }
 
-        case OpKind::TcpRead: {
-            auto* r = static_cast<tcp_read_op*>(op);
+        case OpKind::SocketRead: {
+            auto* r = static_cast<socket_read_op*>(op);
             if (r->cancelled.load()) {
                 finish_read_op(r); /* cancelled: release silently */
                 break;
@@ -262,12 +263,12 @@ void worker_main(heliosview_loop* loop)
         case OpKind::FileWrite: {
             auto* f = static_cast<file_io_op*>(op);
             f->cb(error, bytes, f->userdata);
-            delete f;
+            hv::hv_dealloc(f);
             break;
         }
 
         default:
-            delete op; /* unreachable */
+            hv::hv_dealloc(op); /* unreachable */
             break;
         }
     }
@@ -280,9 +281,9 @@ void do_connect(connect_task* task) /* on a worker thread: resolve + initiate Co
     const auto fail = [&](int error) {
         if (task->tcp->socket != INVALID_SOCKET)
             closesocket(task->tcp->socket);
-        delete task->tcp;
+        hv::hv_dealloc(task->tcp);
         task->cb(error, nullptr, task->userdata);
-        delete task;
+        hv::hv_dealloc(task);
     };
 
     char port_str[8];
@@ -323,8 +324,8 @@ void do_connect(connect_task* task) /* on a worker thread: resolve + initiate Co
         return fail(-4);
     }
 
-    auto* op = new tcp_connect_op;
-    op->kind = OpKind::TcpConnect;
+    auto* op = hv::hv_alloc<socket_connect_op>();
+    op->kind = OpKind::SocketConnect;
     op->socket = s;
     op->addr = *reinterpret_cast<SOCKADDR_IN*>(res->ai_addr);
     op->tcp = task->tcp;
@@ -336,12 +337,12 @@ void do_connect(connect_task* task) /* on a worker thread: resolve + initiate Co
                     nullptr, 0, nullptr, &op->ov)) {
         const int err = WSAGetLastError();
         if (err != ERROR_IO_PENDING) {
-            delete op;
+            hv::hv_dealloc(op);
             return fail(-err);
         }
     }
     /* Pending or immediate: the completion is posted to the IOCP either way */
-    delete task;
+    hv::hv_dealloc(task);
 }
 
 void do_open(open_task* task) /* on a worker thread: CreateFile + associate with IOCP */
@@ -352,7 +353,7 @@ void do_open(open_task* task) /* on a worker thread: CreateFile + associate with
                            FILE_FLAG_OVERLAPPED, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         task->cb(-(int)GetLastError(), nullptr, task->userdata);
-        delete task;
+        hv::hv_dealloc(task);
         return;
     }
     if (!CreateIoCompletionPort(h, task->loop->iocp,
@@ -360,14 +361,14 @@ void do_open(open_task* task) /* on a worker thread: CreateFile + associate with
         const int err = -(int)GetLastError();
         CloseHandle(h);
         task->cb(err, nullptr, task->userdata);
-        delete task;
+        hv::hv_dealloc(task);
         return;
     }
-    auto* file = new heliosview_file;
+    auto* file = hv::hv_alloc<heliosview_file>();
     file->loop = task->loop;
     file->handle = h;
     task->cb(0, file, task->userdata);
-    delete task;
+    hv::hv_dealloc(task);
 }
 
 } // namespace
@@ -377,7 +378,7 @@ void do_open(open_task* task) /* on a worker thread: CreateFile + associate with
 heliosview_loop_t* heliosview_loop_create(unsigned thread_count)
 {
     ensure_winsock();
-    auto* loop = new heliosview_loop;
+    auto* loop = hv::hv_alloc<heliosview_loop>();
     loop->iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
     loop->stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!loop->iocp || !loop->stop_event) {
@@ -385,7 +386,7 @@ heliosview_loop_t* heliosview_loop_create(unsigned thread_count)
             CloseHandle(loop->iocp);
         if (loop->stop_event)
             CloseHandle(loop->stop_event);
-        delete loop;
+        hv::hv_dealloc(loop);
         release_winsock();
         return nullptr;
     }
@@ -407,7 +408,7 @@ void heliosview_loop_destroy(heliosview_loop_t* loop)
         w.join();
     CloseHandle(loop->iocp);
     CloseHandle(loop->stop_event);
-    delete loop;
+    hv::hv_dealloc(loop);
     release_winsock();
 }
 
@@ -433,12 +434,12 @@ int heliosview_loop_post(heliosview_loop_t* loop, heliosview_completion_cb fn, v
 {
     if (!loop || !fn)
         return -1;
-    auto* task = new pool_task;
+    auto* task = hv::hv_alloc<pool_task>();
     task->kind = OpKind::Pool;
     task->cb = fn;
     task->userdata = userdata;
     if (!PostQueuedCompletionStatus(loop->iocp, 0, reinterpret_cast<ULONG_PTR>(task), nullptr)) {
-        delete task;
+        hv::hv_dealloc(task);
         return -1;
     }
     return 0;
@@ -446,16 +447,16 @@ int heliosview_loop_post(heliosview_loop_t* loop, heliosview_completion_cb fn, v
 
 /* ================= Async TCP ================= */
 
-int heliosview_tcp_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
-                           heliosview_tcp_connect_cb on_connect, void* userdata)
+int heliosview_socket_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
+                           heliosview_socket_connect_cb on_connect, void* userdata)
 {
     if (!loop || !host || !on_connect)
         return -1;
 
-    auto* task = new connect_task;
+    auto* task = hv::hv_alloc<connect_task>();
     task->kind = OpKind::Connect;
     task->loop = loop;
-    task->tcp = new heliosview_tcp;
+    task->tcp = hv::hv_alloc<heliosview_socket>();
     task->tcp->loop = loop;
     task->port = port;
     task->cb = on_connect;
@@ -463,20 +464,20 @@ int heliosview_tcp_connect(heliosview_loop_t* loop, const char* host, uint16_t p
     std::snprintf(task->host, sizeof(task->host), "%s", host);
 
     if (!PostQueuedCompletionStatus(loop->iocp, 0, reinterpret_cast<ULONG_PTR>(task), nullptr)) {
-        delete task->tcp;
-        delete task;
+        hv::hv_dealloc(task->tcp);
+        hv::hv_dealloc(task);
         return -1;
     }
     return 0;
 }
 
-int heliosview_tcp_write(heliosview_tcp_t* tcp, const void* data, uint32_t len,
+int heliosview_socket_write(heliosview_socket_t* tcp, const void* data, uint32_t len,
                          heliosview_transfer_cb on_write, void* userdata)
 {
     if (!tcp || !data || !on_write)
         return -1;
-    auto* op = new tcp_write_op;
-    op->kind = OpKind::TcpWrite;
+    auto* op = hv::hv_alloc<socket_write_op>();
+    op->kind = OpKind::SocketWrite;
     op->socket = tcp->socket;
     op->wsa.buf = const_cast<char*>(static_cast<const char*>(data));
     op->wsa.len = len;
@@ -486,21 +487,21 @@ int heliosview_tcp_write(heliosview_tcp_t* tcp, const void* data, uint32_t len,
     const int rc = WSASend(tcp->socket, &op->wsa, 1, &sent, 0, &op->ov, nullptr);
     if (rc != 0 && WSAGetLastError() != WSA_IO_PENDING) {
         const int err = -(int)WSAGetLastError();
-        delete op;
+        hv::hv_dealloc(op);
         return err;
     }
     return 0;
 }
 
-int heliosview_tcp_read_start(heliosview_tcp_t* tcp, heliosview_read_cb on_read, void* userdata)
+int heliosview_socket_read_start(heliosview_socket_t* tcp, heliosview_read_cb on_read, void* userdata)
 {
     if (!tcp || !on_read)
         return -1;
     if (tcp->read_op && !tcp->read_finished)
         return -2; /* already reading */
     tcp->read_op = nullptr; /* clear stale pointer from a finished read */
-    auto* op = new tcp_read_op;
-    op->kind = OpKind::TcpRead;
+    auto* op = hv::hv_alloc<socket_read_op>();
+    op->kind = OpKind::SocketRead;
     op->socket = tcp->socket;
     op->tcp = tcp;
     op->wsa.buf = op->buf;
@@ -514,13 +515,13 @@ int heliosview_tcp_read_start(heliosview_tcp_t* tcp, heliosview_read_cb on_read,
     const int rc = WSARecv(tcp->socket, &op->wsa, 1, &received, &flags, &op->ov, nullptr);
     if (rc != 0 && WSAGetLastError() != WSA_IO_PENDING) {
         tcp->read_op = nullptr;
-        delete op;
+        hv::hv_dealloc(op);
         return -(int)WSAGetLastError();
     }
     return 0;
 }
 
-void heliosview_tcp_read_stop(heliosview_tcp_t* tcp)
+void heliosview_socket_read_stop(heliosview_socket_t* tcp)
 {
     if (!tcp || !tcp->read_op || tcp->read_finished)
         return;
@@ -529,7 +530,7 @@ void heliosview_tcp_read_stop(heliosview_tcp_t* tcp)
     /* op freed by the worker when cancellation completes (tcp stays caller-owned; read_start may restart) */
 }
 
-void heliosview_tcp_close(heliosview_tcp_t* tcp)
+void heliosview_socket_close(heliosview_socket_t* tcp)
 {
     if (!tcp)
         return;
@@ -541,7 +542,7 @@ void heliosview_tcp_close(heliosview_tcp_t* tcp)
     }
     closesocket(tcp->socket);
     if (!active_read)
-        delete tcp; /* no active read (incl. finished): free directly */
+        hv::hv_dealloc(tcp); /* no active read (incl. finished): free directly */
 }
 
 /* ================= Async file ================= */
@@ -552,7 +553,7 @@ int heliosview_file_open(heliosview_loop_t* loop, const char* path, int write_mo
     if (!loop || !path || !on_open)
         return -1;
 
-    auto* task = new open_task;
+    auto* task = hv::hv_alloc<open_task>();
     task->kind = OpKind::Open;
     task->loop = loop;
     task->write_mode = write_mode != 0;
@@ -561,14 +562,14 @@ int heliosview_file_open(heliosview_loop_t* loop, const char* path, int write_mo
 
     const int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
     if (n <= 0) {
-        delete task;
+        hv::hv_dealloc(task);
         return -1;
     }
     task->path.resize(n - 1);
     MultiByteToWideChar(CP_UTF8, 0, path, -1, task->path.data(), n);
 
     if (!PostQueuedCompletionStatus(loop->iocp, 0, reinterpret_cast<ULONG_PTR>(task), nullptr)) {
-        delete task;
+        hv::hv_dealloc(task);
         return -1;
     }
     return 0;
@@ -579,7 +580,7 @@ int heliosview_file_read(heliosview_file_t* file, void* buf, uint32_t len, int64
 {
     if (!file || !buf || !on_read)
         return -1;
-    auto* op = new file_io_op;
+    auto* op = hv::hv_alloc<file_io_op>();
     op->kind = OpKind::FileRead;
     op->file = file->handle;
     op->cb = on_read;
@@ -589,7 +590,7 @@ int heliosview_file_read(heliosview_file_t* file, void* buf, uint32_t len, int64
     const BOOL ok = ReadFile(file->handle, buf, len, nullptr, &op->ov);
     if (!ok && GetLastError() != ERROR_IO_PENDING) {
         const int err = -(int)GetLastError();
-        delete op;
+        hv::hv_dealloc(op);
         return err;
     }
     return 0;
@@ -600,7 +601,7 @@ int heliosview_file_write(heliosview_file_t* file, const void* buf, uint32_t len
 {
     if (!file || !buf || !on_write)
         return -1;
-    auto* op = new file_io_op;
+    auto* op = hv::hv_alloc<file_io_op>();
     op->kind = OpKind::FileWrite;
     op->file = file->handle;
     op->cb = on_write;
@@ -610,7 +611,7 @@ int heliosview_file_write(heliosview_file_t* file, const void* buf, uint32_t len
     const BOOL ok = WriteFile(file->handle, buf, len, nullptr, &op->ov);
     if (!ok && GetLastError() != ERROR_IO_PENDING) {
         const int err = -(int)GetLastError();
-        delete op;
+        hv::hv_dealloc(op);
         return err;
     }
     return 0;
@@ -621,5 +622,5 @@ void heliosview_file_close(heliosview_file_t* file)
     if (!file)
         return;
     CloseHandle(file->handle);
-    delete file;
+    hv::hv_dealloc(file);
 }

@@ -5,7 +5,7 @@
  *
  * The Windows implementation is built on IOCP (thread pool); the API is
  * platform-independent, so other platforms only need to reimplement the C layer.
- * Callbacks are C++ callables (std::function / lambda; may safely capture handle
+ * Callbacks are C++ callables (lambdas / move-only callables; may safely capture handle
  * copies).
  *
  * Error semantics: callbacks receive error == 0 on success, otherwise a negative
@@ -14,7 +14,7 @@
  *
  * Threading model: all callbacks run on background worker threads (possibly
  * concurrently); shared state must be synchronized by the caller.
- * Handle semantics: TcpSocket / File are copyable handles (shared ownership);
+ * Handle semantics: Socket / File are copyable handles (shared ownership);
  * the last copy automatically closes the underlying handle on destruction (RAII);
  * close() is idempotent.
  * Lifetime: no operations may be pending when Async is destroyed.
@@ -25,7 +25,7 @@
  *   - every callback API has a sender-based *Async counterpart (failures are
  *     reported as set_error(IoError)):
  *       fileOpenAsync / fileReadAsync / fileWriteAsync
- *       tcpConnectAsync / tcpWriteAsync / tcpReadAsync (single-shot read)
+ *       connectAsync / writeAsync / readAsync (single-shot read)
  */
 
 #include <HeliosView/heliosview.h>
@@ -37,6 +37,7 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -45,37 +46,38 @@
 
 namespace helios {
 
-/* ---------- TCP connection handle (copyable, refcounted; closed when the last copy dies) ---------- */
+/* ---------- Copyable, refcounted RAII handle over a raw C handle ----------
+ * Closed (idempotently) when the last copy dies. CloseFn is a C close function such
+ * as heliosview_socket_close / heliosview_file_close. Socket and File are aliases. */
 
-class TcpSocket {
+template <class Ctx, void (*Close)(Ctx*)>
+class RefHandle {
 public:
-    // Default-construct an empty handle (owns no socket; operator bool() is false)
-    TcpSocket() = default;
-    // Wrap a raw C handle, taking ownership: the connection is closed when the last copy dies (RAII)
-    explicit TcpSocket(heliosview_tcp_t* handle) : m_state(std::make_shared<State>(handle)) {}
-    // Copy/move: share ownership with other handles (refcounted); the connection
-    // is closed automatically when the last copy dies
-    TcpSocket(const TcpSocket&) = default;
-    TcpSocket& operator=(const TcpSocket&) = default;
-    TcpSocket(TcpSocket&&) noexcept = default;
-    TcpSocket& operator=(TcpSocket&&) noexcept = default;
+    // Default-construct an empty handle (owns nothing; operator bool() is false)
+    RefHandle() = default;
+    // Wrap a raw C handle, taking ownership: closed when the last copy dies (RAII)
+    explicit RefHandle(Ctx* handle) : m_state(std::make_shared<State>(handle)) {}
+    // Copy/move: share ownership with other handles (refcounted)
+    RefHandle(const RefHandle&) = default;
+    RefHandle& operator=(const RefHandle&) = default;
+    RefHandle(RefHandle&&) noexcept = default;
+    RefHandle& operator=(RefHandle&&) noexcept = default;
 
-    // True if this handle owns a live connection (i.e. connect succeeded); false when empty or closed
+    // True if this handle owns a live resource; false when empty or closed
     explicit operator bool() const { return m_state && m_state->handle; }
-    // The raw C handle of the underlying connection (nullptr when empty); do not close it directly
-    heliosview_tcp_t* handle() const { return m_state ? m_state->handle : nullptr; }
-
-    // Explicitly close the connection (idempotent): afterwards, no copy's destructor will close again
+    // The raw C handle (nullptr when empty); do not close it directly
+    Ctx* handle() const { return m_state ? m_state->handle : nullptr; }
+    // Explicitly close (idempotent): afterwards no copy's destructor closes again
     void close() const { if (m_state) m_state->close(); }
 
 private:
     struct State {
-        heliosview_tcp_t* handle;
+        Ctx* handle;
         ~State() { close(); }
         void close()
         {
             if (handle) {
-                heliosview_tcp_close(handle);
+                Close(handle);
                 handle = nullptr;
             }
         }
@@ -83,42 +85,127 @@ private:
     std::shared_ptr<State> m_state;
 };
 
-/* ---------- File handle (copyable, refcounted; closed when the last copy dies) ---------- */
+// A TCP connection handle; closes the connection when the last copy dies
+using Socket = RefHandle<heliosview_socket_t, heliosview_socket_close>;
+// A file handle; closes the file when the last copy dies
+using File = RefHandle<heliosview_file_t, heliosview_file_close>;
 
-class File {
+/* ---------- Buffer: an owned or borrowed byte buffer for writes ----------
+ * Used by write / fileWrite (callback) and writeAsync / fileWriteAsync (sender).
+ * Ownership is explicit, not implicit:
+ *   - Buffer::copy(ptr, n) / copy(container) : allocate + copy            -> owned
+ *   - Buffer::alloc(n)                        : allocate n writable bytes  -> owned
+ *   - Buffer::take(pmr::vector<char>)         : take ownership (no copy)   -> owned
+ *   - Buffer::ref(ptr, n) / ref(container)    : borrow (no copy); the caller MUST
+ *     keep the data alive until the write completes (ownership outlives the call).
+ * copy/ref accept (pointer, size), std::span and any contiguous byte container
+ * (std::vector<char>/<uint8_t>, std::string, std::array, std::string_view, ...).
+ * The Buffer is moved into the operation (zero-copy): an owning Buffer carries its
+ * data; a borrowed (ref) Buffer points at caller-owned data. Use copy() (or the
+ * (const void*, len) convenience) when you cannot guarantee that lifetime. */
+class Buffer {
 public:
-    // Default-construct an empty handle (owns no file; operator bool() is false)
-    File() = default;
-    // Wrap a raw C handle, taking ownership: the file is closed when the last copy dies (RAII)
-    explicit File(heliosview_file_t* handle) : m_state(std::make_shared<State>(handle)) {}
-    // Copy/move: share ownership with other handles (refcounted); the file is
-    // closed automatically when the last copy dies
-    File(const File&) = default;
-    File& operator=(const File&) = default;
-    File(File&&) noexcept = default;
-    File& operator=(File&&) noexcept = default;
+    Buffer() = default;
 
-    // True if this handle owns a live file (i.e. open succeeded); false when empty or closed
-    explicit operator bool() const { return m_state && m_state->handle; }
-    // The raw C handle of the underlying file (nullptr when empty); do not close it directly
-    heliosview_file_t* handle() const { return m_state ? m_state->handle : nullptr; }
+    // ref (explicit): borrowed view over [data, data+len); the caller keeps the data
+    // alive until the send completes. Use Buffer::ref for a clear, explicit borrow.
+    explicit Buffer(const void* data, size_t len)
+        : m_ptr(static_cast<const char*>(data)), m_len(len), m_owns(false)
+    {
+    }
+    // ref (explicit): borrowed view over a string
+    explicit Buffer(const std::string& s) : Buffer(s.data(), s.size()) {}
+    // ref (explicit): borrowed view over a contiguous byte range
+    explicit Buffer(std::span<const char> s) : Buffer(s.data(), s.size()) {}
 
-    // Explicitly close the file (idempotent): afterwards, no copy's destructor will close again
-    void close() const { if (m_state) m_state->close(); }
+    // ref: explicit borrowed view; the caller must keep the data alive until the send
+    // completes (ownership outlives the writeAsync call). No copy happens.
+    static Buffer ref(const void* data, size_t len) { return Buffer(data, len); }
+    static Buffer ref(std::span<const char> s) { return Buffer(s); }
+    // ref: borrowed view over any contiguous byte container (vector, string, array, string_view, ...)
+    template <class R>
+        requires requires (const R& c) { c.data(); c.size(); }
+    static Buffer ref(const R& c) { return ref(c.data(), c.size()); }
+
+    // owned: allocate len writable bytes (e.g. for reads, or fill-then-send)
+    static Buffer alloc(size_t len)
+    {
+        Buffer b;
+        b.m_storage.resize(len);
+        b.m_ptr = b.m_storage.data();
+        b.m_len = len;
+        b.m_owns = true;
+        return b;
+    }
+    // owned: allocate + copy
+    static Buffer copy(const void* data, size_t len)
+    {
+        Buffer b = alloc(len);
+        if (len)
+            std::memcpy(b.data(), data, len);
+        return b;
+    }
+    static Buffer copy(std::span<const char> s) { return copy(s.data(), s.size()); }
+    // copy: allocate + copy from any contiguous byte container (vector, string, array, string_view, ...)
+    template <class R>
+        requires requires (const R& c) { c.data(); c.size(); }
+    static Buffer copy(const R& c) { return copy(c.data(), c.size()); }
+    // owned: take ownership of an existing buffer (no copy); do not use `data` afterwards
+    static Buffer take(std::pmr::vector<char> data)
+    {
+        Buffer b;
+        b.m_storage = std::move(data);
+        b.m_ptr = b.m_storage.data();
+        b.m_len = b.m_storage.size();
+        b.m_owns = true;
+        return b;
+    }
+
+    // Copy: owned buffers copy their storage; a ref copies just the view.
+    Buffer(const Buffer& o)
+        : m_len(o.m_len), m_owns(o.m_owns), m_storage(o.m_storage)
+    {
+        m_ptr = m_owns ? m_storage.data() : o.m_ptr;
+    }
+    Buffer& operator=(const Buffer& o)
+    {
+        if (this != &o) {
+            m_storage = o.m_storage;
+            m_len = o.m_len;
+            m_owns = o.m_owns;
+            m_ptr = m_owns ? m_storage.data() : o.m_ptr;
+        }
+        return *this;
+    }
+    // Move: owned storage moves; the source is emptied.
+    Buffer(Buffer&& o) noexcept
+        : m_len(o.m_len), m_owns(o.m_owns), m_storage(std::move(o.m_storage))
+    {
+        m_ptr = m_owns ? m_storage.data() : o.m_ptr;
+        o.m_ptr = nullptr; o.m_len = 0; o.m_owns = false;
+    }
+    Buffer& operator=(Buffer&& o) noexcept
+    {
+        if (this != &o) {
+            m_storage = std::move(o.m_storage);
+            m_len = o.m_len;
+            m_owns = o.m_owns;
+            m_ptr = m_owns ? m_storage.data() : o.m_ptr;
+            o.m_ptr = nullptr; o.m_len = 0; o.m_owns = false;
+        }
+        return *this;
+    }
+
+    const char* data() const { return m_ptr; }
+    char* data() { return const_cast<char*>(m_ptr); } /* writable only when owned (alloc) */
+    size_t size() const { return m_len; }
+    bool owns() const { return m_owns; }
 
 private:
-    struct State {
-        heliosview_file_t* handle;
-        ~State() { close(); }
-        void close()
-        {
-            if (handle) {
-                heliosview_file_close(handle);
-                handle = nullptr;
-            }
-        }
-    };
-    std::shared_ptr<State> m_state;
+    const char* m_ptr = nullptr;
+    size_t m_len = 0;
+    bool m_owns = false;
+    std::pmr::vector<char> m_storage; /* backing store when owned */
 };
 
 /* ---------- Async I/O failure exception (the set_error payload of senders) ---------- */
@@ -144,7 +231,7 @@ private:
 namespace detail {
 
 /* ---------- Allocator hooks (Ctx structs for async ops) ----------
- * Each in-flight operation's Ctx (the std::function + buffers) is allocated with
+ * Each in-flight operation's Ctx (the concrete callable + buffers) is allocated with
  * std::pmr::get_default_resource(), so the allocator can be swapped process-wide
  * via std::pmr::set_default_resource (the "P" in pmr). Every Ctx stores its owning
  * memory_resource as its first member, so the trampoline's destroyCtx (which only
@@ -180,12 +267,12 @@ inline void destroyCtx(Ctx* ctx) noexcept
     }
 }
 
-// One heap-allocated Ctx per operation (holds the std::function and any buffers); freed when the callback fires
+// One heap-allocated Ctx per operation (holds the concrete callable and any buffers); freed when the callback fires
 template <typename Ctx>
 void completionTramp(int error, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn(error);
+    ctx->fn(error);
     destroyCtx(ctx);
 }
 
@@ -194,7 +281,7 @@ void postTramp(int error, void* userdata)
 {
     (void)error;
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn();
+    ctx->fn();
     destroyCtx(ctx);
 }
 
@@ -202,7 +289,7 @@ template <typename Ctx>
 void transferTramp(int error, uint32_t bytes, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn(error, bytes);
+    ctx->fn(error, bytes);
     destroyCtx(ctx);
 }
 
@@ -210,15 +297,15 @@ template <typename Ctx>
 void readTramp(int error, const char* data, uint32_t len, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn(error, data, len);
+    ctx->fn(error, data, len);
     destroyCtx(ctx);
 }
 
 template <typename Ctx>
-void connectTramp(int error, heliosview_tcp_t* tcp, void* userdata)
+void connectTramp(int error, heliosview_socket_t* tcp, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn(error, TcpSocket(tcp));
+    ctx->fn(error, Socket(tcp));
     destroyCtx(ctx);
 }
 
@@ -226,7 +313,7 @@ template <typename Ctx>
 void openTramp(int error, heliosview_file_t* file, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
-    if (ctx->fn) ctx->fn(error, File(file));
+    ctx->fn(error, File(file));
     destroyCtx(ctx);
 }
 
@@ -291,283 +378,166 @@ struct loop_scheduler {
 
 static_assert(std::execution::scheduler<loop_scheduler>);
 
-/* ---------- Internal: sender-based async operations (*Async) ---------- */
+/* ---------- Generic one-shot sender over a C async op ----------
+ *
+ * The op's C callback signature is fixed per op, but the connected receiver (Recv)
+ * is known only at connect() time. To let a shared C tramp reach it, the operation
+ * state type-erases delivery through op_sink: a tramp decodes the raw C result into
+ * a Value and calls sink->complete(), which the op_state overrides to deliver
+ * set_value/set_error to the receiver. Each op is a small Config providing
+ * value_t / data_t / start(); the sender/operation-state machinery is shared. */
 
 namespace detail {
 
-struct file_open_sender {
+// Type-erased completion channel for a completion value of type ValueT.
+// Implemented by the operation state (which owns the receiver).
+template <class ValueT>
+struct op_sink {
+    virtual ~op_sink() = default;
+    virtual void complete(int error, const void* value) = 0; /* value = &ValueT on success, else nullptr */
+    virtual void* op_data() noexcept = 0;                    /* the op's data (Config::data_t) */
+};
+
+// The per-connect operation state: owns the op data + the connected receiver.
+template <class Config, class Recv>
+struct op_state : op_sink<typename Config::value_t> {
+    using operation_state_concept = std::execution::operation_state_t;
+
+    typename Config::data_t data;
+    Recv recv;
+
+    op_state(typename Config::data_t d, Recv r)
+        : data(std::move(d))
+        , recv(std::move(r))
+    {
+    }
+
+    void start() & noexcept
+    {
+        const int rc = Config::start(static_cast<op_sink<typename Config::value_t>*>(this), data);
+        if (rc != 0)
+            std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
+    }
+
+    void complete(int error, const void* value) override
+    {
+        if (error == 0)
+            std::execution::set_value(std::move(recv),
+                                      *static_cast<const typename Config::value_t*>(value));
+        else
+            std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(error)));
+    }
+
+    void* op_data() noexcept override { return &data; }
+};
+
+// Generic sender: connect() wires a Config-provided C op to a receiver.
+template <class Config>
+struct op_sender {
     using sender_concept = std::execution::sender_t;
     using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(File),
+        std::execution::set_value_t(typename Config::value_t),
         std::execution::set_error_t(std::exception_ptr)>;
 
-    heliosview_loop_t* loop;
-    std::string path;
-    bool write_mode = false;
+    typename Config::data_t data;
 
     template <std::execution::receiver Recv>
     auto connect(Recv recv) const
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            heliosview_loop_t* loop;
-            std::string path;
-            bool write_mode;
-            Recv recv;
-
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_file_open(loop, path.c_str(), write_mode ? 1 : 0,
-                                                    &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, heliosview_file_t* file, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0)
-                    std::execution::set_value(std::move(self->recv), File(file));
-                else
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-            }
-        };
-        return operation_state{loop, path, write_mode, std::move(recv)};
+        return op_state<Config, Recv>{data, std::move(recv)};
     }
 };
 
-/* fileReadAsync: buf is caller-held and must stay valid until completion */
-struct file_read_sender {
-    using sender_concept = std::execution::sender_t;
-    using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(uint32_t),
-        std::execution::set_error_t(std::exception_ptr)>;
+// Shared tramp for ops whose success value is built straight from one C arg:
+// Config::make(arg) on success, ValueT{} on error.
+template <class Config, class CArg>
+void simple_tramp(int error, CArg arg, void* userdata)
+{
+    auto* sink = static_cast<op_sink<typename Config::value_t>*>(userdata);
+    typename Config::value_t value = (error == 0) ? Config::make(arg) : typename Config::value_t{};
+    sink->complete(error, &value);
+}
 
-    File file; /* keeps the handle alive for the operation */
-    void* buf;
-    uint32_t len;
-    int64_t offset;
+/* ---- op configs: value_t + data_t + start(); make() where applicable ---- */
 
-    template <std::execution::receiver Recv>
-    auto connect(Recv recv) const
+struct file_open_config {
+    using value_t = File;
+    using data_t = struct { heliosview_loop_t* loop; std::string path; bool write_mode; };
+    static File make(heliosview_file_t* f) { return File(f); }
+    static int start(void* sink, data_t& d)
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            File file;
-            void* buf;
-            uint32_t len;
-            int64_t offset;
-            Recv recv;
-
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_file_read(file.handle(), buf, len, offset,
-                                                    &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, uint32_t bytes, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0)
-                    std::execution::set_value(std::move(self->recv), bytes);
-                else
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-            }
-        };
-        return operation_state{file, buf, len, offset, std::move(recv)};
+        return heliosview_file_open(d.loop, d.path.c_str(), d.write_mode ? 1 : 0,
+                                    &simple_tramp<file_open_config, heliosview_file_t*>, sink);
     }
 };
 
-/* fileWriteAsync: data is copied inside the sender */
-struct file_write_sender {
-    using sender_concept = std::execution::sender_t;
-    using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(uint32_t),
-        std::execution::set_error_t(std::exception_ptr)>;
-
-    File file;
-    std::pmr::vector<char> data;
-    int64_t offset;
-
-    template <std::execution::receiver Recv>
-    auto connect(Recv recv) const
+struct file_read_config {
+    using value_t = uint32_t;
+    using data_t = struct { File file; void* buf; uint32_t len; int64_t offset; };
+    static uint32_t make(uint32_t b) { return b; }
+    static int start(void* sink, data_t& d)
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            File file;
-            std::pmr::vector<char> data;
-            int64_t offset;
-            Recv recv;
-
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_file_write(file.handle(), data.data(),
-                                                     static_cast<uint32_t>(data.size()),
-                                                     offset, &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, uint32_t bytes, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0)
-                    std::execution::set_value(std::move(self->recv), bytes);
-                else
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-            }
-        };
-        return operation_state{file, data, offset, std::move(recv)};
+        return heliosview_file_read(d.file.handle(), d.buf, d.len, d.offset,
+                                    &simple_tramp<file_read_config, uint32_t>, sink);
     }
 };
 
-struct tcp_connect_sender {
-    using sender_concept = std::execution::sender_t;
-    using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(TcpSocket),
-        std::execution::set_error_t(std::exception_ptr)>;
-
-    heliosview_loop_t* loop;
-    std::string host;
-    uint16_t port = 0;
-
-    template <std::execution::receiver Recv>
-    auto connect(Recv recv) const
+struct file_write_config {
+    using value_t = uint32_t;
+    using data_t = struct { File file; Buffer data; int64_t offset; };
+    static uint32_t make(uint32_t b) { return b; }
+    static int start(void* sink, data_t& d)
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            heliosview_loop_t* loop;
-            std::string host;
-            uint16_t port;
-            Recv recv;
-
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_tcp_connect(loop, host.c_str(), port,
-                                                      &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, heliosview_tcp_t* tcp, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0)
-                    std::execution::set_value(std::move(self->recv), TcpSocket(tcp));
-                else
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-            }
-        };
-        return operation_state{loop, host, port, std::move(recv)};
+        return heliosview_file_write(d.file.handle(), d.data.data(),
+                                     static_cast<uint32_t>(d.data.size()), d.offset,
+                                     &simple_tramp<file_write_config, uint32_t>, sink);
     }
 };
 
-/* tcpWriteAsync: data is copied inside the sender */
-struct tcp_write_sender {
-    using sender_concept = std::execution::sender_t;
-    using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(uint32_t),
-        std::execution::set_error_t(std::exception_ptr)>;
-
-    TcpSocket socket;
-    std::pmr::vector<char> data;
-
-    template <std::execution::receiver Recv>
-    auto connect(Recv recv) const
+struct socket_connect_config {
+    using value_t = Socket;
+    using data_t = struct { heliosview_loop_t* loop; std::string host; uint16_t port; };
+    static Socket make(heliosview_socket_t* t) { return Socket(t); }
+    static int start(void* sink, data_t& d)
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            TcpSocket socket;
-            std::pmr::vector<char> data;
-            Recv recv;
-
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_tcp_write(socket.handle(), data.data(),
-                                                    static_cast<uint32_t>(data.size()),
-                                                    &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, uint32_t bytes, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0)
-                    std::execution::set_value(std::move(self->recv), bytes);
-                else
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-            }
-        };
-        return operation_state{socket, data, std::move(recv)};
+        return heliosview_socket_connect(d.loop, d.host.c_str(), d.port,
+                                      &simple_tramp<socket_connect_config, heliosview_socket_t*>, sink);
     }
 };
 
-/* tcpReadAsync: single-shot read (at most len bytes); stops re-reading after
-   completion. Payload uint32_t (bytes read; 0 = peer closed); buf is caller-held */
-struct tcp_read_sender {
-    using sender_concept = std::execution::sender_t;
-    using completion_signatures = std::execution::completion_signatures<
-        std::execution::set_value_t(uint32_t),
-        std::execution::set_error_t(std::exception_ptr)>;
-
-    TcpSocket socket;
-    void* buf;
-    uint32_t len;
-
-    template <std::execution::receiver Recv>
-    auto connect(Recv recv) const
+struct socket_write_config {
+    using value_t = uint32_t;
+    using data_t = struct { Socket socket; Buffer data; };
+    static uint32_t make(uint32_t b) { return b; }
+    static int start(void* sink, data_t& d)
     {
-        struct operation_state {
-            using operation_state_concept = std::execution::operation_state_t;
-            TcpSocket socket;
-            void* buf;
-            uint32_t len;
-            Recv recv;
+        return heliosview_socket_write(d.socket.handle(), d.data.data(),
+                                     static_cast<uint32_t>(d.data.size()),
+                                     &simple_tramp<socket_write_config, uint32_t>, sink);
+    }
+};
 
-            /* The operation state itself is used as the C callback's userdata
-             * (its lifetime spans the whole operation), so no per-op heap
-             * allocation */
-            void start() & noexcept
-            {
-                const int rc = heliosview_tcp_read_start(socket.handle(),
-                                                         &operation_state::tramp, this);
-                if (rc != 0)
-                    std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(rc)));
-            }
-
-            static void tramp(int error, const char* data, uint32_t len, void* userdata) noexcept
-            {
-                auto* self = static_cast<operation_state*>(userdata);
-                if (error == 0) {
-                    const uint32_t got = std::min<uint32_t>(len, self->len);
-                    if (got != 0 && self->buf)
-                        std::memcpy(self->buf, data, got);
-                    heliosview_tcp_read_stop(self->socket.handle()); /* single-shot read: stop re-reading */
-                    std::execution::set_value(std::move(self->recv), got);
-                } else {
-                    std::execution::set_error(std::move(self->recv), std::make_exception_ptr(IoError(error)));
-                }
-            }
-        };
-        return operation_state{socket, buf, len, std::move(recv)};
+// tcp_read: single-shot read; its tramp needs the op data (len/buf/socket).
+struct socket_read_config {
+    using value_t = uint32_t;
+    using data_t = struct { Socket socket; void* buf; uint32_t len; };
+    static int start(void* sink, data_t& d)
+    {
+        return heliosview_socket_read_start(d.socket.handle(), &socket_read_tramp, sink);
+    }
+    static void socket_read_tramp(int error, const char* data, uint32_t len, void* userdata)
+    {
+        auto* sink = static_cast<op_sink<uint32_t>*>(userdata);
+        auto& d = *static_cast<data_t*>(sink->op_data());
+        if (error != 0) {
+            sink->complete(error, nullptr);
+            return;
+        }
+        const uint32_t got = std::min<uint32_t>(len, d.len);
+        if (got != 0 && d.buf)
+            std::memcpy(d.buf, data, got);
+        heliosview_socket_read_stop(d.socket.handle()); /* single-shot read: stop re-reading */
+        sink->complete(0, &got);
     }
 };
 
@@ -598,18 +568,17 @@ public:
     // Post a task to the thread pool: fn runs on a worker thread.
     // If the pool cannot accept the task (e.g. already stopped), fn runs
     // synchronously on the calling thread instead.
-    void post(std::function<void()> fn)
+    template <class Fn>
+    void post(Fn&& fn)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void()> fn;
+            F fn;
         };
-        auto fnCopy = std::move(fn);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fnCopy);
-        if (heliosview_loop_post(m_loop, &detail::postTramp<Ctx>, ctx) != 0) {
-            detail::destroyCtx(ctx);
-            fnCopy();
-        }
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(fn));
+        if (heliosview_loop_post(m_loop, &detail::postTramp<Ctx>, ctx) != 0)
+            detail::postTramp<Ctx>(0, ctx); /* submission failed: run inline, then free */
     }
 
     // ---- async TCP (callback API) ----
@@ -622,45 +591,50 @@ public:
     // onConnect(error, socket):
     //   error == 0 -> socket owns the connected connection (valid until closed/destroyed)
     //   error != 0 -> failed; socket is empty (operator bool() is false)
-    void tcpConnect(const std::string& host, uint16_t port,
-                    std::function<void(int error, TcpSocket socket)> onConnect)
+    template <class Fn>
+    void connect(const std::string& host, uint16_t port, Fn&& onConnect)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, TcpSocket)> fn;
+            F fn;
         };
-        auto fn = std::move(onConnect);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn);
-        const int rc = heliosview_tcp_connect(m_loop, host.c_str(), port, &detail::connectTramp<Ctx>, ctx);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onConnect));
+        const int rc = heliosview_socket_connect(m_loop, host.c_str(), port, &detail::connectTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, Socket{});
             detail::destroyCtx(ctx);
-            fn(rc, TcpSocket{});
         }
     }
 
-    // Async write of len bytes at data to the connection.
-    // data is copied internally, so the caller's buffer may be freed/reused as soon
-    // as this returns (data must be non-null when len > 0).
-    // onWrite(error, bytes):
-    //   error == 0 -> bytes bytes written (may be less than len)
-    //   error != 0 -> failed; bytes is 0
-    void tcpWrite(const TcpSocket& socket, const void* data, uint32_t len,
-                  std::function<void(int error, uint32_t bytes)> onWrite)
+    // write of a Buffer: an owning Buffer (alloc/copy/take) is moved into the operation
+    // (zero-copy); a borrowed (ref) Buffer is used directly — its data must outlive the
+    // write (fire-and-forget). Use Buffer::copy for a safe copy.
+    template <class Fn>
+    void write(const Socket& socket, Buffer data, Fn&& onWrite)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, uint32_t)> fn;
-            std::pmr::vector<char> buf;
+            F fn;
+            Buffer data;
         };
-        auto fn = std::move(onWrite);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn, std::pmr::vector<char>{});
-        if (data && len != 0)
-            ctx->buf.assign(static_cast<const char*>(data), static_cast<const char*>(data) + len);
-        const int rc = heliosview_tcp_write(socket.handle(), ctx->buf.data(), len, &detail::transferTramp<Ctx>, ctx);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onWrite), std::move(data));
+        const int rc = heliosview_socket_write(socket.handle(), ctx->data.data(),
+                                               static_cast<uint32_t>(ctx->data.size()),
+                                               &detail::transferTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, 0);
             detail::destroyCtx(ctx);
-            fn(rc, 0);
         }
+    }
+
+    // write of len bytes: copies data (Buffer::copy); the caller's buffer may be freed
+    // as soon as this returns (data must be non-null when len > 0).
+    template <class Fn>
+    void write(const Socket& socket, const void* data, uint32_t len, Fn&& onWrite)
+    {
+        write(socket, Buffer::copy(data, len), std::forward<Fn>(onWrite));
     }
 
     // Start streaming reads: the callback fires once per received chunk and reads
@@ -669,29 +643,29 @@ public:
     //   error == 0 && len > 0 -> a data chunk of len bytes
     //   error == 0 && len == 0 -> the peer closed; no further callbacks
     //   error != 0             -> read failed; no further callbacks
-    // Stop with tcpReadStop() (unless already ended via the end/error callback).
-    void tcpReadStart(const TcpSocket& socket,
-                      std::function<void(int error, const char* data, uint32_t len)> onRead)
+    // Stop with readStop() (unless already ended via the end/error callback).
+    template <class Fn>
+    void read(const Socket& socket, Fn&& onRead)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, const char*, uint32_t)> fn;
+            F fn;
         };
-        auto fn = std::move(onRead);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn);
-        const int rc = heliosview_tcp_read_start(socket.handle(), &detail::readTramp<Ctx>, ctx);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onRead));
+        const int rc = heliosview_socket_read_start(socket.handle(), &detail::readTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, nullptr, 0);
             detail::destroyCtx(ctx);
-            fn(rc, nullptr, 0);
         }
     }
 
     // Stop streaming reads (cancels the pending read; at most one callback may
     // still be in flight). Not needed after the end/error callback.
-    void tcpReadStop(const TcpSocket& socket) { heliosview_tcp_read_stop(socket.handle()); }
+    void readStop(const Socket& socket) { heliosview_socket_read_stop(socket.handle()); }
     // Explicitly close the connection (idempotent; also closed when the last copy
     // dies). Pending writes complete with an error callback; do not use the handle after.
-    void tcpClose(const TcpSocket& socket) { socket.close(); }
+    void close(const Socket& socket) { socket.close(); }
 
     // ---- async file (callback API) ----
 
@@ -700,19 +674,19 @@ public:
     // onOpen(error, file):
     //   error == 0 -> file owns the opened file (valid until closed/destroyed)
     //   error != 0 -> failed; file is empty
-    void fileOpen(const std::string& path, bool writeMode,
-                  std::function<void(int error, File file)> onOpen)
+    template <class Fn>
+    void fileOpen(const std::string& path, bool writeMode, Fn&& onOpen)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, File)> fn;
+            F fn;
         };
-        auto fn = std::move(onOpen);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onOpen));
         const int rc = heliosview_file_open(m_loop, path.c_str(), writeMode ? 1 : 0, &detail::openTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, File{});
             detail::destroyCtx(ctx);
-            fn(rc, File{});
         }
     }
 
@@ -721,45 +695,50 @@ public:
     // onRead(error, bytes):
     //   error == 0 -> bytes bytes read (fewer than len at EOF)
     //   error != 0 -> failed; bytes is 0
-    void fileRead(const File& file, void* buf, uint32_t len, int64_t offset,
-                  std::function<void(int error, uint32_t bytes)> onRead)
+    template <class Fn>
+    void fileRead(const File& file, void* buf, uint32_t len, int64_t offset, Fn&& onRead)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, uint32_t)> fn;
+            F fn;
         };
-        auto fn = std::move(onRead);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onRead));
         const int rc = heliosview_file_read(file.handle(), buf, len, offset, &detail::transferTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, 0);
             detail::destroyCtx(ctx);
-            fn(rc, 0);
         }
     }
 
-    // Async positional write of len bytes at the given file offset from buf.
-    // buf is copied internally, so the caller's buffer may be freed/reused as soon
-    // as this returns (buf must be non-null when len > 0).
-    // onWrite(error, bytes):
-    //   error == 0 -> bytes bytes written (may be less than len)
-    //   error != 0 -> failed; bytes is 0
-    void fileWrite(const File& file, const void* buf, uint32_t len, int64_t offset,
-                   std::function<void(int error, uint32_t bytes)> onWrite)
+    // fileWrite of a Buffer at offset: an owning Buffer (alloc/copy/take) is moved into
+    // the operation (zero-copy); a borrowed (ref) Buffer is used directly — its data must
+    // outlive the write (fire-and-forget). Use Buffer::copy for a safe copy.
+    template <class Fn>
+    void fileWrite(const File& file, Buffer data, int64_t offset, Fn&& onWrite)
     {
+        using F = std::decay_t<Fn>;
         struct Ctx {
             std::pmr::memory_resource* resource;
-            std::function<void(int, uint32_t)> fn;
-            std::pmr::vector<char> data;
+            F fn;
+            Buffer data;
         };
-        auto fn = std::move(onWrite);
-        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), fn, std::pmr::vector<char>{});
-        if (buf && len != 0)
-            ctx->data.assign(static_cast<const char*>(buf), static_cast<const char*>(buf) + len);
-        const int rc = heliosview_file_write(file.handle(), ctx->data.data(), len, offset, &detail::transferTramp<Ctx>, ctx);
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(onWrite), std::move(data));
+        const int rc = heliosview_file_write(file.handle(), ctx->data.data(),
+                                             static_cast<uint32_t>(ctx->data.size()), offset,
+                                             &detail::transferTramp<Ctx>, ctx);
         if (rc != 0) {
+            ctx->fn(rc, 0);
             detail::destroyCtx(ctx);
-            fn(rc, 0);
         }
+    }
+
+    // fileWrite of len bytes at offset: copies buf (Buffer::copy); the caller's buffer
+    // may be freed as soon as this returns (buf must be non-null when len > 0).
+    template <class Fn>
+    void fileWrite(const File& file, const void* buf, uint32_t len, int64_t offset, Fn&& onWrite)
+    {
+        fileWrite(file, Buffer::copy(buf, len), offset, std::forward<Fn>(onWrite));
     }
 
     // Explicitly close the file (idempotent; also closed when the last copy dies)
@@ -780,47 +759,69 @@ public:
     // Async open: set_value(File) on success
     auto fileOpenAsync(const std::string& path, bool writeMode) const
     {
-        return detail::file_open_sender{m_loop, path, writeMode};
+        return detail::op_sender<detail::file_open_config>{
+            detail::file_open_config::data_t{m_loop, path, writeMode}};
     }
 
     // Async positional read of up to len bytes at offset into buf:
     // set_value(uint32_t bytes). buf is caller-held and must stay valid until completion
     auto fileReadAsync(const File& file, void* buf, uint32_t len, int64_t offset) const
     {
-        return detail::file_read_sender{file, buf, len, offset};
+        return detail::op_sender<detail::file_read_config>{
+            detail::file_read_config::data_t{file, buf, len, offset}};
     }
 
     // Async positional write of len bytes at offset: set_value(uint32_t bytes).
-    // buf is copied into the sender, so it may be freed as soon as this returns
+    // Convenience: copies buf (equivalent to Buffer::copy); the caller's buffer may
+    // be freed as soon as this returns.
     auto fileWriteAsync(const File& file, const void* buf, uint32_t len, int64_t offset) const
     {
-        std::pmr::vector<char> data;
-        if (buf && len != 0)
-            data.assign(static_cast<const char*>(buf), static_cast<const char*>(buf) + len);
-        return detail::file_write_sender{file, std::move(data), offset};
+        return detail::op_sender<detail::file_write_config>{
+            detail::file_write_config::data_t{file, Buffer::copy(buf, len), offset}};
     }
 
-    // Async TCP connect: set_value(TcpSocket) on success
-    auto tcpConnectAsync(const std::string& host, uint16_t port) const
+    // Async positional write of a Buffer at offset: set_value(uint32_t bytes). The
+    // Buffer is moved into the operation (zero-copy). An owning Buffer (alloc/copy/
+    // take) carries its data; a borrowed (ref) Buffer points at caller-owned data that
+    // must stay alive until the write completes. Use Buffer::copy if you cannot
+    // guarantee that lifetime.
+    auto fileWriteAsync(const File& file, Buffer buf, int64_t offset) const
     {
-        return detail::tcp_connect_sender{m_loop, host, port};
+        return detail::op_sender<detail::file_write_config>{
+            detail::file_write_config::data_t{file, std::move(buf), offset}};
     }
 
-    // Async write: set_value(uint32_t bytes). data is copied into the sender, so it
-    // may be freed as soon as this returns
-    auto tcpWriteAsync(const TcpSocket& socket, const void* data, uint32_t len) const
+    // Async TCP connect: set_value(Socket) on success
+    auto connectAsync(const std::string& host, uint16_t port) const
     {
-        std::pmr::vector<char> copy;
-        if (data && len != 0)
-            copy.assign(static_cast<const char*>(data), static_cast<const char*>(data) + len);
-        return detail::tcp_write_sender{socket, std::move(copy)};
+        return detail::op_sender<detail::socket_connect_config>{
+            detail::socket_connect_config::data_t{m_loop, host, port}};
+    }
+
+    // Async write: set_value(uint32_t bytes). Convenience: copies data (equivalent to
+    // Buffer::copy); the caller's buffer may be freed as soon as this returns.
+    auto writeAsync(const Socket& socket, const void* data, uint32_t len) const
+    {
+        return detail::op_sender<detail::socket_write_config>{
+            detail::socket_write_config::data_t{socket, Buffer::copy(data, len)}};
+    }
+
+    // Async write from a Buffer: set_value(uint32_t bytes). The Buffer is moved into
+    // the operation (zero-copy). An owning Buffer (alloc/copy/take) carries its data;
+    // a borrowed (ref) Buffer points at caller-owned data that must stay alive until
+    // the send completes. Use Buffer::copy if you cannot guarantee that lifetime.
+    auto writeAsync(const Socket& socket, Buffer buf) const
+    {
+        return detail::op_sender<detail::socket_write_config>{
+            detail::socket_write_config::data_t{socket, std::move(buf)}};
     }
 
     // Single-shot read (at most len bytes): set_value(uint32_t got) where 0 = peer
     // closed. buf is caller-held; re-reading stops automatically on completion
-    auto tcpReadAsync(const TcpSocket& socket, void* buf, uint32_t len) const
+    auto readAsync(const Socket& socket, void* buf, uint32_t len) const
     {
-        return detail::tcp_read_sender{socket, buf, len};
+        return detail::op_sender<detail::socket_read_config>{
+            detail::socket_read_config::data_t{socket, buf, len}};
     }
 
 private:

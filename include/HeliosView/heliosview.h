@@ -24,6 +24,7 @@
  * C++ users should include <HeliosViewCore/HeliosView.h> (the HeliosView.Core wrapper).
  */
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <HeliosView/heliosview_export.h>
@@ -35,6 +36,30 @@ extern "C" {
 /* ================= Version ================= */
 
 HELIOSVIEW_API const char* heliosview_version(void);
+
+/* ================= Memory allocation =================
+ *
+ * The library allocates its internal objects (windows, webviews, WebView2
+ * callback stubs, I/O operations, ...) through a configurable allocator, so a
+ * C app can supply its own memory management (e.g. a pool or arena) instead of
+ * the process heap. Defaults to the standard allocator (malloc / free).
+ *
+ * Set it once, before any other library call. The allocator is read by
+ * subsequent allocations; changing it while objects are alive is undefined
+ * (memory must be freed with the same allocator that allocated it).
+ */
+
+typedef void* (*heliosview_alloc_fn)(size_t size, void* context);
+typedef void  (*heliosview_free_fn)(void* ptr, void* context);
+
+typedef struct heliosview_allocator {
+    heliosview_alloc_fn alloc;  /* allocate `size` bytes, aligned for any object; NULL = malloc */
+    heliosview_free_fn  free_;  /* free a pointer returned by `alloc`; NULL = free */
+    void* context;              /* opaque, passed unchanged to alloc/free */
+} heliosview_allocator_t;
+
+/* Set the default allocator (NULL restores malloc/free). Not thread-safe while allocations are live. */
+HELIOSVIEW_API void heliosview_set_allocator(const heliosview_allocator_t* allocator);
 
 /* ================= Events ================= */
 
@@ -130,18 +155,20 @@ typedef struct heliosview_event {
 
 /* ================= Event queue =================
  *
- * Lock-free: the queue is only accessed by the message-loop thread (posted and
- * consumed on the same thread); cross-thread posting requires external sync. */
+ * Thread-local: the queue lives on the message-loop thread. Events are posted by
+ * the native-message conversion (WndProc, same thread) and by heliosview_post_event
+ * (message-loop thread) and consumed by heliosview_poll/wait on the same thread.
+ * Cross-thread event or window access is not supported. */
 
-/* Non-blocking fetch: 1 = event written to out, 0 = queue empty */
+/* Non-blocking fetch: 1 = event written to out, 0 = queue empty. Message-loop thread. */
 HELIOSVIEW_API int heliosview_poll(heliosview_event_t* out_event);
 
 /* Blocking fetch (polling, 1 ms granularity): 1 = event, -1 = quit request
- * (heliosview_quit), 0 = other error. Blocks the calling thread; do not use it
- * on the message-loop thread. */
+ * (heliosview_quit), 0 = other error. Blocks the calling thread; must be called on
+ * the message-loop thread (the queue is thread-local). */
 HELIOSVIEW_API int heliosview_wait(heliosview_event_t* out_event);
 
-/* Post an event (message-loop thread). timestamp_ms is filled automatically when 0. */
+/* Post an event to the calling thread's queue (message-loop thread). timestamp_ms is filled automatically when 0. */
 HELIOSVIEW_API void heliosview_post_event(const heliosview_event_t* event);
 
 /* Request to quit the message loop (heliosview_run returns) */
@@ -391,7 +418,7 @@ HELIOSVIEW_API int heliosview_webview_unsubscribe(heliosview_webview_t* webview,
  */
 
 typedef struct heliosview_loop heliosview_loop_t;
-typedef struct heliosview_tcp heliosview_tcp_t;
+typedef struct heliosview_socket heliosview_socket_t;
 typedef struct heliosview_file heliosview_file_t;
 
 /* Callback with no result (thread-pool tasks, etc.) */
@@ -401,7 +428,7 @@ typedef void (*heliosview_transfer_cb)(int error, uint32_t bytes, void* userdata
 /* Streaming read callback: data is valid only during the callback; error=0 with len=0 means the peer closed */
 typedef void (*heliosview_read_cb)(int error, const char* data, uint32_t len, void* userdata);
 /* Connect callback: tcp is valid when error=0 (the caller closes it after success) */
-typedef void (*heliosview_tcp_connect_cb)(int error, heliosview_tcp_t* tcp, void* userdata);
+typedef void (*heliosview_socket_connect_cb)(int error, heliosview_socket_t* tcp, void* userdata);
 /* Open callback: file is valid when error=0 */
 typedef void (*heliosview_file_open_cb)(int error, heliosview_file_t* file, void* userdata);
 
@@ -424,16 +451,16 @@ HELIOSVIEW_API int heliosview_loop_post(heliosview_loop_t* loop, heliosview_comp
 
 /* ---- Async TCP client ---- */
 
-HELIOSVIEW_API int heliosview_tcp_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
-                                          heliosview_tcp_connect_cb on_connect, void* userdata);
-HELIOSVIEW_API int heliosview_tcp_write(heliosview_tcp_t* tcp, const void* data, uint32_t len,
+HELIOSVIEW_API int heliosview_socket_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
+                                          heliosview_socket_connect_cb on_connect, void* userdata);
+HELIOSVIEW_API int heliosview_socket_write(heliosview_socket_t* tcp, const void* data, uint32_t len,
                                         heliosview_transfer_cb on_write, void* userdata);
 /* Start streaming read: callback once per chunk and auto-resume until EOF/error/read_stop */
-HELIOSVIEW_API int heliosview_tcp_read_start(heliosview_tcp_t* tcp, heliosview_read_cb on_read, void* userdata);
+HELIOSVIEW_API int heliosview_socket_read_start(heliosview_socket_t* tcp, heliosview_read_cb on_read, void* userdata);
 /* Stop reading: cancels pending reads; one callback may still be in flight. Not needed after the end callback (EOF/error). */
-HELIOSVIEW_API void heliosview_tcp_read_stop(heliosview_tcp_t* tcp);
+HELIOSVIEW_API void heliosview_socket_read_stop(heliosview_socket_t* tcp);
 /* Close the connection (pending writes complete with an error callback). Do not use the handle after closing. */
-HELIOSVIEW_API void heliosview_tcp_close(heliosview_tcp_t* tcp);
+HELIOSVIEW_API void heliosview_socket_close(heliosview_socket_t* tcp);
 
 /* ---- Async file ---- */
 
