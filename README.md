@@ -260,10 +260,12 @@ async.write(sock, helios::Buffer::copy(payload), cb);                // callback
 
 ### 4. WebView + JS ↔ native bridge with nlohmann auto-binding
 
-This is the star feature: **`bindJson<Req>`**. The JS call's first argument is
-deserialized into a `Req` DTO (nlohmann), the handler runs as a detached
-`std::execution::task<Resp>`, and the result is serialized back to resolve the
-JS `Promise`.
+This is the star feature: **`bindJson<Args...>`**. Each of the JS call's
+arguments is deserialized into the corresponding `Args` type (nlohmann), the
+handler runs as a detached `std::execution::task<Resp>`, and the result is
+serialized back to resolve the JS `Promise`. You can bind a single DTO
+(`bindJson<AddReq>`) or several scalar/container parameters
+(`bindJson<int, int>`), matching the JS call's argument array positionally.
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
@@ -304,6 +306,21 @@ int main()
     window->eval("console.log('hi from native');");   // run JS
     return app->exec();
 }
+```
+
+Multiple parameters are matched to the JS call's argument array positionally:
+
+```cpp
+// JS: window.helios.call("add", 40, 2)  -> 42
+window->bindJson<int, int>("add", [](int a, int b) -> std::execution::task<int> {
+    co_return a + b;
+});
+
+// JS: window.helios.call("greet", "helios", 3)  -> {"msg":"hello, helios (x3)"}
+window->bindJson<std::string, int>("repeat", [](std::string s, int n)
+                                   -> std::execution::task<helios::JsonResp<std::string>> {
+    co_return helios::JsonResp<std::string>{"msg", std::format("hello, {} (x{})", s, n)};
+});
 ```
 
 `bindJson` / `subscribeJson` also accept a **member function** — pass the object
