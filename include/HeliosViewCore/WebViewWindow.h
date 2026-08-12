@@ -46,6 +46,7 @@ public:
         , m_webview(other.m_webview)
     {
         other.m_webview = nullptr;
+        wireNavigationCallback(); /* the C userdata must point at this new object */
     }
 
     WebViewWindow& operator=(WebViewWindow&& other) noexcept
@@ -56,6 +57,7 @@ public:
                 heliosview_webview_destroy(m_webview);
             m_webview = other.m_webview;
             other.m_webview = nullptr;
+            wireNavigationCallback();
         }
         return *this;
     }
@@ -70,8 +72,10 @@ public:
     // The window must stay alive until initialization completes (usually a few ms).
     void createWebView()
     {
-        if (!m_webview)
+        if (!m_webview) {
             m_webview = heliosview_webview_create(nativeHandle());
+            wireNavigationCallback();
+        }
     }
 
     // Navigate to a URL (queued automatically if the WebView is still initializing)
@@ -85,6 +89,27 @@ public:
     void navigateHtml(const char* html)
     {
         heliosview_webview_navigate_html(m_webview, html);
+    }
+
+    // ---- navigation events ----
+
+    // Fired on the UI thread when a page load completes: error == 0 on success,
+    // otherwise a negated platform error code (on WebView2: -HRESULT, e.g.
+    // -COREWEBVIEW2_WEB_ERROR_STATUS_*). Not fired for navigations that never
+    // finish (e.g. aborted). Use it to know when the page is ready for eval()
+    // or to show an error state when loading fails.
+    Signal<int> navigationCompleted;
+
+    // ---- local resources ----
+
+    // Map a local folder to a virtual host name so the page can load files from
+    // it via https://<host>/<relative-path>. WebView2 restricts mappings to the
+    // ".local" host suffix (e.g. "assets.local"). Call before navigating; the
+    // page must be reloaded for new mappings to take effect.
+    // Returns 0 = success, negative = failure.
+    int mapLocalFolder(const char* host_name, const char* folder_path)
+    {
+        return heliosview_webview_map_local_folder(m_webview, host_name, folder_path);
     }
 
     // ---- JS <-> native bridge ----
@@ -186,7 +211,30 @@ public:
         heliosview_webview_unsubscribe(m_webview, name);
     }
 
+    // Signal for navigation events (see navigationCompleted above); this overload
+    // connects a member function that returns a sender (started fire-and-forget
+    // on each load completion). The object must outlive the connection.
+    template <class Obj, class Ret>
+    void connectNavigation(Ret Obj::* member, Obj* obj)
+    {
+        navigationCompleted.connect(member, obj);
+    }
+
 private:
+    // Bridge the C navigation callback to the C++ signal. The C layer stores the
+    // userdata (this WebViewWindow) and runs the callback on the UI thread; the
+    // registration also happens here so that after a move (new object address)
+    // the C userdata is re-pointed at the new object.
+    void wireNavigationCallback()
+    {
+        heliosview_webview_set_navigation_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, int error, void* userdata) {
+                static_cast<WebViewWindow*>(userdata)->navigationCompleted(error);
+            },
+            this, nullptr);
+    }
+
     heliosview_webview_t* m_webview = nullptr;
 };
 

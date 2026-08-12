@@ -28,6 +28,18 @@ FetchContent_Declare(
     GIT_TAG b783aac907718fa0b92e99123883341142670d3e
     SYSTEM
 )
+# stdexec pulls rapids-cmake via a raw URL zip download, which bypasses git
+# proxies and is very slow in CN networks. Pre-declare it as a git clone
+# (honoring git's http.proxy / https.proxy) so stdexec's own URL declaration
+# is ignored (CMake keeps the first declaration; stdexec's RAPIDS.cmake then
+# sees the content already populated).
+FetchContent_Declare(
+    rapids-cmake
+    GIT_REPOSITORY https://github.com/rapidsai/rapids-cmake.git
+    GIT_TAG branch-24.02
+    GIT_SHALLOW TRUE
+    SYSTEM
+)
 FetchContent_MakeAvailable(stdexec)
 
 # nlohmann/json: header-only JSON library used for the WebView bridge's

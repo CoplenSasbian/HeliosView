@@ -6,6 +6,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATA (tray icon) */
+#include <objbase.h>  /* CoCreateInstance */
+#include <shobjidl.h> /* IFileOpenDialog / IShellItem (folder picker) */
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
@@ -116,6 +118,12 @@ struct heliosview_webview {
     EventRegistrationToken message_token{};            /* JS -> native messages */
     hv_pmr_flat_map<std::string, hv_webview_binding> bindings; /* name -> binding (UI thread only) */
     hv_pmr_flat_map<std::string, hv_webview_subscription> subscriptions; /* BroadcastChannel name -> subscription (UI thread only) */
+
+    /* navigation-completed callback (UI thread only) */
+    heliosview_webview_navigation_cb nav_cb = nullptr;
+    void* nav_userdata = nullptr;
+    heliosview_webview_userdata_dtor nav_dtor = nullptr;
+    EventRegistrationToken nav_token{};                /* NavigationCompleted handler */
 
     /* eval / eval_async queued while the WebView was still initializing */
     struct pending_op {
@@ -1255,6 +1263,27 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                         utf8_to_wide(kWebView2BridgeScript).c_str(), script_handler);
                     script_handler->Release();
 
+                    /* navigation completed: report load results to the registered callback */
+                    auto* nav_handler = hv::hv_alloc<navigation_completed_handler>(
+                        [webview](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                            BOOL success = FALSE;
+                            if (SUCCEEDED(args->get_IsSuccess(&success)) && success) {
+                                if (webview->nav_cb)
+                                    webview->nav_cb(webview, 0, webview->nav_userdata);
+                                return S_OK;
+                            }
+                            /* failed navigation: report the WebErrorStatus code
+                             * (COREWEBVIEW2_WEB_ERROR_STATUS_*, 0 = UNKNOWN) */
+                            COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                            args->get_WebErrorStatus(&status);
+                            if (webview->nav_cb)
+                                webview->nav_cb(webview, static_cast<int>(status) + 1,
+                                                webview->nav_userdata);
+                            return S_OK;
+                        });
+                    webview->webview->add_NavigationCompleted(nav_handler, &webview->nav_token);
+                    nav_handler->Release();
+
                     /* run the navigation queued during initialization */
                     if (webview->has_pending) {
                         const std::wstring text = utf8_to_wide(webview->pending_text);
@@ -1290,6 +1319,11 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
     g_webviews_by_hwnd.erase(webview->parent);
     if (webview->webview && webview->message_token.value != 0)
         webview->webview->remove_WebMessageReceived(webview->message_token);
+    if (webview->webview && webview->nav_token.value != 0)
+        webview->webview->remove_NavigationCompleted(webview->nav_token);
+    if (webview->nav_dtor)
+        webview->nav_dtor(webview->nav_userdata);
+    webview->nav_dtor = nullptr;
     for (const auto& [name, binding] : webview->bindings)
         if (binding.dtor)
             binding.dtor(binding.userdata);
@@ -1474,4 +1508,108 @@ int heliosview_webview_unsubscribe(heliosview_webview_t* webview, const char* na
         webview->subscriptions.erase(it);
     }
     return 0;
+}
+
+int heliosview_webview_set_navigation_callback(heliosview_webview_t* webview,
+                                               heliosview_webview_navigation_cb callback,
+                                               void* userdata,
+                                               heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview)
+        return -1;
+    /* the callback table is owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, callback, userdata, dtor] {
+            heliosview_webview_set_navigation_callback(wv, callback, userdata, dtor);
+        });
+        return 0;
+    }
+    if (webview->nav_dtor)
+        webview->nav_dtor(webview->nav_userdata); /* replacing an existing callback */
+    webview->nav_cb = callback;
+    webview->nav_userdata = userdata;
+    webview->nav_dtor = dtor;
+    return 0;
+}
+
+int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
+                                        const char* host_name,
+                                        const char* folder_path)
+{
+    if (!webview || !host_name || !folder_path || !webview->webview)
+        return -1;
+    /* virtual host mappings are owned by the UI thread (require the controller) */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, host = std::string(host_name),
+                        folder = std::string(folder_path)] {
+            heliosview_webview_map_local_folder(wv, host.c_str(), folder.c_str());
+        });
+        return 0;
+    }
+    /* SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3 (WebView2 SDK
+     * 1.0.1293.44+); the runtime supports it, but the interface must be queried
+     * from the base interface */
+    Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
+    if (FAILED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview3))))
+        return -1;
+    const HRESULT hr = webview3->SetVirtualHostNameToFolderMapping(
+        utf8_to_wide(host_name).c_str(), utf8_to_wide(folder_path).c_str(),
+        COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+    return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
+}
+
+int heliosview_select_folder(heliosview_window_t* window, const char* title, char** out_path)
+{
+    if (out_path)
+        *out_path = nullptr;
+    if (!out_path)
+        return -1;
+
+    /* IFileOpenDialog is an apartment-class object: make sure the calling thread
+     * has COM in the right mode (WebView2 init usually did, but a window-only app
+     * may not). Uninitialize only if this call performed the init. */
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool must_uninit = (co == S_OK);
+    if (FAILED(co) && co != RPC_E_CHANGED_MODE)
+        return -1;
+
+    int result = -1;
+    do {
+        Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&dialog))))
+            break;
+        if (FAILED(dialog->SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)))
+            break;
+        if (title && *title)
+            dialog->SetTitle(utf8_to_wide(title).c_str());
+
+        const HRESULT hr = dialog->Show(window && window->hwnd ? window->hwnd : nullptr);
+        if (FAILED(hr)) {
+            result = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? 0 : -static_cast<int>(hr);
+            break;
+        }
+
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        if (FAILED(dialog->GetResult(&item)))
+            break;
+        LPWSTR path = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+            break;
+        const std::string utf8 = wide_to_utf8(path);
+        CoTaskMemFree(path);
+        if (utf8.empty())
+            break;
+
+        char* out = static_cast<char*>(std::malloc(utf8.size() + 1));
+        if (!out)
+            break;
+        std::memcpy(out, utf8.c_str(), utf8.size() + 1);
+        *out_path = out;
+        result = 1;
+    } while (false);
+
+    if (must_uninit)
+        CoUninitialize();
+    return result;
 }

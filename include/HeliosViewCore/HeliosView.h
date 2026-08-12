@@ -11,6 +11,7 @@
  *   - Types.h         event types and structures (1:1 with the C interface)
  *   - App.h           message loop + event queue
  *   - Window.h        top-level window + signals
+ *   - Dialogs.h       native dialog helpers (folder picker, ...)
  *   - Tray.h          system notification-area (tray) icon + signals
  *   - Menu.h          popup / context menu + signals
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
@@ -31,6 +32,7 @@
 
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Async.h>
+#include <HeliosViewCore/Dialogs.h>
 #include <HeliosViewCore/Menu.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/Tray.h>
