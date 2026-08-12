@@ -477,6 +477,14 @@ typedef void (*heliosview_webview_subscribe_cb)(heliosview_webview_t* webview,
                                                 const char* name, const char* data_json,
                                                 void* userdata);
 
+/* Callback for navigation events: fires when a navigation completes (page fully
+ * loaded) or fails. error is 0 on success, else a negated platform error code
+ * (on WebView2: -HRESULT, e.g. -0x7ff5fb70 / COREWEBVIEW2_E_NAVIGATION_CANCELLED).
+ * Runs on the UI thread. Only one callback may be registered; setting a new one
+ * replaces the previous (running its dtor). */
+typedef void (*heliosview_webview_navigation_cb)(heliosview_webview_t* webview,
+                                                 int error, void* userdata);
+
 /* Register a native function under `name`, callable from JS via
  * window.helios.call(name, ...). Rebinding a name replaces the previous binding
  * and calls its dtor (if any). dtor(userdata) also runs when the WebView is
@@ -519,6 +527,37 @@ HELIOSVIEW_API int heliosview_webview_subscribe(heliosview_webview_t* webview, c
 
 /* Remove the subscription for `name` (calling its dtor). UI-thread call. */
 HELIOSVIEW_API int heliosview_webview_unsubscribe(heliosview_webview_t* webview, const char* name);
+
+/* ================= WebView events & local resources ================= */
+
+/* Register a navigation-completed callback (replacing any previous one and
+ * running its dtor). The callback fires on the UI thread when a navigation
+ * completes or fails; it is not called for navigations that never finish
+ * (e.g. aborted). UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_navigation_callback(heliosview_webview_t* webview,
+                                                              heliosview_webview_navigation_cb callback,
+                                                              void* userdata,
+                                                              heliosview_webview_userdata_dtor dtor);
+
+/* Map a local folder to a virtual host name so the page can load files from it
+ * via https://<host>/<relative-path>. Used to serve images or other local assets
+ * that are not part of the packaged frontend (game banners, avatars, ...).
+ * WebView2 restricts mappings to the "trusted origin" host suffix .local; call
+ * before navigating, or the page must be reloaded for new mappings to take effect.
+ * Returns 0 = success, negative = failure. */
+HELIOSVIEW_API int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
+                                                       const char* host_name,
+                                                       const char* folder_path);
+
+/* ================= Folder selection dialog ================= */
+
+/* Open a native folder-picker dialog (modal, parented to `window`, which may be
+ * NULL for an unparented dialog). On success returns 1 and writes the selected
+ * folder's absolute path (UTF-8) into out_path (caller-freed via free()); 0 =
+ * cancelled; negative = error. Must be called on the message-loop thread. */
+HELIOSVIEW_API int heliosview_select_folder(heliosview_window_t* window,
+                                            const char* title,
+                                            char** out_path);
 
 /* ================= Async I/O (background thread pool + platform multiplexer) =================
  *

@@ -12,3 +12,6 @@ target_link_libraries(HeliosViewAppDemo PRIVATE HeliosView::Core)
 
 add_executable(HeliosViewWebViewDemo webview_demo.cpp)
 target_link_libraries(HeliosViewWebViewDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewWebViewEventsDemo webview_events_demo.cpp)
+target_link_libraries(HeliosViewWebViewEventsDemo PRIVATE HeliosView::Core)

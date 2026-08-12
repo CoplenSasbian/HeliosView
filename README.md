@@ -93,6 +93,7 @@ DLLs and demos land in `build/bin/` together, so no `PATH` setup is needed.
 | `HeliosViewAppDemo`      | `examples/app_demo.cpp`   | `Window` subclassing, window styles, member slots |
 | `HeliosViewCoroDemo`     | `examples/coro_demo.cpp`  | coroutines: file I/O + TCP on the thread pool  |
 | `HeliosViewWebViewDemo`  | `examples/webview_demo.cpp` | **WebView + `bindJson` auto-binding**       |
+| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | navigation events, local folder mapping, folder dialog |
 
 ---
 
@@ -378,6 +379,49 @@ You can also use the raw C-style bridge: `bind` (JSON string of args),
 > `evalAsync` call is still in flight. The WebView must be destroyed before its
 > parent window.
 
+### 4.5 WebView events, local resources, and native dialogs
+
+Three additions for building real UI on top of the bridge:
+
+- **`navigationCompleted`** — a signal on `WebViewWindow` that fires on the UI
+  thread when a page load completes (`error == 0`) or fails (negated platform
+  error code). The app can start initializing after the first successful load
+  and show an error state on failure:
+
+  ```cpp
+  window->navigationCompleted.connect([](int error) {
+      if (error == 0)
+          window->eval("app.bootstrap();");   // page ready for JS
+  });
+  ```
+
+- **`mapLocalFolder(host, folder)`** — serves a local folder over a virtual
+  `https://<host>/` host so the page can load files that are not part of the
+  frontend (game banners, avatars, downloaded assets...). WebView2 restricts
+  the host name to the `.local` suffix; call before navigating (reload for
+  changes):
+
+  ```cpp
+  window->mapLocalFolder("assets.local", "C:/cache/game_images");
+  // page: <img src="https://assets.local/header_123.jpg">
+  ```
+
+- **`helios::selectFolder(parent, title, out_path)`** — a native folder-picker
+  dialog (modal, optional parent from `Window::nativeHandle()`), typically
+  exposed to the page through a `bindJson` handler:
+
+  ```cpp
+  window->bindJson<BrowseReq>("browseFolder", [win = window.get()](BrowseReq req)
+                              -> std::execution::task<helios::JsonResp<std::string>> {
+      std::string path;
+      const bool ok = helios::selectFolder(win->nativeHandle(), req.title.c_str(), path);
+      co_return helios::JsonResp<std::string>{ok ? "path" : "cancelled", ok ? path : ""};
+  });
+  ```
+
+The underlying C API for all three is `heliosview_webview_set_navigation_callback`,
+`heliosview_webview_map_local_folder`, and `heliosview_select_folder`.
+
 ### 5. Tray icon + popup / context menu
 
 `helios::Tray` shows an icon in the OS notification area; `helios::Menu` is a
@@ -640,6 +684,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Types.h                             event types (1:1 with the C API)
   App.h                               message loop + UI-thread scheduler
   Window.h                            top-level window
+  Dialogs.h                           native dialog helpers (folder picker)
   Tray.h                              system notification-area (tray) icon + signals
   Menu.h                              popup / context menu + signals
   Execution.h                         C++26 <execution> compat (stdexec on C++23)
@@ -655,5 +700,5 @@ examples/                             the five demo programs
 ## Roadmap
 
 - More platforms behind the C ABI (Linux/macOS backends).
-- WebView events (`WebViewWindow` signals for load/url/message).
+- More WebView events (`WebViewWindow` signals for URL changes / history).
 - Install/package rules (`cmake --install`, CMake config files).
