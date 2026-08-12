@@ -32,6 +32,7 @@ public:
 private:
     std::shared_ptr<helios::App> m_app;
     std::shared_ptr<helios::Async> m_async;
+    std::unique_ptr<helios::Tray> m_tray;
 
     // Sync member slot: key press (runs on the UI thread)
     void onKeyPressed(helios::KeyCode key)
@@ -75,6 +76,22 @@ private:
         });
     }
 
+    // Create the tray icon (the native window must be shown first).
+    // Public so main() can call it after show().
+public:
+    void createTray()
+    {
+        m_tray = std::make_unique<helios::Tray>(nativeHandle(), L"HeliosView App Demo");
+        if (!m_tray->valid()) { /* needs a created (shown) native window */
+            m_tray.reset();
+            return;
+        }
+        m_tray->leftClicked.connect([this] { std::println("[app] tray left-clicked"); });
+        m_tray->leftDoubleClicked.connect([this] { close(); });
+        m_tray->rightClicked.connect([this] { showNormal(); show(); });
+    }
+
+public:
     void onResized(int32_t w, int32_t h)
     {
         std::println("[app] resized {} x {} (thread {})", w, h,
@@ -104,6 +121,7 @@ int main()
     normal->show();
     frameless->show();
     borderless->show();
+    normal->createTray(); /* tray icon in the notification area (window must be shown first) */
 
     std::println("[main] entering UI loop on thread {} (click / press keys / Esc)...",
                  std::this_thread::get_id());

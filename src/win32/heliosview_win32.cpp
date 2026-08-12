@@ -5,6 +5,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATA (tray icon) */
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
@@ -42,6 +43,36 @@ struct heliosview_window {
     heliosview_window_style_t style = HELIOSVIEW_WINDOW_NORMAL;
     HWND hwnd = nullptr;
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
+
+    /* Routing registry (type-erased): routing id -> userdata (the C++ object).
+     * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
+     * the item id) and caller-registered ids all share one id space allocated from
+     * next_route_id (WM_APP range, so every id is a valid WM_APP message / fits a
+     * WM_COMMAND LOWORD). default_native_convert reads it to route tray / menu
+     * events back to the owning object. */
+    uint32_t next_route_id = WM_APP + 0x100;       /* per-window routing id allocator */
+    std::flat_map<uint32_t, void*> registry;        /* routing id -> userdata */
+};
+
+/* ================= Tray icon (notification area icon; Windows Shell_NotifyIcon) ================= */
+
+struct heliosview_tray {
+    HWND hwnd = nullptr;       /* owning window (receives the callback messages) */
+    UINT callback_msg = 0;     /* WM_APP-based callback message id, unique per tray */
+    UINT uid = 0;              /* tray icon id */
+    HICON icon = nullptr;      /* current icon (owned; NULL = default) */
+    std::wstring tooltip;      /* UTF-16 */
+    bool added = false;        /* NIM_ADD succeeded (so NIM_DELETE is safe) */
+    void* userdata = nullptr;  /* caller data (the C++ wrapper stores an object pointer) */
+};
+
+/* ================= Menu (popup / context menu) ================= */
+
+struct heliosview_menu {
+    heliosview_window_t* window = nullptr;   /* owner window (items registered here) */
+    HMENU hmenu = nullptr;                   /* Win32 popup menu */
+    void* userdata = nullptr;                /* caller data (the C++ wrapper stores an object pointer) */
+    std::vector<heliosview_menu_t*> submenus; /* owned submenus (destroyed with parent) */
 };
 
 /* ================= WebView (independent handle; Win32: WebView2) ================= */
@@ -387,9 +418,13 @@ HANDLE g_wakeup_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_event); }, true);
 
 std::atomic<int32_t> g_next_window_id{1};
-std::flat_map<HWND, heliosview_window_t*> g_windows_by_hwnd;
 std::flat_map<int32_t, heliosview_window_t*> g_windows_by_id; /* event dispatch: id → window */
 std::flat_map<HWND, heliosview_webview_t*> g_webviews_by_hwnd; /* resize WebViews together with their window */
+
+/* Routing ids (tray callback messages, menu item ids, caller ids) are allocated
+ * from each window's own id space (window->next_route_id); the tray uid is the
+ * only remaining process-wide counter (unique per process for Shell_NotifyIcon). */
+std::atomic<UINT> g_next_tray_uid{1};
 
 /* ================= Default native-message → event conversion (Win32 MSG → event) ================= */
 
@@ -419,17 +454,74 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     const MSG* msg = static_cast<const MSG*>(native_msg);
     const int64_t ts = hv::now_ms();
 
+    /* The owning window: tray / menu routing ids live on it (the registry). */
+    auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(msg->hwnd, GWLP_USERDATA));
+
+    /* Tray icon callback messages (posted by Shell_NotifyIcon when an icon is
+     * clicked). The message id IS the per-window WM_APP callback id (>= WM_APP),
+     * which also keys the registry entry. */
+    if (win && msg->message >= WM_APP) {
+        if (auto it = win->registry.find(msg->message); it != win->registry.end()) {
+            switch (msg->lParam) {
+            case WM_LBUTTONUP:       out->type = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK; break;
+            case WM_LBUTTONDBLCLK:   out->type = HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK; break;
+            case WM_RBUTTONUP:
+            case WM_CONTEXTMENU:     out->type = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK; break;
+            case WM_MBUTTONUP:       out->type = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK; break;
+            default:
+                return 0; /* consume; not a click we translate */
+            }
+            out->userdata = it->second;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+    }
+
     switch (msg->message) {
+    case WM_HV_WEBVIEW_MSG:
+        /* Marshalled webview tasks (cross-thread resolve/reject/broadcast).
+         * Looked up by hwnd: if the webview was destroyed, the entry is gone and
+         * the queued message is a no-op (never touches a freed object). */
+        if (auto it = g_webviews_by_hwnd.find(msg->hwnd); it != g_webviews_by_hwnd.end())
+            hv_drain_ui_tasks(it->second);
+        return 0; /* consumed; not a user-facing event */
+    case WM_COMMAND: {
+        /* Menu item selection: TrackPopupMenu posts WM_COMMAND with the item's id
+         * in LOWORD(wParam). Only route ids that belong to a tracked popup menu on
+         * this window; WM_COMMAND also goes to regular child controls/buttons. */
+        const UINT id = LOWORD(msg->wParam);
+        void* ud = nullptr;
+        if (win) {
+            auto it = win->registry.find(id);
+            if (it != win->registry.end())
+                ud = it->second;
+        }
+        if (!ud)
+            return -1; /* not one of ours → hand off to DefWindowProc */
+        out->type = HELIOSVIEW_EVENT_MENU_SELECT;
+        out->menu_item = id;
+        out->userdata = ud;
+        out->timestamp_ms = ts;
+        return 1;
+    }
     case WM_CLOSE:
         out->type = HELIOSVIEW_EVENT_WINDOW_CLOSE;
         out->timestamp_ms = ts;
         return 1;
-    case WM_SIZE:
+    case WM_SIZE: {
+        /* WebViews attached to this window resize along with it */
+        auto range = g_webviews_by_hwnd.equal_range(msg->hwnd);
+        for (auto it = range.first; it != range.second; ++it)
+            if (auto* controller = it->second->controller.Get()) {
+                RECT rc{0, 0, LOWORD(msg->lParam), HIWORD(msg->lParam)};
+                controller->put_Bounds(rc);
+            }
         out->type = HELIOSVIEW_EVENT_WINDOW_RESIZE;
         out->width = static_cast<int32_t>(LOWORD(msg->lParam));
         out->height = static_cast<int32_t>(HIWORD(msg->lParam));
         out->timestamp_ms = ts;
         return 1;
+    }
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
@@ -470,35 +562,14 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         auto* win = static_cast<heliosview_window_t*>(cs->lpCreateParams);
         if (win) {
             win->hwnd = hwnd;
-            g_windows_by_hwnd[hwnd] = win;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(win));
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    /* WebViews attached to this window resize along with it */
-    if (message == WM_SIZE) {
-        auto range = g_webviews_by_hwnd.equal_range(hwnd);
-        for (auto it = range.first; it != range.second; ++it) {
-            if (auto* controller = it->second->controller.Get()) {
-                RECT rc{0, 0, LOWORD(lparam), HIWORD(lparam)};
-                controller->put_Bounds(rc);
-            }
-        }
-    }
-
-    /* Marshalled webview tasks (cross-thread resolve/reject/broadcast).
-     * Looked up by hwnd: if the webview was destroyed, the entry is gone and the
-     * queued message is a no-op (never touches a freed heliosview_webview_t). */
-    if (message == WM_HV_WEBVIEW_MSG) {
-        auto it = g_webviews_by_hwnd.find(hwnd);
-        if (it != g_webviews_by_hwnd.end())
-            hv_drain_ui_tasks(it->second);
-        return 0;
-    }
-
     const auto window_id_of = [hwnd] {
-        auto it = g_windows_by_hwnd.find(hwnd);
-        return it != g_windows_by_hwnd.end() ? it->second->id : 0;
+        auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        return win ? win->id : 0;
     };
 
     MSG native{};
@@ -507,30 +578,28 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     native.wParam = wparam;
     native.lParam = lparam;
 
-    /* 1. user-registered conversion delegate (optional) */
+    /* The library's built-in conversion always runs first (tray/menu/webview
+     * side effects, window/keyboard/mouse). If it does not handle the message
+     * (-1), try each registered converter in order; the first that returns 1
+     * (queued) or 0 (consumed) wins. Otherwise fall through to DefWindowProc. */
     heliosview_event_t event{};
-    if (hv::g_native_handler) {
-        const int handled = hv::g_native_handler(&native, &event);
-        if (handled == 1) {
-            event.window_id = window_id_of();
-            hv::queue_push(event);
-            return 0;
+    int handled = default_native_convert(&native, &event);
+    if (handled == -1) {
+        for (const auto& [id, h] : hv::g_native_handlers) {
+            (void)id;
+            if (!h)
+                continue;
+            handled = h(&native, &event);
+            if (handled != -1)
+                break;
         }
-        if (handled == 0)
-            return 0;
     }
 
-    /* 2. library default conversion (WM_CLOSE/WM_SIZE/keyboard/mouse, etc.) */
-    const int def = default_native_convert(&native, &event);
-    if (def == 1) {
+    if (handled == 1) {
         event.window_id = window_id_of();
         hv::queue_push(event);
-        return 0; /* consume the message: whether the window is destroyed is up to the app */
     }
-    if (def == 0)
-        return 0;
-
-    return DefWindowProcW(hwnd, message, wparam, lparam);
+    return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 } // namespace
@@ -624,7 +693,9 @@ void heliosview_window_destroy(heliosview_window_t* window)
         return;
     g_windows_by_id.erase(window->id);
     if (window->hwnd) {
-        g_windows_by_hwnd.erase(window->hwnd);
+        /* The window is a passive registry only: it does not own trays/menus.
+         * Their C++ wrappers (Tray/Menu) must be destroyed before the window. */
+        SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */
     }
     hv::hv_dealloc(window);
@@ -663,8 +734,8 @@ int heliosview_window_show(heliosview_window_t* window)
         return -2;
 
     /* already registered in WM_NCCREATE; fall back here if that did not happen */
-    if (g_windows_by_hwnd.find(window->hwnd) == g_windows_by_hwnd.end())
-        g_windows_by_hwnd[window->hwnd] = window;
+    if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
+        SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
     ShowWindow(window->hwnd, SW_SHOW);
     return 0;
 }
@@ -672,6 +743,22 @@ int heliosview_window_show(heliosview_window_t* window)
 int32_t heliosview_window_id(const heliosview_window_t* window)
 {
     return window ? window->id : 0;
+}
+
+uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata)
+{
+    if (!window)
+        return 0;
+    const uint32_t id = window->next_route_id++;
+    window->registry[id] = userdata;
+    return id;
+}
+
+int heliosview_window_remove_item(heliosview_window_t* window, uint32_t id)
+{
+    if (!window)
+        return -1;
+    return window->registry.erase(id) ? 0 : -1;
 }
 
 /* ================= Window operations (show state / close / focus) ================= */
@@ -814,6 +901,190 @@ int heliosview_window_set_opacity(heliosview_window_t* window, float opacity)
     const LONG_PTR ex = GetWindowLongPtrW(window->hwnd, GWL_EXSTYLE);
     SetWindowLongPtrW(window->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
     SetLayeredWindowAttributes(window->hwnd, 0, static_cast<BYTE>(opacity * 255.0f), LWA_ALPHA);
+    return 0;
+}
+
+/* ================= Tray icon (Shell_NotifyIcon) ================= */
+
+namespace {
+
+/* Load an icon from a file path, or the default application icon when NULL/empty */
+HICON load_tray_icon(const wchar_t* path)
+{
+    if (path && *path)
+        return static_cast<HICON>(LoadImageW(nullptr, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
+    return LoadIconW(nullptr, reinterpret_cast<LPCWSTR>(IDI_APPLICATION));
+}
+
+/* Build the NOTIFYICONDATA for this tray (fresh each call; uFlags always set) */
+NOTIFYICONDATAW tray_nid(const heliosview_tray_t* tray)
+{
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = tray->hwnd;
+    nid.uID = tray->uid;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = tray->callback_msg;
+    nid.hIcon = tray->icon;
+    if (!tray->tooltip.empty())
+        wcsncpy_s(nid.szTip, tray->tooltip.c_str(), _TRUNCATE);
+    return nid;
+}
+
+/* Apply a Shell_NotifyIcon operation; returns 0 on success, negative on failure */
+int tray_apply(heliosview_tray_t* tray, DWORD msg)
+{
+    if (!tray || !tray->hwnd)
+        return -1;
+    NOTIFYICONDATAW nid = tray_nid(tray);
+    return Shell_NotifyIconW(msg, &nid) ? 0 : -1;
+}
+
+} // namespace
+
+heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const wchar_t* tooltip,
+                                          const wchar_t* icon_path, void* userdata)
+{
+    if (!window || !window->hwnd) /* the window must exist to receive callback messages */
+        return nullptr;
+
+    auto* tray = hv::hv_alloc<heliosview_tray>();
+    tray->hwnd = window->hwnd;
+    tray->callback_msg = heliosview_window_add_item(window, userdata); /* register routing id */
+    tray->uid = g_next_tray_uid.fetch_add(1);
+    tray->tooltip = tooltip ? tooltip : L"";
+    tray->icon = load_tray_icon(icon_path);
+    tray->userdata = userdata;
+
+    if (tray_apply(tray, NIM_ADD) != 0) {
+        heliosview_window_remove_item(window, tray->callback_msg);
+        if (tray->icon)
+            DestroyIcon(tray->icon);
+        hv::hv_dealloc(tray);
+        return nullptr;
+    }
+    tray->added = true;
+    return tray;
+}
+
+int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const wchar_t* tooltip)
+{
+    if (!tray)
+        return -1;
+    tray->tooltip = tooltip ? tooltip : L"";
+    return tray->added ? tray_apply(tray, NIM_MODIFY) : 0;
+}
+
+int heliosview_tray_set_icon(heliosview_tray_t* tray, const wchar_t* icon_path)
+{
+    if (!tray)
+        return -1;
+    HICON new_icon = load_tray_icon(icon_path);
+    if (tray->icon)
+        DestroyIcon(tray->icon);
+    tray->icon = new_icon;
+    return tray->added ? tray_apply(tray, NIM_MODIFY) : 0;
+}
+
+void heliosview_tray_destroy(heliosview_tray_t* tray)
+{
+    if (!tray)
+        return;
+    if (tray->added)
+        tray_apply(tray, NIM_DELETE);
+    if (tray->hwnd) {
+        if (auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(tray->hwnd, GWLP_USERDATA)))
+            heliosview_window_remove_item(win, tray->callback_msg);
+    }
+    if (tray->icon)
+        DestroyIcon(tray->icon);
+    hv::hv_dealloc(tray);
+}
+
+/* ================= Menu (CreatePopupMenu / TrackPopupMenu) ================= */
+
+heliosview_menu_t* heliosview_menu_create(heliosview_window_t* window, void* userdata)
+{
+    auto* menu = hv::hv_alloc<heliosview_menu>();
+    menu->window = window;
+    menu->userdata = userdata;
+    menu->hmenu = CreatePopupMenu();
+    if (!menu->hmenu) {
+        hv::hv_dealloc(menu);
+        return nullptr;
+    }
+    return menu;
+}
+
+void heliosview_menu_destroy(heliosview_menu_t* menu)
+{
+    if (!menu)
+        return;
+    /* drop this menu's item ids (keyed by this menu's userdata) from the owner
+     * window's routing registry */
+    if (menu->window) {
+        auto& reg = menu->window->registry;
+        for (auto it = reg.begin(); it != reg.end();)
+            it = it->second == menu->userdata ? reg.erase(it) : ++it;
+    }
+    /* destroy owned submenus (each recurses and removes its own item ids) */
+    while (!menu->submenus.empty()) {
+        heliosview_menu_t* sub = menu->submenus.back();
+        menu->submenus.pop_back();
+        heliosview_menu_destroy(sub);
+    }
+    if (menu->hmenu)
+        DestroyMenu(menu->hmenu);
+    hv::hv_dealloc(menu);
+}
+
+int heliosview_menu_add_item(heliosview_menu_t* menu, const wchar_t* text, uint32_t* out_id)
+{
+    if (!menu || !menu->hmenu || !menu->window)
+        return -1;
+    const UINT id = heliosview_window_add_item(menu->window, menu->userdata);
+    if (id == 0)
+        return -1;
+    if (!AppendMenuW(menu->hmenu, MF_STRING, id, text ? text : L"")) {
+        heliosview_window_remove_item(menu->window, id);
+        return -1;
+    }
+    if (out_id)
+        *out_id = id;
+    return 0;
+}
+
+int heliosview_menu_add_separator(heliosview_menu_t* menu)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    return AppendMenuW(menu->hmenu, MF_SEPARATOR, 0, nullptr) ? 0 : -1;
+}
+
+int heliosview_menu_add_submenu(heliosview_menu_t* menu, const wchar_t* text,
+                                heliosview_menu_t* submenu)
+{
+    if (!menu || !menu->hmenu || !submenu || !submenu->hmenu)
+        return -1;
+    if (!AppendMenuW(menu->hmenu, MF_POPUP,
+                     reinterpret_cast<UINT_PTR>(submenu->hmenu), text ? text : L""))
+        return -1;
+    menu->submenus.push_back(submenu); /* parent owns the submenu's lifetime */
+    return 0;
+}
+
+int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window)
+{
+    if (!menu || !menu->hmenu || !window || !window->hwnd)
+        return -1;
+    POINT pt{};
+    GetCursorPos(&pt);
+    /* give the menu a foreground window so it is dismissed when the user clicks
+     * elsewhere; item selection is delivered via WM_COMMAND to window->hwnd */
+    SetForegroundWindow(window->hwnd);
+    TrackPopupMenu(menu->hmenu,
+                   TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RIGHTBUTTON,
+                   pt.x, pt.y, 0, window->hwnd, nullptr);
     return 0;
 }
 

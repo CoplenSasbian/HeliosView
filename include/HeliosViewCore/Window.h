@@ -144,6 +144,10 @@ public:
     // The window id (the windowId field of events targeting this window; 0 before creation)
     int32_t id() const { return heliosview_window_id(m_window); }
 
+    // The raw C window handle (nullptr if not created/closed). Exposed so the
+    // low-level API (e.g. helios::Tray) can be used directly on the native handle.
+    heliosview_window_t* nativeHandle() const { return m_window; }
+
     /* ===== signals (window.keyPressed.connect(...)) ===== */
 
     Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
@@ -187,11 +191,6 @@ public:
         }
     }
 
-protected:
-    // The raw C window handle (nullptr if not created/closed); for subclass
-    // extension, e.g. WebViewWindow
-    heliosview_window_t* nativeHandle() const { return m_window; }
-
 private:
     heliosview_window_t* m_window = nullptr;
 };
@@ -210,6 +209,14 @@ inline int App::loopCallback(void* userdata)
             self->quit();
             break;
         }
+        /* app-level extension sinks first: decoupled objects (a Tray attached to a
+         * raw window handle, without a C++ Window) handle events here. */
+        bool handled = false;
+        for (const auto& [id, sink] : self->m_sinks)
+            if (sink && sink(ev)) { handled = true; break; }
+        if (handled)
+            continue;
+
         if (heliosview_window_t* win = heliosview_window_from_id(ev.windowId)) {
             if (auto* w = static_cast<Window*>(heliosview_window_userdata(win))) {
                 if (w->event(ev))

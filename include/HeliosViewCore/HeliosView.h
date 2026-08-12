@@ -11,6 +11,8 @@
  *   - Types.h         event types and structures (1:1 with the C interface)
  *   - App.h           message loop + event queue
  *   - Window.h        top-level window + signals
+ *   - Tray.h          system notification-area (tray) icon + signals
+ *   - Menu.h          popup / context menu + signals
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
  *   - Async.h         background async I/O: thread pool + platform multiplexer (socket/file, sender-based)
  *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
@@ -29,7 +31,9 @@
 
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Async.h>
+#include <HeliosViewCore/Menu.h>
 #include <HeliosViewCore/Signal.h>
+#include <HeliosViewCore/Tray.h>
 #include <HeliosViewCore/Types.h>
 #include <HeliosViewCore/WebViewJson.h>
 #include <HeliosViewCore/WebViewWindow.h>

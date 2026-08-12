@@ -72,7 +72,12 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_KEY_UP,
     HELIOSVIEW_EVENT_MOUSE_MOVE,
     HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN,
-    HELIOSVIEW_EVENT_MOUSE_BUTTON_UP
+    HELIOSVIEW_EVENT_MOUSE_BUTTON_UP,
+    HELIOSVIEW_EVENT_TRAY_LEFT_CLICK,        /* tray icon left click */
+    HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK, /* tray icon left double click */
+    HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK,       /* tray icon right click (context menu) */
+    HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK,      /* tray icon middle click */
+    HELIOSVIEW_EVENT_MENU_SELECT             /* a menu item was chosen (menu_item = item id) */
 } heliosview_event_type_t;
 
 /* Platform-independent keycodes (native keycodes are mapped in the C layer) */
@@ -152,6 +157,8 @@ typedef struct heliosview_event {
     int32_t height;                          /* window height (WINDOW_RESIZE) */
     heliosview_keycode_t key;                /* keycode (KEY_DOWN / KEY_UP) */
     heliosview_mouse_button_t mouse_button;  /* button (MOUSE_BUTTON_*) */
+    uint32_t menu_item;                      /* menu item id (MENU_SELECT) */
+    void* userdata;                          /* owning tray/menu userdata (TRAY_* / MENU_SELECT) */
 } heliosview_event_t;
 
 /* ================= Event queue =================
@@ -186,11 +193,19 @@ HELIOSVIEW_API void heliosview_wake_loop(void);
  * message-dispatch thread). Return value:
  *   1  -> converted to an event written to out_event (queued)
  *   0  -> consumed, not queued
- *  -1  -> not handled; fall back to the library's built-in conversion
- * If no delegate is registered, all messages use the built-in conversion. */
+ *  -1  -> not handled; the next converter is tried
+ * The library's built-in conversion always runs first; registered converters are
+ * then tried in registration order, and the first that returns 1 or 0 wins. If no
+ * converter returns 1 or 0, the message falls through to the platform (DefWindowProc). */
 typedef int (*heliosview_native_handler_fn)(void* native_msg, heliosview_event_t* out_event);
 
-HELIOSVIEW_API void heliosview_set_native_handler(heliosview_native_handler_fn handler);
+/* Register a converter (see above). Returns an id used by
+ * heliosview_remove_native_handler (0 = failure, e.g. null handler). */
+HELIOSVIEW_API uint32_t heliosview_add_native_handler(heliosview_native_handler_fn handler);
+
+/* Remove a converter previously registered with heliosview_add_native_handler.
+ * 0 = success, negative = not registered. */
+HELIOSVIEW_API int heliosview_remove_native_handler(uint32_t id);
 
 /* ================= Message loop ================= */
 
@@ -292,6 +307,108 @@ HELIOSVIEW_API int heliosview_window_set_opacity(heliosview_window_t* window, fl
 
 /* Window id (source of window_id in events) */
 HELIOSVIEW_API int32_t heliosview_window_id(const heliosview_window_t* window);
+
+/* ================= Window routing registry =================
+ *
+ * The window keeps a type-erased registry: a native routing id -> caller userdata
+ * (a void*, e.g. a C++ object pointer). A registered id can be used as a native
+ * message id (a menu item id / WM_COMMAND id, or a tray callback message) and the
+ * default native-message conversion resolves the resulting event back to the
+ * userdata (the event's `userdata` field). Tray icons and menu items are built on
+ * this, and it is exposed so callers can register their own routing ids too.
+ * Registered ids must be removed with heliosview_window_remove_item.
+ */
+
+/* Allocate a routing id on `window`, associate it with `userdata`, and store it
+ * in the window's registry. Returns the id (never 0; 0 = failure, e.g. null window
+ * or the id space is exhausted). */
+HELIOSVIEW_API uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata);
+
+/* Remove a routing id previously returned by heliosview_window_add_item.
+ * 0 = success, negative = invalid window or the id is not registered. */
+HELIOSVIEW_API int heliosview_window_remove_item(heliosview_window_t* window, uint32_t id);
+
+/* ================= Tray icon (system tray notification icon) =================
+ *
+ * A tray icon is attached to a window and shows an icon in the OS notification
+ * area. Mouse events on the icon (single/double click, right/middle click) are
+ * converted into heliosview events with the associated window's window_id
+ * (see HELIOSVIEW_EVENT_TRAY_*), so they flow through the normal event queue.
+ *
+ * Note: the target window must already be created (shown) before creating a tray
+ * on it, because the tray posts its callback messages to the window's HWND.
+ *
+ * The icon is loaded from a .ico/.cur/etc. file path (UTF-16 on Windows); pass
+ * NULL to use the default application icon. Destroy the tray before destroying
+ * its window (destroying the window destroys any trays attached to it).
+ */
+
+typedef struct heliosview_tray heliosview_tray_t;
+
+/* Create and show a tray icon attached to `window` with the given tooltip
+ * (UTF-16) and icon file path (NULL = default icon). `userdata` is caller data
+ * (e.g. a C++ Tray object) copied verbatim into the TRAY_* events this tray
+ * produces. Returns NULL on failure. */
+HELIOSVIEW_API heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window,
+                                                         const wchar_t* tooltip,
+                                                         const wchar_t* icon_path,
+                                                         void* userdata);
+
+/* Update the tray tooltip. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const wchar_t* tooltip);
+
+/* Replace the tray icon, loaded from an icon file path (NULL = default icon).
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_tray_set_icon(heliosview_tray_t* tray, const wchar_t* icon_path);
+
+/* Remove the tray icon and free the tray handle. Also called automatically when
+ * the owning window is destroyed. */
+HELIOSVIEW_API void heliosview_tray_destroy(heliosview_tray_t* tray);
+
+/* ================= Menu (popup / context menu) =================
+ *
+ * A popup menu that can be attached to a window and shown (typically at the
+ * current cursor position, e.g. for a tray-icon right-click context menu).
+ * Each item is assigned a unique id; choosing an item posts a
+ * HELIOSVIEW_EVENT_MENU_SELECT event (with menu_item = the item id and
+ * window_id = the owner window), which flows through the normal event queue.
+ *
+ * Items are added with heliosview_menu_add_item; the caller receives the item's
+ * id via out_id (used to match the event). Submenus are added by handle: the
+ * parent menu takes ownership of them (destroying the parent destroys its
+ * submenus). heliosview_menu_show tracks the menu at the current cursor
+ * position, attached to `window` (which must already be created).
+ */
+
+typedef struct heliosview_menu heliosview_menu_t;
+
+/* Create an empty popup menu attached to `window`. The window owns the menu:
+ * its items are registered on the window so MENU_SELECT events can be routed
+ * back to this menu (via `userdata`, copied verbatim into the event). The menu
+ * and all its submenus must share the same owner window. Returns NULL on failure. */
+HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create(heliosview_window_t* window,
+                                                         void* userdata);
+
+/* Destroy the menu and all its submenus. */
+HELIOSVIEW_API void heliosview_menu_destroy(heliosview_menu_t* menu);
+
+/* Add a text item; its unique id is written to out_id (NULL = ignore).
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_add_item(heliosview_menu_t* menu, const wchar_t* text,
+                                            uint32_t* out_id);
+
+/* Add a separator. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);
+
+/* Add `submenu` as a submenu under `text`. The parent takes ownership of the
+ * submenu. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const wchar_t* text,
+                                               heliosview_menu_t* submenu);
+
+/* Show the menu at the current cursor position, owned by `window` (its HWND
+ * receives the WM_COMMAND that yields the MENU_SELECT event). 0 = success,
+ * negative = error code. */
+HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window);
 
 /* ================= WebView (Win32: WebView2) =================
  *

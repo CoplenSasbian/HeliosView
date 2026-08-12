@@ -14,9 +14,11 @@
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Types.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <flat_map>
 #include <functional>
 #include <mutex>
 #include <utility>
@@ -26,6 +28,8 @@ namespace helios {
 struct app_scheduler; /* Forward declaration (defined below). */
 
 class Window; /* Only used for the userdata static_cast. */
+class Tray;   /* Only used for the friend (extension sink registry); defined in Tray.h. */
+class Menu;   /* Only used for the friend (extension sink registry); defined in Menu.h. */
 
 class App {
 public:
@@ -82,10 +86,18 @@ public:
     }
 
     // Register a native-message -> event converter callback (see heliosview.h for
-    // the return-value contract). Pass nullptr to fall back to the built-in conversion.
-    void setNativeHandler(heliosview_native_handler_fn handler)
+    // the return-value contract). The library's built-in conversion always runs
+    // first; registered converters are tried in order, and the first returning 1/0
+    // wins. Returns an id (0 = failure).
+    static uint32_t addNativeHandler(heliosview_native_handler_fn handler)
     {
-        heliosview_set_native_handler(handler);
+        return heliosview_add_native_handler(handler);
+    }
+
+    // Remove a converter registered with addNativeHandler.
+    static void removeNativeHandler(uint32_t id)
+    {
+        heliosview_remove_native_handler(id);
     }
 
     // Post a task to the message loop; callable from any thread. fn runs on the
@@ -128,6 +140,26 @@ private:
     std::mutex m_task_mutex;
     std::deque<std::function<void()>> m_tasks;
     static inline App* s_instance = nullptr;
+
+    /* ---- extension event sinks (see Tray.h / Menu.h) ----
+     * Decoupled objects (a Tray/Menu attached to a raw heliosview_window_t,
+     * without a C++ Window wrapper) register here to receive the events they
+     * handle. The message loop consults these sinks before window dispatch; a
+     * sink returns true when it handled the event. Tray and Menu are friends. */
+    using SinkId = std::size_t;
+    std::flat_map<SinkId, std::function<bool(const Event&)>> m_sinks;
+    SinkId m_nextSink = 1;
+    friend class Tray;
+    friend class Menu;
+
+    SinkId addSink(std::function<bool(const Event&)> sink)
+    {
+        const SinkId id = m_nextSink++;
+        m_sinks.emplace(id, std::move(sink));
+        return id;
+    }
+
+    void removeSink(SinkId id) { m_sinks.erase(id); }
 };
 
 /* ---------- App scheduler (std::execution::scheduler) ----------

@@ -378,7 +378,44 @@ You can also use the raw C-style bridge: `bind` (JSON string of args),
 > `evalAsync` call is still in flight. The WebView must be destroyed before its
 > parent window.
 
-### 5. The C API
+### 5. Tray icon + popup / context menu
+
+`helios::Tray` shows an icon in the OS notification area; `helios::Menu` is a
+popup / context menu. Both are attached to a **created (shown)** native window
+via `window.nativeHandle()` and respond through signals. They are decoupled from
+the `Window` wrapper — they only need the raw handle.
+
+```cpp
+helios::Window window(800, 600, L"Tray Demo");
+window.show();                              // window must exist first
+
+helios::Menu menu(window.nativeHandle());
+helios::Menu::Item* show  = menu.addItem(L"Show / Restore");
+helios::Menu::Item* quit  = menu.addItem(L"Quit");
+menu.addSeparator();
+show->triggered.connect([&] { window.showNormal(); });
+quit->triggered.connect([&] { app.quit(); });
+
+helios::Tray tray(window.nativeHandle(), L"Tray Demo");   // tooltip
+tray.leftClicked.connect([] { /* ... */ });
+tray.rightClicked.connect([&] { menu.show(window.nativeHandle()); }); // context menu at cursor
+tray.leftDoubleClicked.connect([&] { app.quit(); });
+
+window.mouseButtonPressed.connect([&](int x, int y, helios::MouseButton b) {
+    menu.show(window.nativeHandle());       // also on a right-click in the window
+});
+```
+
+- `Tray` signals: `leftClicked`, `leftDoubleClicked`, `rightClicked`,
+  `middleClicked`. The icon is loaded from an `.ico`/`.cur` path (UTF-16);
+  pass `nullptr` for the default application icon.
+- `Menu::addItem` / `addSeparator` / `addSubmenu`, and `menu.show(window)` pops it
+  at the current cursor position. Submenus are owned by the parent.
+- Tray and menu handle their own events via the App's extension-sink registry,
+  so they need no C++ `Window` wrapper. **Destroy the tray/menu before their
+  window.**
+
+### 6. The C API
 
 Every C++ feature is a thin wrapper over `include/HeliosView/heliosview.h` — a
 pure C header (`extern "C"`, POD types, no C++ objects or exceptions across the
@@ -442,6 +479,42 @@ heliosview_run(frame, NULL);
 `heliosview_window_from_id(ev.window_id)` maps an event's window id back to the
 opaque handle. When the last window is destroyed the loop keeps running — call
 `heliosview_quit()` to end it.
+
+##### Tray icon + menu, and native-message conversion
+
+The C layer exposes the same tray/menu primitives, plus a **window routing
+registry** that lets you associate a routing id with your own `userdata` so the
+default conversion resolves tray/menu/custom messages back to that object
+(`ev.userdata`):
+
+```c
+/* tray: show an icon, then route click events via the normal queue */
+heliosview_tray_t* tray = heliosview_tray_create(win, L"tooltip", NULL, my_ctx);
+/* HELIOSVIEW_EVENT_TRAY_LEFT_CLICK / _LEFT_DOUBLE_CLICK / _RIGHT_CLICK / _MIDDLE_CLICK
+   arrive on the queue with ev.window_id = win's id and ev.userdata = my_ctx */
+heliosview_tray_destroy(tray);
+
+/* popup menu: add items; choosing one posts HELIOSVIEW_EVENT_MENU_SELECT
+   with ev.menu_item = the item id */
+heliosview_menu_t* menu = heliosview_menu_create(win, my_ctx);
+uint32_t quit_id;
+heliosview_menu_add_item(menu, L"Quit", &quit_id);
+heliosview_menu_show(menu, win);
+```
+
+`heliosview_window_add_item(win, userdata)` / `heliosview_window_remove_item`
+allocate/free routing ids on a window; the id becomes a WM_APP message id
+(tray) or a WM_COMMAND LOWORD (menu) that `default_native_convert` maps back to
+`userdata`. Register your own ids for the same routing.
+
+Custom native-message → event conversion uses an ordered, id-keyed registry
+(the library's built-in conversion always runs **first**, then registered
+handlers in registration order; the first returning 1/0 wins):
+
+```c
+uint32_t id = heliosview_add_native_handler(my_convert);   /* replaces set_native_handler */
+heliosview_remove_native_handler(id);
+```
 
 #### WebView + JS ⇄ native bridge
 
@@ -567,6 +640,8 @@ include/HeliosViewCore/               header-only C++ wrapper
   Types.h                             event types (1:1 with the C API)
   App.h                               message loop + UI-thread scheduler
   Window.h                            top-level window
+  Tray.h                              system notification-area (tray) icon + signals
+  Menu.h                              popup / context menu + signals
   Execution.h                         C++26 <execution> compat (stdexec on C++23)
   Async.h                             thread pool + file/TCP async APIs
   WebViewWindow.h                     window embedding a WebView

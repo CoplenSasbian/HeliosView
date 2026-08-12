@@ -26,7 +26,26 @@ enum class EventType : int32_t {
     MouseMove = HELIOSVIEW_EVENT_MOUSE_MOVE,
     MouseButtonDown = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN,
     MouseButtonUp = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP,
+    TrayLeftClick = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK,
+    TrayLeftDoubleClick = HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK,
+    TrayRightClick = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK,
+    TrayMiddleClick = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK,
+    MenuSelect = HELIOSVIEW_EVENT_MENU_SELECT,
 };
+
+// True for the tray-icon mouse event types (see Tray.h)
+inline bool isTrayEvent(EventType type)
+{
+    switch (type) {
+    case EventType::TrayLeftClick:
+    case EventType::TrayLeftDoubleClick:
+    case EventType::TrayRightClick:
+    case EventType::TrayMiddleClick:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // Platform-independent keycode (native keycodes are mapped by the C layer)
 enum class KeyCode : int32_t {
@@ -124,6 +143,8 @@ struct Event {
     int32_t height = 0;              /* new height (WindowResize) */
     KeyCode key = KeyCode::Unknown;  /* key code (KeyDown / KeyUp) */
     MouseButton mouseButton = MouseButton::Left; /* button (MouseButton*) */
+    uint32_t menuItem = 0;           /* menu item id (MenuSelect) */
+    void* userdata = nullptr;        /* owning Tray/Menu object (Tray* / MenuSelect) */
 
     // Convert a C-layer event (heliosview_event_t) to its C++ Event form
     static Event fromC(const heliosview_event_t& c)
@@ -138,6 +159,8 @@ struct Event {
         e.height = c.height;
         e.key = static_cast<KeyCode>(c.key);
         e.mouseButton = static_cast<MouseButton>(c.mouse_button);
+        e.menuItem = c.menu_item;
+        e.userdata = c.userdata;
         return e;
     }
 
@@ -154,6 +177,8 @@ struct Event {
         c.height = height;
         c.key = static_cast<heliosview_keycode_t>(key);
         c.mouse_button = static_cast<heliosview_mouse_button_t>(mouseButton);
+        c.menu_item = menuItem;
+        c.userdata = userdata;
         return c;
     }
 };

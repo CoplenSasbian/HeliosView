@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <flat_map>
 #include <new>
 #include <utility>
 
@@ -55,7 +56,14 @@ void hv_dealloc(T* p)
 
 inline thread_local std::deque<heliosview_event_t> g_queue;
 inline std::atomic<bool> g_quit{false}; /* process/loop-wide control flag; may be set from any thread */
-inline heliosview_native_handler_fn g_native_handler = nullptr;
+
+/* Native-message -> event converters. Registered handlers are tried in id order
+ * after the library's built-in default_native_convert (which always runs first);
+ * the first converter to return 1 (queued) or 0 (consumed) wins. Only ever touched
+ * on the message-loop thread (add/remove happen during app setup, iteration in the
+ * WndProc), so no locking is needed. */
+inline std::atomic<uint32_t> g_next_handler_id{1};
+inline std::flat_map<uint32_t, heliosview_native_handler_fn> g_native_handlers;
 
 /* Platform wake callback: the win32 implementation registers SetEvent (wakes the message-loop wait); may be null */
 inline void (*g_platform_wake)(void) = nullptr;

@@ -75,9 +75,23 @@ void heliosview_wake_loop(void)
         hv::g_platform_wake();
 }
 
-/* ================= Conversion delegate ================= */
+/* ================= Conversion delegates ================= */
 
-void heliosview_set_native_handler(heliosview_native_handler_fn handler)
+/* Register `handler`. It is tried after the library's built-in default conversion
+ * (which always runs first); the first converter returning 1 or 0 wins. Returns an
+ * id (0 = failure, e.g. null handler). */
+uint32_t heliosview_add_native_handler(heliosview_native_handler_fn handler)
 {
-    hv::g_native_handler = handler;
+    if (!handler)
+        return 0;
+    const uint32_t id = hv::g_next_handler_id.fetch_add(1);
+    hv::g_native_handlers[id] = handler;
+    return id;
+}
+
+/* Remove a handler previously registered with heliosview_add_native_handler.
+ * 0 = success, negative = the id is not registered. */
+int heliosview_remove_native_handler(uint32_t id)
+{
+    return hv::g_native_handlers.erase(id) ? 0 : -1;
 }
