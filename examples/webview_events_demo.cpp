@@ -1,7 +1,7 @@
 // HeliosView.Core example: WebView events, local resource mapping, folder dialog.
-// Demonstrates the three features added for UI work on top of the bridge:
-//   - navigationCompleted: fires on the UI thread when a page load finishes or
-//     fails (error != 0), so the app knows when the page is ready for eval()
+// Demonstrates the features added for UI work on top of the bridge:
+//   - navigationStarting (with navigationStartingGate veto) / urlChanged /
+//     titleChanged / navigationCompleted: WebView navigation events
 //   - mapLocalFolder: maps a local folder to a virtual https://assets.local/ host
 //     so the page can load images/files that are not part of the frontend
 //   - helios::selectFolder: native folder-picker dialog, callable from the page
@@ -27,8 +27,35 @@ int main()
     window->show();
     window->createWebView();
 
-    /* ---- navigationCompleted: know when the page is ready (and when it failed) ---- */
+    /* ---- navigation events ---- */
 
+    // navigationStarting: fires before a navigation begins. Here a sync slot logs
+    // the target URI.
+    window->navigationStarting.connect([](std::string uri, bool redirect, bool user) {
+        std::println("[nav-start] {} uri='{}' (redirect={}, user={})",
+                     redirect ? "redirect" : "new-doc", uri, redirect, user);
+    });
+
+    // navigationStartingGate (optional): return true to cancel a navigation.
+    // This example spies without cancelling (always returns false = allow).
+    window->navigationStartingGate = [](const std::string& uri, bool redirect, bool user) {
+        std::println("[gate] would-allow '{}' (redirect={}, user={})", uri, redirect, user);
+        if (uri.starts_with("https://external.example/"))
+            std::println("[gate]  -> blocked external link");
+        return uri.starts_with("https://external.example/");
+    };
+
+    // urlChanged: the WebView's current URL changed.
+    window->urlChanged.connect([](std::string uri, bool newDoc) {
+        std::println("[url] '{}' (new-document={})", uri, newDoc);
+    });
+
+    // titleChanged: the page's <title> changed.
+    window->titleChanged.connect([](std::string title) {
+        std::println("[title] '{}'", title);
+    });
+
+    // navigationCompleted: know when the page is ready (and when it failed).
     window->navigationCompleted.connect([](int error) {
         if (error == 0)
             std::println("[navigation] page loaded OK (ready for eval)");
@@ -61,10 +88,10 @@ int main()
                                     co_return helios::JsonResp<std::string>{ok ? "path" : "cancelled", ok ? path : ""};
                                 });
 
-    /* ---- a page that uses all three ---- */
+    /* ---- a page that uses all of the above ---- */
 
     window->navigateHtml(
-        "<html><head><meta charset='utf-8'></head>"
+        "<html><head><meta charset='utf-8'><title>HeliosView 事件</title></head>"
         "<body style='font-family:system-ui;background:#1e1e2e;color:#cdd6f4;margin:0;"
         "height:100%;display:flex;flex-direction:column'>"
         "<div style='padding:12px'>"
@@ -74,11 +101,12 @@ int main()
         " style='background:#111;border-radius:8px' onerror=\"this.style.visibility='hidden'\">"
         "<span>本地资源: https://assets.local/logo.svg</span>"
         "<button onclick=\"browse()\">浏览文件夹…</button>"
+        "<button onclick=\"document.title += ' #' + (++window.__n||1)\">改标题</button>"
         "<span id='picked' style='opacity:.6'></span>"
         "</div></div>"
         "<div id='log' style='flex:1;overflow:auto;padding:0 12px 12px;"
         "font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.5'>"
-        "<div style='opacity:.6'>页面加载完成后, 右侧日志会记录 native 的 navigationCompleted 事件</div></div>"
+        "<div style='opacity:.6'>页面加载后, 右侧日志记录 navigationStarting / urlChanged / titleChanged / navigationCompleted</div></div>"
         "<script>"
         "  const log = document.getElementById('log');"
         "  function line(txt) {"

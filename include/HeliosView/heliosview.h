@@ -530,6 +530,34 @@ HELIOSVIEW_API int heliosview_webview_unsubscribe(heliosview_webview_t* webview,
 
 /* ================= WebView events & local resources ================= */
 
+/* Callback for navigation-start events: fires on the UI thread when a new
+ * navigation begins (the initial load, links, programmatic navigate, browser
+ * back/forward, and redirects). uri is the target URI (UTF-8, valid for the
+ * duration of the call). is_redirected / is_user_initiated follow WebView2's
+ * NavigationStarting semantics (1/0). The callback's return value cancels the
+ * navigation when non-zero (0 = let it proceed). */
+typedef int (*heliosview_webview_navigation_starting_cb)(heliosview_webview_t* webview,
+                                                         const char* uri,
+                                                         int is_redirected,
+                                                         int is_user_initiated,
+                                                         void* userdata);
+
+/* Callback for source-changed (URL-changed) events: fires on the UI thread when
+ * the WebView's Source (current URL) property changes. uri is the new source URI
+ * (UTF-8, valid for the duration of the call); is_new_document is 1 when the
+ * source change is due to a new document load, 0 for an in-document change. */
+typedef void (*heliosview_webview_source_changed_cb)(heliosview_webview_t* webview,
+                                                     const char* uri,
+                                                     int is_new_document,
+                                                     void* userdata);
+
+/* Callback for document-title events: fires on the UI thread when the page's
+ * title changes. title is the new document title (UTF-8, valid for the duration
+ * of the call). */
+typedef void (*heliosview_webview_title_changed_cb)(heliosview_webview_t* webview,
+                                                    const char* title,
+                                                    void* userdata);
+
 /* Register a navigation-completed callback (replacing any previous one and
  * running its dtor). The callback fires on the UI thread when a navigation
  * completes or fails; it is not called for navigations that never finish
@@ -538,6 +566,34 @@ HELIOSVIEW_API int heliosview_webview_set_navigation_callback(heliosview_webview
                                                               heliosview_webview_navigation_cb callback,
                                                               void* userdata,
                                                               heliosview_webview_userdata_dtor dtor);
+
+/* Register a navigation-starting callback (replacing any previous one and
+ * running its dtor). Fires on the UI thread just before a navigation begins;
+ * returning non-zero cancels it (e.g. to block cross-origin or external links).
+ * UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_navigation_starting_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_navigation_starting_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
+
+/* Register a source-changed (URL-changed) callback (replacing any previous one
+ * and running its dtor). Fires on the UI thread whenever the WebView's current
+ * URL changes. UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_source_changed_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_source_changed_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
+
+/* Register a document-title-changed callback (replacing any previous one and
+ * running its dtor). Fires on the UI thread when the page title changes.
+ * UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_title_changed_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_title_changed_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
 
 /* Map a local folder to a virtual host name so the page can load files from it
  * via https://<host>/<relative-path>. Used to serve images or other local assets
