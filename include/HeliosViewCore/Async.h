@@ -285,6 +285,18 @@ void postTramp(int error, void* userdata)
     destroyCtx(ctx);
 }
 
+// Timer task: the C timer's callback. Runs fn, then destroys the timer handle
+// (dropping its caller ref; the timer thread's task ref frees it afterwards).
+template <typename Ctx>
+void timerTramp(int error, void* userdata)
+{
+    (void)error;
+    auto* ctx = static_cast<Ctx*>(userdata);
+    ctx->fn();
+    heliosview_timer_destroy(ctx->timer);
+    destroyCtx(ctx);
+}
+
 template <typename Ctx>
 void transferTramp(int error, uint32_t bytes, void* userdata)
 {
@@ -298,7 +310,12 @@ void readTramp(int error, const char* data, uint32_t len, void* userdata)
 {
     auto* ctx = static_cast<Ctx*>(userdata);
     ctx->fn(error, data, len);
-    destroyCtx(ctx);
+    /* Streaming read: the C layer reuses the same userdata for every chunk, so
+     * the Ctx must stay alive between chunks. Only the terminal callback
+     * (error, or peer close with len == 0) frees it; a chunk callback
+     * (error == 0 && len > 0) must not. */
+    if (error != 0 || len == 0)
+        destroyCtx(ctx);
 }
 
 template <typename Ctx>
@@ -395,6 +412,9 @@ template <class ValueT>
 struct op_sink {
     virtual ~op_sink() = default;
     virtual void complete(int error, const void* value) = 0; /* value = &ValueT on success, else nullptr */
+    /* like complete(), but the caller hands ownership of the value over
+     * (*value is moved from): avoids copying a large value into the receiver */
+    virtual void complete_move(int error, void* value) = 0;
     virtual void* op_data() noexcept = 0;                    /* the op's data (Config::data_t) */
 };
 
@@ -424,6 +444,15 @@ struct op_state : op_sink<typename Config::value_t> {
         if (error == 0)
             std::execution::set_value(std::move(recv),
                                       *static_cast<const typename Config::value_t*>(value));
+        else
+            std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(error)));
+    }
+
+    void complete_move(int error, void* value) override
+    {
+        if (error == 0)
+            std::execution::set_value(std::move(recv),
+                                      std::move(*static_cast<typename Config::value_t*>(value)));
         else
             std::execution::set_error(std::move(recv), std::make_exception_ptr(IoError(error)));
     }
@@ -579,6 +608,28 @@ public:
         auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(fn));
         if (heliosview_loop_post(m_loop, &detail::postTramp<Ctx>, ctx) != 0)
             detail::postTramp<Ctx>(0, ctx); /* submission failed: run inline, then free */
+    }
+
+    // Run fn once, after delayMs milliseconds, on a worker thread. Backed by the
+    // loop's one-shot timer service (heliosview_timer_create): all deadlines are
+    // tracked by a single internal timer thread, so a pending task occupies no
+    // worker. Fire-and-forget: not cancellable. On a synchronous submission error
+    // fn runs inline on the calling thread.
+    template <class Fn>
+    void postAfter(uint32_t delayMs, Fn&& fn)
+    {
+        using F = std::decay_t<Fn>;
+        struct Ctx {
+            std::pmr::memory_resource* resource;
+            F fn;
+            heliosview_timer_t* timer;
+        };
+        auto* ctx = detail::makeCtx<Ctx>(std::pmr::get_default_resource(), std::forward<Fn>(fn));
+        ctx->timer = heliosview_timer_create(m_loop, delayMs, &detail::timerTramp<Ctx>, ctx);
+        if (!ctx->timer) {
+            ctx->fn();
+            detail::destroyCtx(ctx); /* submission failed: run inline, then free */
+        }
     }
 
     // ---- async TCP (callback API) ----
@@ -750,6 +801,10 @@ public:
     // on a worker thread:
     //   std::execution::schedule(async.get_scheduler()) | std::execution::then(...)
     loop_scheduler get_scheduler() const noexcept { return {m_loop}; }
+
+    // The underlying native loop handle (for C-layer calls that take a loop,
+    // e.g. the HTTP client in HeliosViewCore/Http.h)
+    heliosview_loop_t* handle() const noexcept { return m_loop; }
 
     // ---- std::execution: sender-based async ops ----
     // Failures are reported as set_error(std::exception_ptr(IoError)) (code() holds

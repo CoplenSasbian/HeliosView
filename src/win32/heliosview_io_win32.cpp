@@ -9,7 +9,10 @@
 #include <windows.h>
 #include <mswsock.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -86,7 +89,7 @@ struct socket_read_op : io_op {
     void* userdata;
     heliosview_socket* tcp = nullptr;   /* owning tcp (for the termination protocol) */
     std::atomic<bool> cancelled{false}; /* set by read_stop/close, read by worker threads */
-    bool tcp_owned = false;          /* close() transfers tcp ownership: freed together on cancellation */
+    std::atomic<bool> tcp_owned{false}; /* close() transfers tcp ownership: freed together on cancellation */
 };
 
 struct file_io_op : io_op {
@@ -97,11 +100,33 @@ struct file_io_op : io_op {
 
 /* ================= Handle structures (complete the opaque declarations from the header; must be at global scope) ================= */
 
+/* One-shot timer (see heliosview_timer_create). Caller-owned: refs starts at 1
+ * and the caller drops it with heliosview_timer_destroy; the timer thread takes
+ * an extra ref while the callback task is in flight. */
+struct heliosview_timer {
+    heliosview_loop* loop;
+    std::chrono::steady_clock::time_point deadline;
+    uint64_t seq = 0;              /* creation order: tie-breaker for equal deadlines */
+    heliosview_completion_cb cb;
+    void* userdata;
+    std::atomic<int> refs{1};
+    bool in_heap = false;          /* guarded by loop->timer_mutex */
+};
+
 struct heliosview_loop {
     HANDLE iocp = nullptr;
     HANDLE stop_event = nullptr;
     std::vector<std::thread> workers;
     std::atomic<bool> stopping{false};
+
+    /* One-shot timer service: a single timer thread owns a min-heap of deadlines,
+     * so pending timers occupy no worker thread (see heliosview_timer_create). */
+    std::thread timer_thread;
+    std::mutex timer_mutex;
+    std::condition_variable timer_cv;
+    std::vector<heliosview_timer*> timers;
+    uint64_t timer_seq = 0;
+    bool timer_shutdown = false;   /* guarded by timer_mutex */
 };
 
 struct heliosview_socket {
@@ -121,6 +146,7 @@ namespace {
 /* Forward declarations (called from worker_main) */
 void do_connect(connect_task* task);
 void do_open(open_task* task);
+void timer_thread_main(heliosview_loop* loop);
 
 /* Winsock reference counting (multiple loops may coexist) */
 void ensure_winsock()
@@ -152,7 +178,7 @@ void release_winsock()
 void finish_read_op(socket_read_op* r)
 {
     if (r->cancelled.load()) {
-        if (r->tcp_owned) {
+        if (r->tcp_owned.load()) {
             hv::hv_dealloc(r->tcp); /* close() has transferred tcp ownership to this op */
         } else {
             r->tcp->read_op = nullptr; /* read_stop(): reading can be restarted */
@@ -227,7 +253,8 @@ void worker_main(heliosview_loop* loop)
         case OpKind::SocketRead: {
             auto* r = static_cast<socket_read_op*>(op);
             if (r->cancelled.load()) {
-                finish_read_op(r); /* cancelled: release silently */
+                r->cb(HELIOSVIEW_IO_CANCELLED, nullptr, 0, r->userdata); /* cancelled: terminal callback */
+                finish_read_op(r);
                 break;
             }
             if (error != 0) {
@@ -243,6 +270,12 @@ void worker_main(heliosview_loop* loop)
             r->cb(0, r->buf, bytes, r->userdata);
             /* continue reading */
             if (r->cancelled.load()) {
+                /* The chunk callback already delivered this op's result; a cancel
+                 * that arrived during the callback (e.g. a single-shot read's
+                 * internal read_stop()) must NOT fire a second callback: the
+                 * caller-side userdata may already be freed. Outside cancels
+                 * (read_stop/close) surface through the aborted completion
+                 * handled above, which delivers exactly one terminal callback. */
                 finish_read_op(r);
                 break;
             }
@@ -371,6 +404,56 @@ void do_open(open_task* task) /* on a worker thread: CreateFile + associate with
     hv::hv_dealloc(task);
 }
 
+/* ================= One-shot timer service ================= */
+
+/* Min-heap ordering: earliest (deadline, seq) at the front. */
+bool timerLater(const heliosview_timer* a, const heliosview_timer* b)
+{
+    if (a->deadline != b->deadline)
+        return a->deadline > b->deadline;
+    return a->seq > b->seq;
+}
+
+/* Runs on a worker thread: the timer fired; invoke its callback and drop the
+ * task ref (the timer is freed when the caller's ref is gone too). */
+void timer_task_tramp(int, void* userdata)
+{
+    auto* t = static_cast<heliosview_timer*>(userdata);
+    t->cb(0, t->userdata);
+    if (t->refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        hv::hv_dealloc(t); /* the caller already destroyed its handle */
+}
+
+/* Single timer thread per loop: sleeps until the earliest deadline, then posts
+ * the callback as an ordinary pool task (so it runs on a worker thread and no
+ * worker is ever parked waiting for a deadline). */
+void timer_thread_main(heliosview_loop* loop)
+{
+    std::unique_lock<std::mutex> lock(loop->timer_mutex);
+    for (;;) {
+        if (loop->timer_shutdown)
+            return;
+        if (loop->timers.empty()) {
+            loop->timer_cv.wait(lock);
+            continue;
+        }
+        auto* t = loop->timers.front();
+        if (std::chrono::steady_clock::now() >= t->deadline) {
+            std::pop_heap(loop->timers.begin(), loop->timers.end(), timerLater);
+            loop->timers.pop_back();
+            t->in_heap = false;
+            t->refs.fetch_add(1, std::memory_order_relaxed); /* task ref */
+            if (heliosview_loop_post(loop, &timer_task_tramp, t) != 0) {
+                /* loop is stopping: the task will never run; drop the task ref
+                 * (the caller's destroy still frees the timer) */
+                t->refs.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        } else {
+            loop->timer_cv.wait_until(lock, t->deadline);
+        }
+    }
+}
+
 } // namespace
 
 /* ================= Loop API ================= */
@@ -396,6 +479,7 @@ heliosview_loop_t* heliosview_loop_create(unsigned thread_count)
         thread_count = 4;
     for (unsigned i = 0; i < thread_count; ++i)
         loop->workers.emplace_back(worker_main, loop);
+    loop->timer_thread = std::thread(timer_thread_main, loop);
     return loop;
 }
 
@@ -404,6 +488,8 @@ void heliosview_loop_destroy(heliosview_loop_t* loop)
     if (!loop)
         return;
     heliosview_loop_stop(loop);
+    if (loop->timer_thread.joinable())
+        loop->timer_thread.join();
     for (auto& w : loop->workers)
         w.join();
     CloseHandle(loop->iocp);
@@ -425,6 +511,21 @@ void heliosview_loop_stop(heliosview_loop_t* loop)
     if (!loop || loop->stopping.exchange(true))
         return;
     SetEvent(loop->stop_event);
+    {
+        std::lock_guard<std::mutex> lock(loop->timer_mutex);
+        loop->timer_shutdown = true;
+        /* Cancel every still-pending timer: its callback will never fire, and the
+         * timer is freed here (a pending timer holds only its caller ref, since the
+         * timer thread adds the task ref only when it pops/fires one, under this
+         * same mutex). Callers must not touch a timer handle after loop_stop. */
+        for (auto* t : loop->timers) {
+            t->in_heap = false;
+            if (t->refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                hv::hv_dealloc(t);
+        }
+        loop->timers.clear();
+    }
+    loop->timer_cv.notify_all(); /* wake the timer thread; it exits at its next loop */
     /* one exit sentinel per worker thread */
     for (std::size_t i = 0; i < loop->workers.size(); ++i)
         PostQueuedCompletionStatus(loop->iocp, 0, reinterpret_cast<ULONG_PTR>(loop), nullptr);
@@ -443,6 +544,50 @@ int heliosview_loop_post(heliosview_loop_t* loop, heliosview_completion_cb fn, v
         return -1;
     }
     return 0;
+}
+
+heliosview_timer_t* heliosview_timer_create(heliosview_loop_t* loop, uint32_t delay_ms,
+                                            heliosview_completion_cb cb, void* userdata)
+{
+    if (!loop || !cb)
+        return nullptr;
+    auto* t = hv::hv_alloc<heliosview_timer>();
+    t->loop = loop;
+    t->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay_ms);
+    t->cb = cb;
+    t->userdata = userdata;
+    {
+        std::lock_guard<std::mutex> lock(loop->timer_mutex);
+        t->seq = ++loop->timer_seq;
+        t->in_heap = true;
+        loop->timers.push_back(t);
+        std::push_heap(loop->timers.begin(), loop->timers.end(), timerLater);
+    }
+    loop->timer_cv.notify_all(); /* wake the timer thread (deadline may have moved earlier) */
+    return t;
+}
+
+int heliosview_timer_destroy(heliosview_timer_t* timer)
+{
+    if (!timer)
+        return -1;
+    int fired = 1;
+    {
+        std::lock_guard<std::mutex> lock(timer->loop->timer_mutex);
+        if (timer->in_heap) {
+            auto& heap = timer->loop->timers;
+            const auto it = std::find(heap.begin(), heap.end(), timer);
+            if (it != heap.end()) {
+                heap.erase(it);
+                std::make_heap(heap.begin(), heap.end(), timerLater);
+            }
+            timer->in_heap = false;
+            fired = 0;
+        }
+    }
+    if (timer->refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        hv::hv_dealloc(timer);
+    return fired;
 }
 
 /* ================= Async TCP ================= */
@@ -537,7 +682,7 @@ void heliosview_socket_close(heliosview_socket_t* tcp)
     const bool active_read = tcp->read_op != nullptr && !tcp->read_finished;
     if (active_read) {
         tcp->read_op->cancelled = true;
-        tcp->read_op->tcp_owned = true; /* active read: tcp ownership moves to this op, freed with it on cancellation */
+        tcp->read_op->tcp_owned.store(true); /* active read: tcp ownership moves to this op, freed with it on cancellation */
         CancelIoEx(reinterpret_cast<HANDLE>(tcp->socket), &tcp->read_op->ov);
     }
     closesocket(tcp->socket);

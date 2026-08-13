@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 4.3)
 project(HeliosView
         VERSION 0.1.0
         DESCRIPTION "HeliosView - a C++ viewer library"
-        LANGUAGES CXX)
+        LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,45 +14,35 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# ---------- Third-party dependencies (fetched via git) ----------
+# ---------- Third-party dependencies ----------
+#
+# OpenSSL, nlohmann/json and the WebView2 SDK come from a vcpkg install tree
+# (classic mode, pre-installed with `vcpkg install ...`). stdexec and
+# http-parser are vendored locally (third_party/): stdexec is pinned to the
+# commit HeliosView.Core was written against (newer releases removed the
+# concept tags this code uses, and vcpkg only ships the new API), and
+# http-parser's vcpkg port fetches from codeload.github.com, which is
+# unreachable on some networks. No FetchContent: nothing is downloaded at
+# configure time. Configure with:
+#
+#   vcpkg install openssl nlohmann-json webview2
+#   cmake -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+#
+find_package(nlohmann_json CONFIG REQUIRED)
 
-include(FetchContent)
+# stdexec: P2300 senders/receivers reference implementation (header-only),
+# pinned to commit b783aac (March 2024) — vendored, not downloaded.
+add_library(stdexec INTERFACE)
+target_include_directories(stdexec INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include)
+if(MSVC)
+    # stdexec requires MSVC's conforming __cplusplus / preprocessor
+    target_compile_options(stdexec INTERFACE /Zc:__cplusplus /Zc:preprocessor)
+endif()
 
-# stdexec: reference implementation of P2300 senders/receivers (header-only).
-# HeliosView.Core depends on it; it propagates to consumers (exes) via
-# INTERFACE dependencies. Pinned to a main-branch commit for reproducible builds.
-set(STDEXEC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE) # don't build its own examples when vendored as a dependency
-FetchContent_Declare(
-    stdexec
-    GIT_REPOSITORY https://github.com/NVIDIA/stdexec.git
-    GIT_TAG b783aac907718fa0b92e99123883341142670d3e
-    SYSTEM
-)
-# stdexec pulls rapids-cmake via a raw URL zip download, which bypasses git
-# proxies and is very slow in CN networks. Pre-declare it as a git clone
-# (honoring git's http.proxy / https.proxy) so stdexec's own URL declaration
-# is ignored (CMake keeps the first declaration; stdexec's RAPIDS.cmake then
-# sees the content already populated).
-FetchContent_Declare(
-    rapids-cmake
-    GIT_REPOSITORY https://github.com/rapidsai/rapids-cmake.git
-    GIT_TAG branch-24.02
-    GIT_SHALLOW TRUE
-    SYSTEM
-)
-FetchContent_MakeAvailable(stdexec)
-
-# nlohmann/json: header-only JSON library used for the WebView bridge's
-# auto-parameter-binding sugar (WebViewJson.h). Same idea as stdexec: fetched
-# from the source, propagated to consumers via HeliosView::Core INTERFACE deps.
-set(JSON_BuildTests OFF CACHE BOOL "" FORCE) # don't build its own tests when vendored
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-    SYSTEM
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# http-parser: node.js's HTTP/1.x parser (single C file), used by the async HTTP
+# client to parse responses. Vendored locally (no download).
+add_library(http_parser STATIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/http-parser/http_parser.c)
+target_include_directories(http_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/http-parser)
 
 add_subdirectory(src)
 
@@ -68,7 +58,7 @@ target_include_directories(HeliosView.Core INTERFACE
 )
 # stdexec + nlohmann propagate via INTERFACE: targets linking HeliosView::Core
 # (e.g. the examples) automatically get their include paths and the C++23 requirement
-target_link_libraries(HeliosView.Core INTERFACE HeliosView STDEXEC::stdexec nlohmann_json::nlohmann_json)
+target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec nlohmann_json::nlohmann_json)
 
 option(HELIOSVIEW_BUILD_EXAMPLES "Build the example executables" ON)
 if(HELIOSVIEW_BUILD_EXAMPLES)
