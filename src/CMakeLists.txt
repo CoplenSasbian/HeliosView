@@ -9,31 +9,25 @@ if(WIN32)
     target_sources(HeliosView PRIVATE
         win32/heliosview_win32.cpp        # windows / message loop / native message translation / WebView2
         win32/heliosview_io_win32.cpp     # IOCP thread pool + async TCP/file I/O
-        win32/heliosview_http_win32.cpp   # async HTTP client (WinHTTP)
+        win32/heliosview_http_win32.cpp   # async HTTP client (OpenSSL + http-parser over async socket I/O)
     )
-    target_link_libraries(HeliosView PRIVATE ws2_32 winhttp nlohmann_json::nlohmann_json)
-
-    # WebView2 SDK: pulled straight from the official NuGet package (same idea
-    # as stdexec: fetch from the package source, no vcpkg).
-    # Version kept in sync with https://www.nuget.org/packages/Microsoft.Web.WebView2.
-    include(FetchContent)
-    FetchContent_Declare(
-        webview2_sdk
-        URL https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.3800.47
-        URL_HASH SHA512=10048ce88c166b7f29a563fcdb9487d71bac5723777cd0a98b5c5a0e71cff344551a0bc27410b0cb0f8482a9ecdec7454a45ad0d2a7ae998fc347ead15598889
-    )
-    FetchContent_MakeAvailable(webview2_sdk)
-
-    target_include_directories(HeliosView PRIVATE
-        ${webview2_sdk_SOURCE_DIR}/build/native/include
-    )
+    # OpenSSL / nlohmann-json: from vcpkg (manifest mode); http-parser: vendored
+    # (see the top-level CMakeLists.txt).
+    find_package(OpenSSL REQUIRED)
     target_link_libraries(HeliosView PRIVATE
-        ${webview2_sdk_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib
+        ws2_32 crypt32 OpenSSL::SSL OpenSSL::Crypto
+        http_parser nlohmann_json::nlohmann_json
+    )
+
+    # WebView2 SDK: from the vcpkg `webview2` port (headers via the toolchain's
+    # global include; the loader lib/dll from the installed tree).
+    target_link_libraries(HeliosView PRIVATE
+        "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/WebView2Loader.dll.lib"
     )
     # WebView2Loader.dll must sit next to the exe (the static loader loads it at runtime)
     add_custom_command(TARGET HeliosView POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${webview2_sdk_SOURCE_DIR}/build/native/x64/WebView2Loader.dll
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/WebView2Loader.dll"
             $<TARGET_FILE_DIR:HeliosView>
     )
 endif()

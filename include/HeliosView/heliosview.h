@@ -577,17 +577,26 @@ HELIOSVIEW_API int heliosview_select_folder(heliosview_window_t* window,
 typedef struct heliosview_loop heliosview_loop_t;
 typedef struct heliosview_socket heliosview_socket_t;
 typedef struct heliosview_file heliosview_file_t;
+typedef struct heliosview_timer heliosview_timer_t;
 
 /* Callback with no result (thread-pool tasks, etc.) */
 typedef void (*heliosview_completion_cb)(int error, void* userdata);
 /* Transfer callback (with byte count) */
 typedef void (*heliosview_transfer_cb)(int error, uint32_t bytes, void* userdata);
-/* Streaming read callback: data is valid only during the callback; error=0 with len=0 means the peer closed */
+/* Streaming read callback: data is valid only during the callback; error=0 with
+ * len=0 means the peer closed; error=HELIOSVIEW_IO_CANCELLED means the read was
+ * stopped/cancelled. Exactly one terminal callback (EOF / error / cancelled) fires
+ * per streaming read. */
 typedef void (*heliosview_read_cb)(int error, const char* data, uint32_t len, void* userdata);
 /* Connect callback: tcp is valid when error=0 (the caller closes it after success) */
 typedef void (*heliosview_socket_connect_cb)(int error, heliosview_socket_t* tcp, void* userdata);
 /* Open callback: file is valid when error=0 */
 typedef void (*heliosview_file_open_cb)(int error, heliosview_file_t* file, void* userdata);
+
+/* Error code delivered by a read callback when the streaming read was cancelled
+ * (heliosview_socket_read_stop / heliosview_socket_close). It is the read's terminal
+ * callback: error = HELIOSVIEW_IO_CANCELLED, data = NULL, len = 0. */
+#define HELIOSVIEW_IO_CANCELLED (-995) /* ERROR_OPERATION_ABORTED */
 
 /* ---- Thread pool + multiplexer ---- */
 
@@ -606,6 +615,37 @@ HELIOSVIEW_API void heliosview_loop_stop(heliosview_loop_t* loop);
 /* Post a task to the thread pool: fn runs on a worker thread (error is always 0) */
 HELIOSVIEW_API int heliosview_loop_post(heliosview_loop_t* loop, heliosview_completion_cb fn, void* userdata);
 
+/* ---- One-shot timers ----
+ *
+ * A timer fires its callback exactly once, delay_ms after creation, on a loop
+ * worker thread (the same thread model as heliosview_loop_post). All timers of
+ * a loop are tracked by a single internal timer thread (a min-heap of
+ * deadlines), so pending timers occupy no worker thread and creating one never
+ * blocks the caller.
+ *
+ * Ownership: the returned handle is caller-owned; destroy it exactly once with
+ * heliosview_timer_destroy — either while the timer is still pending (the
+ * callback then never fires) or after it fired. Destroying is safe from any
+ * thread and never blocks. When the loop is stopped (heliosview_loop_stop), all
+ * still-pending timers are cancelled and destroyed automatically: their
+ * callbacks never fire and the handles become invalid (do not use them).
+ */
+
+/* Create a one-shot timer: cb(userdata) runs on a worker thread after delay_ms
+ * (0 = as soon as the timer thread can fire it). Returns NULL on failure
+ * (invalid arguments / OOM). */
+HELIOSVIEW_API heliosview_timer_t* heliosview_timer_create(heliosview_loop_t* loop,
+                                                           uint32_t delay_ms,
+                                                           heliosview_completion_cb cb,
+                                                           void* userdata);
+
+/* Destroy a timer handle (exactly once). Returns:
+ *   0  -> destroyed while still pending; the callback will NOT fire
+ *   1  -> it had already fired; the callback fires (or is firing) on a worker
+ *         thread, and the caller must not rely on it being skipped
+ *  -1  -> NULL handle. */
+HELIOSVIEW_API int heliosview_timer_destroy(heliosview_timer_t* timer);
+
 /* ---- Async TCP client ---- */
 
 HELIOSVIEW_API int heliosview_socket_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
@@ -614,9 +654,12 @@ HELIOSVIEW_API int heliosview_socket_write(heliosview_socket_t* tcp, const void*
                                         heliosview_transfer_cb on_write, void* userdata);
 /* Start streaming read: callback once per chunk and auto-resume until EOF/error/read_stop */
 HELIOSVIEW_API int heliosview_socket_read_start(heliosview_socket_t* tcp, heliosview_read_cb on_read, void* userdata);
-/* Stop reading: cancels pending reads; one callback may still be in flight. Not needed after the end callback (EOF/error). */
+/* Stop reading: cancels the pending read; the read callback then fires exactly
+ * once with error = HELIOSVIEW_IO_CANCELLED (its terminal callback). Reading may
+ * be restarted afterwards with heliosview_socket_read_start. */
 HELIOSVIEW_API void heliosview_socket_read_stop(heliosview_socket_t* tcp);
-/* Close the connection (pending writes complete with an error callback). Do not use the handle after closing. */
+/* Close the connection (pending writes complete with an error callback; a pending
+ * read completes with HELIOSVIEW_IO_CANCELLED). Do not use the handle after closing. */
 HELIOSVIEW_API void heliosview_socket_close(heliosview_socket_t* tcp);
 
 /* ---- Async file ---- */
@@ -632,67 +675,163 @@ HELIOSVIEW_API void heliosview_file_close(heliosview_file_t* file);
 
 /* ================= Async HTTP client =================
  *
- * A minimal async HTTP/1.1 client (GET/POST/...), built on the platform HTTP
- * stack (Windows: WinHTTP), so HTTPS/TLS, redirects and proxy handling come
- * for free. The request runs on a background worker thread of the loop's pool
- * and the callback fires exactly once when it finishes (from that worker
- * thread, which may run concurrently with other callbacks).
+ * A client-style async HTTP/1.1 client (GET/POST/...). A heliosview_http_client_t
+ * is bound to a loop and owns an SSL context; requests are issued from the client
+ * and share its resources. Each request uses its own connection (sent with
+ * "Connection: close"): there is no keep-alive or connection pooling, so every
+ * exchange pays DNS + TCP (+ TLS) setup in full.
  *
- * URL: scheme must be http:// or https:// (http default port 80, https 443);
- * the URL may include a path and query string. Host + optional non-default
- * port are parsed from the authority.
+ * Transport: plain http:// and https:// are both supported. HTTPS is implemented
+ * with OpenSSL. DNS resolution + TCP connect + reads/writes go through the loop's
+ * async socket layer (heliosview_socket_*); the response is parsed with http-parser.
+ * Nothing blocks a caller thread: the exchange is a callback-driven state machine
+ * running on the loop's worker threads, and request timeouts are tracked by the
+ * loop's timer service (heliosview_timer_create) instead of a polling thread.
  *
- * headers_json: JSON object of request headers, e.g. {"Content-Type": "application/json"},
- * or NULL for none. Header values must be strings (a JSON string per header name).
+ * Headers: request and response headers use a heliosview_http_headers_t collection
+ * (create / add / set / remove / clear, see below). Response headers are
+ * de-duplicated by name (the last value wins) -- note this collapses legitimate
+ * duplicates such as multiple Set-Cookie headers into a single value. Request
+ * headers are emitted as given (the caller controls order and duplicates); do not
+ * set Host or Content-Length yourself (the client generates them).
  *
- * body: the raw request body bytes (may be NULL / length 0).
+ * URL: scheme must be http:// or https:// (default ports 80 / 443); the URL may
+ * include a path and query string. Host + optional non-default port are parsed
+ * from the authority. Not supported: IPv6 literal hosts ([::1]), userinfo
+ * (user:pass@host), and URL fragments (#... is not stripped). Redirects (3xx)
+ * are delivered as responses; the client does not follow them.
  *
- * Response delivery:
- *   error == 0            -> transport success; status_code is the HTTP status
- *                            (e.g. 200); headers_json is a JSON object of the
- *                            response headers (may be "{}"); body/body_len are
- *                            the response body bytes (may be empty).
- *   error == -1 and up    -> transport failure (WinHTTP/network error); the
- *                            other out-parameters are unspecified.
+ * Response delivery (callback contract):
+ *   error == 0 -> transport + HTTP exchange succeeded; response.status_code is the
+ *                 HTTP status; response.headers / response.body are populated.
+ *   error != 0 -> transport / protocol / TLS failure; response is unspecified.
+ *   The callback fires exactly once, from a loop worker thread (may run
+ *   concurrently with other callbacks). The response body is buffered in full
+ *   before the callback; there is no size cap. Exceptions must not escape the
+ *   callback (it crosses the DLL boundary). All pointers inside response are owned
+ *   by the request and valid only during the callback.
  *
- * Thread model: the callback runs on a loop worker thread (never the caller's
- * thread). All data passed to the callback is owned by the request and valid
- * only during the callback.
- *
- * Lifetime: the returned handle is caller-owned. Destroy it with
- * heliosview_http_destroy() after the callback fires (the callback is
- * terminal: it fires exactly once). heliosview_http_cancel() may be called
- * before the callback to request cancellation (best effort: a request already
- * in flight inside the HTTP stack may still complete).
+ * Lifetime: the returned request handle is caller-owned; destroy it with
+ * heliosview_http_request_destroy() after the callback fires.
+ * heliosview_http_request_cancel() may be called before the callback (the
+ * callback then fires promptly with HELIOSVIEW_HTTP_CANCELLED). The client must
+ * outlive every in-flight request; destroy it only when none are pending.
  */
 
+typedef struct heliosview_http_client  heliosview_http_client_t;
 typedef struct heliosview_http_request heliosview_http_request_t;
+typedef struct heliosview_http_headers heliosview_http_headers_t;
+
+/* A header collection (opaque handle). The caller owns it and mutates it with the
+ * heliosview_http_headers_* functions; pass it to heliosview_http_client_request.
+ * The request copies the headers at submission time, so the handle may be reused
+ * for more requests or destroyed right after the call. */
+
+/* Create an empty header collection. Returns NULL on failure. */
+HELIOSVIEW_API heliosview_http_headers_t* heliosview_http_headers_create(void);
+
+/* Destroy a header collection (NULL is ignored). */
+HELIOSVIEW_API void heliosview_http_headers_destroy(heliosview_http_headers_t* headers);
+
+/* Append a header (order preserved; duplicates kept as given). 0 = success. */
+HELIOSVIEW_API int heliosview_http_headers_add(heliosview_http_headers_t* headers,
+                                               const char* name, const char* value);
+
+/* Set a header: replace the value of the first header named `name`
+ * (case-insensitive), or append it when absent. 0 = success. */
+HELIOSVIEW_API int heliosview_http_headers_set(heliosview_http_headers_t* headers,
+                                               const char* name, const char* value);
+
+/* Remove every header named `name` (case-insensitive). Returns the number
+ * removed, or negative on error. */
+HELIOSVIEW_API int heliosview_http_headers_remove(heliosview_http_headers_t* headers,
+                                                  const char* name);
+
+/* Remove all headers. */
+HELIOSVIEW_API void heliosview_http_headers_clear(heliosview_http_headers_t* headers);
+
+/* Number of headers in the collection. */
+HELIOSVIEW_API size_t heliosview_http_headers_count(const heliosview_http_headers_t* headers);
+
+/* Header at `index` (0 <= index < count): writes its name/value (borrowed, into
+ * the collection) to out_name/out_value. 0 = success, negative = out of range. */
+HELIOSVIEW_API int heliosview_http_headers_get(const heliosview_http_headers_t* headers,
+                                               size_t index,
+                                               const char** out_name, const char** out_value);
+
+/* Value of the first header named `name` (case-insensitive), or NULL when absent. */
+HELIOSVIEW_API const char* heliosview_http_headers_find(const heliosview_http_headers_t* headers,
+                                                        const char* name);
+
+/* Response: filled by the callback. All pointers are owned by the request and
+ * valid only during the callback (headers is a borrowed collection: read it with
+ * heliosview_http_headers_count / get / find). */
+typedef struct heliosview_http_response {
+    int status_code;                          /* HTTP status (e.g. 200); 0 on failure */
+    const heliosview_http_headers_t* headers; /* response headers (de-dup, last wins) */
+    const char* body;                         /* response body bytes (may be empty) */
+    size_t body_len;
+} heliosview_http_response_t;
 
 /* Response callback: fires exactly once, on a loop worker thread.
- * request: the handle (to match with the one from heliosview_http_request).
- * error/status_code/headers_json/body/body_len: see above.
- * userdata: the value passed to heliosview_http_request, unchanged. */
+ * request: the handle returned by heliosview_http_client_request.
+ * error: 0 on success, else a negative error code (see the section intro).
+ * response: valid only during the callback; unspecified when error != 0.
+ * userdata: the value passed to heliosview_http_client_request, unchanged. */
 typedef void (*heliosview_http_response_cb)(heliosview_http_request_t* request,
-                                            int error, int status_code,
-                                            const char* headers_json,
-                                            const char* body, size_t body_len,
+                                            int error,
+                                            const heliosview_http_response_t* response,
                                             void* userdata);
 
-/* Start an async HTTP request on the loop's thread pool. Returns the request
- * handle (caller-owned; destroy with heliosview_http_destroy after the
- * callback) or NULL on immediate failure (invalid arguments). */
-HELIOSVIEW_API heliosview_http_request_t* heliosview_http_request(
-    heliosview_loop_t* loop, const char* method, const char* url,
-    const char* headers_json, const char* body, size_t body_len,
+/* Timeout error code delivered to the response callback (error == HELIOSVIEW_HTTP_TIMEOUT)
+ * when a request does not complete within the client's timeout. */
+#define HELIOSVIEW_HTTP_TIMEOUT (-1002)
+
+/* Error code delivered to the response callback when the request was cancelled
+ * with heliosview_http_request_cancel (error == HELIOSVIEW_HTTP_CANCELLED). */
+#define HELIOSVIEW_HTTP_CANCELLED (-1000)
+
+/* Create an HTTP client bound to `loop`. The client owns an SSL context; it must
+ * be destroyed only after all its requests complete. Loading the system CA store
+ * is done here (synchronously, on the calling thread). Returns NULL on failure
+ * (e.g. OpenSSL init failure). */
+HELIOSVIEW_API heliosview_http_client_t* heliosview_http_client_create(heliosview_loop_t* loop);
+
+/* Destroy the client and free its resources. Precondition: no request issued from
+ * this client is still in flight (the last request's callback has fired). */
+HELIOSVIEW_API void heliosview_http_client_destroy(heliosview_http_client_t* client);
+
+/* Set the timeout for requests issued from this client (covers connect + the whole
+ * request/response exchange). 0 (the default) = no timeout. The value in effect
+ * at request submission time applies to that request (thread-safe, but set it
+ * before issuing requests for predictable results); a request that exceeds it
+ * completes with error == HELIOSVIEW_HTTP_TIMEOUT. */
+HELIOSVIEW_API void heliosview_http_client_set_timeout(heliosview_http_client_t* client,
+                                                       uint32_t timeout_ms);
+
+/* Start an async HTTP request on the client. Returns the request handle
+ * (caller-owned; destroy with heliosview_http_request_destroy after the callback)
+ * or NULL on immediate failure (invalid arguments / submission error).
+ *
+ * headers (may be NULL for none) is copied at submission time, so the caller may
+ * destroy it as soon as this returns. body (may be NULL / length 0) is likewise
+ * copied. */
+HELIOSVIEW_API heliosview_http_request_t* heliosview_http_client_request(
+    heliosview_http_client_t* client, const char* method, const char* url,
+    const heliosview_http_headers_t* headers,
+    const void* body, size_t body_len,
     heliosview_http_response_cb on_response, void* userdata);
 
-/* Request cancellation (best effort; safe before the callback fires).
- * 0 = accepted, negative = invalid handle or the request already completed. */
-HELIOSVIEW_API int heliosview_http_cancel(heliosview_http_request_t* request);
+/* Cancel a request: completes it immediately with error == HELIOSVIEW_HTTP_CANCELLED
+ * (the underlying connection is closed, so the callback still fires exactly once).
+ * The callback runs inline on the cancelling thread, before this returns.
+ * 0 = accepted, negative = invalid handle or the request already completed.
+ * Do not call from inside the response callback (it would deadlock). */
+HELIOSVIEW_API int heliosview_http_request_cancel(heliosview_http_request_t* request);
 
 /* Destroy the request handle. Call only after the callback fired (or after a
  * cancel returned 0 and no callback is in flight). */
-HELIOSVIEW_API void heliosview_http_destroy(heliosview_http_request_t* request);
+HELIOSVIEW_API void heliosview_http_request_destroy(heliosview_http_request_t* request);
 
 #ifdef __cplusplus
 }

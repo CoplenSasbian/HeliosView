@@ -79,7 +79,7 @@ int main()
         std::println("[main] io error: {}", e.code());
         return 1;
     }
-
+    async.stop();
     std::println("[main] done");
     return 0;
 }
