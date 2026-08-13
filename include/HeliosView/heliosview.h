@@ -630,6 +630,70 @@ HELIOSVIEW_API int heliosview_file_write(heliosview_file_t* file, const void* bu
                                          heliosview_transfer_cb on_write, void* userdata);
 HELIOSVIEW_API void heliosview_file_close(heliosview_file_t* file);
 
+/* ================= Async HTTP client =================
+ *
+ * A minimal async HTTP/1.1 client (GET/POST/...), built on the platform HTTP
+ * stack (Windows: WinHTTP), so HTTPS/TLS, redirects and proxy handling come
+ * for free. The request runs on a background worker thread of the loop's pool
+ * and the callback fires exactly once when it finishes (from that worker
+ * thread, which may run concurrently with other callbacks).
+ *
+ * URL: scheme must be http:// or https:// (http default port 80, https 443);
+ * the URL may include a path and query string. Host + optional non-default
+ * port are parsed from the authority.
+ *
+ * headers_json: JSON object of request headers, e.g. {"Content-Type": "application/json"},
+ * or NULL for none. Header values must be strings (a JSON string per header name).
+ *
+ * body: the raw request body bytes (may be NULL / length 0).
+ *
+ * Response delivery:
+ *   error == 0            -> transport success; status_code is the HTTP status
+ *                            (e.g. 200); headers_json is a JSON object of the
+ *                            response headers (may be "{}"); body/body_len are
+ *                            the response body bytes (may be empty).
+ *   error == -1 and up    -> transport failure (WinHTTP/network error); the
+ *                            other out-parameters are unspecified.
+ *
+ * Thread model: the callback runs on a loop worker thread (never the caller's
+ * thread). All data passed to the callback is owned by the request and valid
+ * only during the callback.
+ *
+ * Lifetime: the returned handle is caller-owned. Destroy it with
+ * heliosview_http_destroy() after the callback fires (the callback is
+ * terminal: it fires exactly once). heliosview_http_cancel() may be called
+ * before the callback to request cancellation (best effort: a request already
+ * in flight inside the HTTP stack may still complete).
+ */
+
+typedef struct heliosview_http_request heliosview_http_request_t;
+
+/* Response callback: fires exactly once, on a loop worker thread.
+ * request: the handle (to match with the one from heliosview_http_request).
+ * error/status_code/headers_json/body/body_len: see above.
+ * userdata: the value passed to heliosview_http_request, unchanged. */
+typedef void (*heliosview_http_response_cb)(heliosview_http_request_t* request,
+                                            int error, int status_code,
+                                            const char* headers_json,
+                                            const char* body, size_t body_len,
+                                            void* userdata);
+
+/* Start an async HTTP request on the loop's thread pool. Returns the request
+ * handle (caller-owned; destroy with heliosview_http_destroy after the
+ * callback) or NULL on immediate failure (invalid arguments). */
+HELIOSVIEW_API heliosview_http_request_t* heliosview_http_request(
+    heliosview_loop_t* loop, const char* method, const char* url,
+    const char* headers_json, const char* body, size_t body_len,
+    heliosview_http_response_cb on_response, void* userdata);
+
+/* Request cancellation (best effort; safe before the callback fires).
+ * 0 = accepted, negative = invalid handle or the request already completed. */
+HELIOSVIEW_API int heliosview_http_cancel(heliosview_http_request_t* request);
+
+/* Destroy the request handle. Call only after the callback fired (or after a
+ * cancel returned 0 and no callback is in flight). */
+HELIOSVIEW_API void heliosview_http_destroy(heliosview_http_request_t* request);
+
 #ifdef __cplusplus
 }
 #endif

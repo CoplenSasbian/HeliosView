@@ -7,10 +7,11 @@ add_library(HeliosView SHARED
 # porting to another platform only requires rewriting these files.
 if(WIN32)
     target_sources(HeliosView PRIVATE
-        win32/heliosview_win32.cpp    # windows / message loop / native message translation / WebView2
-        win32/heliosview_io_win32.cpp # IOCP thread pool + async TCP/file I/O
+        win32/heliosview_win32.cpp        # windows / message loop / native message translation / WebView2
+        win32/heliosview_io_win32.cpp     # IOCP thread pool + async TCP/file I/O
+        win32/heliosview_http_win32.cpp   # async HTTP client (WinHTTP)
     )
-    target_link_libraries(HeliosView PRIVATE ws2_32 nlohmann_json::nlohmann_json)
+    target_link_libraries(HeliosView PRIVATE ws2_32 winhttp nlohmann_json::nlohmann_json)
 
     # WebView2 SDK: pulled straight from the official NuGet package (same idea
     # as stdexec: fetch from the package source, no vcpkg).

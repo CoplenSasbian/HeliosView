@@ -751,6 +751,10 @@ public:
     //   std::execution::schedule(async.get_scheduler()) | std::execution::then(...)
     loop_scheduler get_scheduler() const noexcept { return {m_loop}; }
 
+    // The underlying native loop handle (for C-layer calls that take a loop,
+    // e.g. the HTTP client in HeliosViewCore/Http.h)
+    heliosview_loop_t* handle() const noexcept { return m_loop; }
+
     // ---- std::execution: sender-based async ops ----
     // Failures are reported as set_error(std::exception_ptr(IoError)) (code() holds
     // the negated platform error code). Hold the sender until completion; the sender
