@@ -1,7 +1,7 @@
 // HeliosView.Core example: async HTTP client (HeliosViewCore/Http.h).
 //
-// A HttpClient issues requests over https:// (OpenSSL TLS + http-parser over the
-// loop's async socket layer). This demo exercises JSON / XML responses,
+// A HttpClient issues requests over https:// (Windows SChannel TLS + http-parser
+// over the loop's async socket layer). This demo exercises JSON / XML responses,
 // GET/POST/PUT/DELETE, query strings, custom headers, a 404, and both the sender
 // (coroutine) and callback APIs against well-known public endpoints. Most
 // requests use the convenience senders (get / post / put / del); [3] shows the

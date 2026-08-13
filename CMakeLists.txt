@@ -16,19 +16,26 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # ---------- Third-party dependencies ----------
 #
-# OpenSSL, nlohmann/json and the WebView2 SDK come from a vcpkg install tree
-# (classic mode, pre-installed with `vcpkg install ...`). stdexec and
-# http-parser are vendored locally (third_party/): stdexec is pinned to the
-# commit HeliosView.Core was written against (newer releases removed the
-# concept tags this code uses, and vcpkg only ships the new API), and
-# http-parser's vcpkg port fetches from codeload.github.com, which is
-# unreachable on some networks. No FetchContent: nothing is downloaded at
-# configure time. Configure with:
+# Git submodules (third_party/, fetched with `git submodule update --init
+# --recursive`, header-only, nothing to compile):
+#   - stdexec:     pinned to the commit HeliosView.Core was written against
+#                  (newer releases removed the concept tags this code uses).
+#   - http-parser: node.js's HTTP/1.x parser (single C file).
+#   - nlohmann/json (single header, exposed below as nlohmann_json::nlohmann_json).
 #
-#   vcpkg install openssl nlohmann-json webview2
-#   cmake -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
+# zip of headers + the WebView2Loader loader library/dll), so consumers do not
+# need it from vcpkg.
 #
-find_package(nlohmann_json CONFIG REQUIRED)
+# TLS for the async HTTP client (https://) uses Windows SChannel (SSPI), which
+# is part of the OS: no third-party TLS library, no vcpkg, and no OpenSSL.
+# Server certificates are validated against the Windows system store.
+
+# nlohmann/json is header-only; expose it directly instead of running its build.
+add_library(nlohmann_json INTERFACE)
+add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+target_include_directories(nlohmann_json INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include)
 
 # stdexec: P2300 senders/receivers reference implementation (header-only),
 # pinned to commit b783aac (March 2024) — vendored, not downloaded.
@@ -43,6 +50,43 @@ endif()
 # client to parse responses. Vendored locally (no download).
 add_library(http_parser STATIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/http-parser/http_parser.c)
 target_include_directories(http_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/http-parser)
+
+# heliosview_link_platform_system_libs(): links each backend's OS-specific
+# system libraries (Win32 SChannel/Winsock, etc.) through one macro, so moving to
+# another platform only means adding a branch there.
+include(cmake/PlatformLibs.cmake)
+
+if(WIN32)
+    # WebView2 SDK: download the Microsoft.Web.WebView2 NuGet package at
+    # configure time and extract the native headers + WebView2Loader lib/dll.
+    set(HELIOSVIEW_WEBVIEW2_VERSION "1.0.4129.50")
+    set(HELIOSVIEW_WEBVIEW2_ARCHIVE "${CMAKE_BINARY_DIR}/webview2.nupkg")
+    set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_BINARY_DIR}/webview2-sdk")
+    if(NOT EXISTS "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/include/WebView2.h")
+        file(DOWNLOAD
+            "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${HELIOSVIEW_WEBVIEW2_VERSION}"
+            "${HELIOSVIEW_WEBVIEW2_ARCHIVE}"
+            STATUS _wv2_status)
+        list(GET _wv2_status 0 _wv2_code)
+        if(NOT _wv2_code EQUAL 0)
+            list(GET _wv2_status 1 _wv2_err)
+            message(FATAL_ERROR "Failed to download WebView2 SDK: ${_wv2_err}")
+        endif()
+        file(ARCHIVE_EXTRACT INPUT "${HELIOSVIEW_WEBVIEW2_ARCHIVE}" DESTINATION "${HELIOSVIEW_WEBVIEW2_ROOT}")
+    endif()
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(HELIOSVIEW_WEBVIEW2_ARCH x64)
+    else()
+        set(HELIOSVIEW_WEBVIEW2_ARCH x86)
+    endif()
+    add_library(WebView2::SDK INTERFACE IMPORTED)
+    set_target_properties(WebView2::SDK PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/include"
+        INTERFACE_LINK_LIBRARIES "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/${HELIOSVIEW_WEBVIEW2_ARCH}/WebView2Loader.dll.lib"
+    )
+    set(HELIOSVIEW_WEBVIEW2_LOADER_DLL
+        "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/${HELIOSVIEW_WEBVIEW2_ARCH}/WebView2Loader.dll")
+endif()
 
 add_subdirectory(src)
 

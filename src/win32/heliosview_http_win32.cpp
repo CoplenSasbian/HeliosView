@@ -1,13 +1,20 @@
 // HeliosView.dll -- async HTTP client (non-blocking state machine).
 //
 // A client-style async HTTP/1.1 client (GET/POST/...). A heliosview_http_client_t
-// owns an SSL context and is bound to a loop; requests are issued from it.
+// acquires an SChannel credential and is bound to a loop; requests are issued
+// from it.
 //
-// Transport: plain http:// and https://. HTTPS is implemented with OpenSSL using
-// memory BIOs (BIO_s_mem) driven by the loop's async socket layer
-// (heliosview_socket_connect / write / read_start) -- no blocking anywhere. The
-// whole exchange is a callback-driven state machine:
+// Transport: plain http:// and https://. HTTPS is implemented with Windows
+// SChannel (SSPI) driven by the loop's async socket layer
+// (heliosview_socket_connect / write / read_start) -- no blocking anywhere:
+// handshake tokens and record data flow through per-request input/output
+// buffers, mirroring the memory-BIO design. The whole exchange is a
+// callback-driven state machine:
 //   connect -> TLS handshake -> send request -> read response (http-parser).
+//
+// TLS needs no third-party dependency: SChannel is part of the Windows SDK, and
+// server certificates are validated against the Windows system store
+// (root + CA) with an RFC 6125-style hostname check.
 //
 // Every socket operation holds a reference on the request and fires exactly one
 // terminal callback (the io layer guarantees a cancel callback on read_stop/close),
@@ -18,19 +25,28 @@
 #include <HeliosView/heliosview.h>
 #include "../heliosview_internal.h"
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00 /* Win10: SCH_CREDENTIALS, TLS 1.3 protocol flags */
+#endif
+#ifndef WINVER
+#define WINVER 0x0A00
+#endif
+#define SECURITY_WIN32 /* expose the Secur32.dll (client) SSPI API */
+#define SCHANNEL_USE_BLACKLISTS /* expose the current SCH_CREDENTIALS + TLS_PARAMETERS (SDK gates them) */
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX /* keep std::min/std::max (windows.h defines min/max macros) */
 #include <windows.h>
+#include <winternl.h> /* UNICODE_STRING / PUNICODE_STRING (needed by SCH_CREDENTIALS block) */
 #include <wincrypt.h>
-
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/x509.h>
+#include <sspi.h>
+#include <schannel.h>
 
 #include <http_parser.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -54,10 +70,25 @@ struct heliosview_http_headers {
     std::vector<Header> items;
 };
 
-/* The opaque client: owns an SSL context + the loop it issues requests on. */
+/* SChannel (SSPI) TLS state for one request. SChannel is driven with buffered
+ * input/output (SECBUFFER_TOKEN / SECBUFFER_DATA), which maps 1:1 onto the
+ * memory-BIO design the OpenSSL code used: nothing blocks, the handshake and
+ * record I/O are advanced by the same pump() state machine. */
+struct TlsState {
+    CtxtHandle ctx{};                  /* security context (per request) */
+    bool have_ctx = false;             /* ctx has been initialized */
+    SecPkgContext_StreamSizes sizes{}; /* header/trailer/max-message sizes */
+    ULONG attrs = 0;                   /* context attributes (ISC output) */
+    TimeStamp expiry{};                /* context expiry (ISC output) */
+    std::wstring host_w;               /* UTF-16 server name (SNI + cert check) */
+    std::vector<char> in;              /* pending encrypted inbound bytes */
+};
+
+/* The opaque client: owns an SChannel credential + the loop it issues requests on. */
 struct heliosview_http_client {
     heliosview_loop_t* loop;
-    SSL_CTX* ssl_ctx;
+    CredHandle cred{};        /* SChannel credential (acquired once) */
+    bool have_cred = false;
     std::atomic<uint32_t> timeout_ms{0}; /* 0 = no timeout (read at submission) */
 };
 
@@ -88,9 +119,7 @@ struct heliosview_http_request {
 
     /* Connection state. */
     heliosview_socket_t* tcp = nullptr;
-    SSL* ssl = nullptr;
-    BIO* rbio = nullptr; /* inbound: socket -> rbio -> SSL_read */
-    BIO* wbio = nullptr; /* outbound: SSL_write -> wbio -> socket */
+    TlsState tls; /* SChannel TLS state (https only) */
     Stage stage = Stage::Connecting;
     bool read_started = false;
 
@@ -122,31 +151,74 @@ void onWrite(int error, uint32_t bytes, void* userdata);
 void onRead(int error, const char* data, uint32_t len, void* userdata);
 void onConnect(int error, heliosview_socket_t* tcp, void* userdata);
 void finishHeader(heliosview_http_request* r);
+bool startWrite(heliosview_http_request* r);
 bool pump(heliosview_http_request* r);
 bool finalize(heliosview_http_request* r, int error);
 void dispatchResponse(heliosview_http_request* r);
 
-/* Load the Windows system CA store (ROOT + CA) into the SSL_CTX so certificate
- * verification works without a separate cacert.pem (Windows OpenSSL builds do
- * not read the system store by default). */
-void loadWindowsCerts(SSL_CTX* ctx)
+std::wstring toWide(const std::string& s);
+int tlsCode(SECURITY_STATUS ss);
+bool verifyServerCert(heliosview_http_request* r);
+int tlsHandshake(heliosview_http_request* r);
+int tlsWrite(heliosview_http_request* r, const char* data, size_t len);
+bool tlsReadLoop(heliosview_http_request* r);
+
+/* Internal TLS error codes (delivered through the response callback's error
+ * argument; the public contract only distinguishes 0 vs non-zero). */
+constexpr int kTlsCertError = -1200; /* certificate chain / hostname verification failed */
+constexpr int kTlsErrorBase = -3000; /* fixed small codes below; SSPI statuses map further below */
+
+/* UTF-8 -> UTF-16 (used for the SChannel target name / SNI / hostname check). */
+std::wstring toWide(const std::string& s)
 {
-    X509_STORE* store = SSL_CTX_get_cert_store(ctx);
-    for (const wchar_t* name : { L"ROOT", L"CA" }) {
-        HCERTSTORE sys = CertOpenSystemStoreW(0, name);
-        if (!sys)
-            continue;
-        PCCERT_CONTEXT cc = nullptr;
-        while ((cc = CertEnumCertificatesInStore(sys, cc)) != nullptr) {
-            const unsigned char* p = cc->pbCertEncoded;
-            X509* x = d2i_X509(nullptr, &p, cc->cbCertEncoded);
-            if (x) {
-                X509_STORE_add_cert(store, x);
-                X509_free(x);
-            }
-        }
-        CertCloseStore(sys, 0);
+    if (s.empty())
+        return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n <= 0)
+        return {};
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+/* Stable, non-colliding negative code for an SSPI status (diagnostic only). */
+int tlsCode(SECURITY_STATUS ss)
+{
+    return kTlsErrorBase - (int)((unsigned)ss & 0xFFFFu);
+}
+
+/* Validate the server certificate after the TLS handshake completes. With
+ * SCH_CRED_MANUAL_CRED_VALIDATION the application owns the check: build the
+ * chain against the Windows system stores (root + CA, same trust anchors the
+ * old code loaded explicitly) and run the SSL chain policy, which also performs
+ * the RFC 6125-style hostname match against the requested server name. */
+bool verifyServerCert(heliosview_http_request* r)
+{
+    PCCERT_CONTEXT remote = nullptr;
+    if (QueryContextAttributesW(&r->tls.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &remote) != SEC_E_OK
+        || !remote)
+        return false;
+
+    bool ok = false;
+    CERT_CHAIN_PARA chainPara{};
+    chainPara.cbSize = sizeof(chainPara);
+    PCCERT_CHAIN_CONTEXT chain = nullptr;
+    if (CertGetCertificateChain(nullptr, remote, nullptr, nullptr, &chainPara, 0, nullptr, &chain)) {
+        CERT_CHAIN_POLICY_PARA policyPara{};
+        policyPara.cbSize = sizeof(policyPara);
+        SSL_EXTRA_CERT_CHAIN_POLICY_PARA sslPara{};
+        sslPara.cbSize = sizeof(sslPara);
+        sslPara.dwAuthType = AUTHTYPE_SERVER;
+        sslPara.pwszServerName = const_cast<LPWSTR>(r->tls.host_w.c_str());
+        policyPara.pvExtraPolicyPara = &sslPara;
+        CERT_CHAIN_POLICY_STATUS policyStatus{};
+        policyStatus.cbSize = sizeof(policyStatus);
+        if (CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policyPara, &policyStatus))
+            ok = (policyStatus.dwError == 0);
+        CertFreeCertificateChain(chain);
     }
+    CertFreeCertificateContext(remote);
+    return ok;
 }
 
 /* ---------- small string helpers ---------- */
@@ -319,12 +391,211 @@ void parseFeed(heliosview_http_request* r, const char* data, size_t len)
         r->parse_error = true;
 }
 
+/* ---------- SChannel TLS drivers ---------- */
+
+/* Drive the TLS handshake as far as it can go. Outbound handshake tokens are
+ * appended to r->out (the caller flushes them with startWrite). Returns:
+ *   1        handshake complete (certificate verified, stream sizes queried)
+ *   0        need more server data (or nothing new to do) -- wait for onRead
+ *   negative fatal error code (the caller finalizes with it) */
+int tlsHandshake(heliosview_http_request* r)
+{
+    /* Drive InitializeSecurityContext until it needs something new. The first
+     * call runs with empty input to emit the ClientHello; during TLS 1.3 a
+     * DecryptMessage may signal SEC_I_RENEGOTIATE to ask it to resume with the
+     * (possibly empty) buffer to send the deferred client Finished, so we always
+     * attempt a step here and let ISC reply CONTINUE_NEEDED when it's idle. */
+
+    for (int calls = 0; calls < 64; ++calls) {
+        SecBuffer inbufs[2] = {};
+        inbufs[0].BufferType = SECBUFFER_TOKEN;
+        inbufs[0].pvBuffer = r->tls.in.empty() ? nullptr : r->tls.in.data();
+        inbufs[0].cbBuffer = (DWORD)r->tls.in.size();
+        inbufs[1].BufferType = SECBUFFER_EMPTY;
+        SecBufferDesc inDesc = { SECBUFFER_VERSION, 2, inbufs };
+
+        SecBuffer outbufs[1] = {};
+        outbufs[0].BufferType = SECBUFFER_TOKEN;
+        SecBufferDesc outDesc = { SECBUFFER_VERSION, 1, outbufs };
+
+        SECURITY_STATUS ss = InitializeSecurityContextW(
+            &r->client->cred,
+            r->tls.have_ctx ? &r->tls.ctx : nullptr,
+            const_cast<SEC_WCHAR*>(r->tls.host_w.c_str()),
+            ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY
+                | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM,
+            0, SECBUFFER_VERSION, &inDesc, 0, &r->tls.ctx, &outDesc,
+            &r->tls.attrs, &r->tls.expiry);
+        r->tls.have_ctx = true;
+
+        /* Keep any leftover server data (e.g. an early response) for later. */
+        if (inbufs[1].BufferType == SECBUFFER_EXTRA && inbufs[1].cbBuffer > 0) {
+            /* SECBUFFER_EXTRA = unconsumed remainder. pvBuffer normally points at
+             * it inside the input buffer, but SChannel can return pvBuffer == NULL,
+             * in which case the leftover is the trailing `cbBuffer` bytes of the
+             * current input (seen on the TLS 1.3 handshake-resume path). */
+            const size_t avail = r->tls.in.size();
+            char* src = inbufs[1].pvBuffer
+                            ? static_cast<char*>(inbufs[1].pvBuffer)
+                            : (inbufs[1].cbBuffer <= avail
+                                   ? r->tls.in.data() + (avail - inbufs[1].cbBuffer)
+                                   : r->tls.in.data());
+            std::memmove(r->tls.in.data(), src, inbufs[1].cbBuffer);
+            r->tls.in.resize(inbufs[1].cbBuffer);
+        } else {
+            r->tls.in.clear();
+        }
+
+        const bool produced = outbufs[0].cbBuffer > 0;
+        if (produced)
+            r->out.append(static_cast<const char*>(outbufs[0].pvBuffer), outbufs[0].cbBuffer);
+        if (outbufs[0].pvBuffer)
+            FreeContextBuffer(outbufs[0].pvBuffer);
+
+        if (ss == SEC_E_OK) {
+            if (QueryContextAttributesW(&r->tls.ctx, SECPKG_ATTR_STREAM_SIZES,
+                                        &r->tls.sizes) != SEC_E_OK)
+                return kTlsErrorBase + 1;
+            if (!verifyServerCert(r))
+                return kTlsCertError;
+            return 1;
+        }
+        if (ss == SEC_I_CONTINUE_NEEDED) {
+            if (produced)
+                continue; /* send the token (already queued) and keep driving --
+                           * TLS 1.3 needs one more empty-input call to finish */
+            return 0;
+        }
+        if (ss == SEC_E_INCOMPLETE_MESSAGE)
+            return 0;
+        if (ss == SEC_I_INCOMPLETE_CREDENTIALS)
+            return kTlsErrorBase + 2; /* server requested a client certificate */
+        return tlsCode(ss);
+    }
+    return kTlsErrorBase + 3; /* handshake made no progress */
+}
+
+/* Encrypt plaintext into the outbound queue, chunked to SChannel's maximum
+ * message size. Returns the number of plaintext bytes consumed, or a negative
+ * error code. */
+int tlsWrite(heliosview_http_request* r, const char* data, size_t len)
+{
+    const size_t maxMsg = r->tls.sizes.cbMaximumMessage > 0 ? r->tls.sizes.cbMaximumMessage : 16384;
+    size_t off = 0;
+    while (off < len) {
+        const size_t chunk = std::min(len - off, maxMsg);
+        std::string buf(r->tls.sizes.cbHeader + chunk + r->tls.sizes.cbTrailer, '\0');
+        SecBuffer bufs[4] = {};
+        bufs[0].BufferType = SECBUFFER_STREAM_HEADER;
+        bufs[0].pvBuffer = buf.data();
+        bufs[0].cbBuffer = r->tls.sizes.cbHeader;
+        bufs[1].BufferType = SECBUFFER_DATA;
+        bufs[1].pvBuffer = buf.data() + r->tls.sizes.cbHeader;
+        bufs[1].cbBuffer = (DWORD)chunk;
+        bufs[2].BufferType = SECBUFFER_STREAM_TRAILER;
+        bufs[2].pvBuffer = buf.data() + r->tls.sizes.cbHeader + chunk;
+        bufs[2].cbBuffer = r->tls.sizes.cbTrailer;
+        bufs[3].BufferType = SECBUFFER_EMPTY;
+        std::memcpy(bufs[1].pvBuffer, data + off, chunk);
+        SecBufferDesc desc = { SECBUFFER_VERSION, 4, bufs };
+        const SECURITY_STATUS ss = EncryptMessage(&r->tls.ctx, 0, &desc, 0);
+        if (ss != SEC_E_OK)
+            return tlsCode(ss);
+        const size_t encLen = (size_t)bufs[0].cbBuffer + bufs[1].cbBuffer + bufs[2].cbBuffer;
+        r->out.append(buf.data(), encLen);
+        off += chunk;
+    }
+    return (int)off;
+}
+
+/* Decrypt as much buffered TLS record data as possible, feeding plaintext to
+ * http-parser. Returns true when the request finalized (the caller must
+ * dispatch the response). */
+bool tlsReadLoop(heliosview_http_request* r)
+{
+    if (r->done.load())
+        return false;
+    for (;;) {
+        if (r->tls.in.empty())
+            return false;
+        SecBuffer bufs[4] = {};
+        bufs[0].BufferType = SECBUFFER_DATA;
+        bufs[0].pvBuffer = r->tls.in.data();
+        bufs[0].cbBuffer = (DWORD)r->tls.in.size();
+        for (int i = 1; i < 4; ++i)
+            bufs[i].BufferType = SECBUFFER_EMPTY;
+        SecBufferDesc desc = { SECBUFFER_VERSION, 4, bufs };
+        DWORD qop = 0;
+        const SECURITY_STATUS ss = DecryptMessage(&r->tls.ctx, &desc, 0, &qop);
+        if (ss == SEC_E_OK) {
+            bool plain = false;
+            for (int i = 1; i < 4; ++i) {
+                if (bufs[i].BufferType == SECBUFFER_DATA && bufs[i].cbBuffer > 0) {
+                    parseFeed(r, static_cast<const char*>(bufs[i].pvBuffer), bufs[i].cbBuffer);
+                    plain = true;
+                }
+            }
+            if (plain) {
+                if (r->parse_error)
+                    return finalize(r, -1);
+                if (r->message_complete)
+                    return finalize(r, 0);
+            }
+            /* Keep the unconsumed remainder (if any) for the next call. */
+            SecBuffer* extra = nullptr;
+            for (int i = 1; i < 4; ++i)
+                if (bufs[i].BufferType == SECBUFFER_EXTRA)
+                    extra = &bufs[i];
+            if (extra && extra->cbBuffer > 0) {
+                const size_t avail = r->tls.in.size();
+                char* src = extra->pvBuffer
+                                ? static_cast<char*>(extra->pvBuffer)
+                                : (extra->cbBuffer <= avail
+                                       ? r->tls.in.data() + (avail - extra->cbBuffer)
+                                       : r->tls.in.data());
+                std::memmove(r->tls.in.data(), src, extra->cbBuffer);
+                r->tls.in.resize(extra->cbBuffer);
+            } else {
+                r->tls.in.clear();
+            }
+            continue;
+        }
+        if (ss == SEC_E_INCOMPLETE_MESSAGE)
+            return false;
+        if (ss == SEC_I_CONTEXT_EXPIRED) {
+            /* Peer sent close_notify: finalize a connection-close-delimited body. */
+            if (r->stage == Stage::Reading && !r->message_complete)
+                parseFeed(r, "", 0);
+            return finalize(r, (r->message_complete && !r->parse_error) ? 0 : -1);
+        }
+        if (ss == SEC_I_RENEGOTIATE) {
+            /* TLS 1.3: SChannel can defer emitting the client's Finished (and any
+             * other outbound handshake messages) until the first DecryptMessage,
+             * signalling it here. Resume the handshake to produce and send those
+             * tokens, then try to decrypt again. */
+            const int rc = tlsHandshake(r);
+            if (!r->out.empty() && !r->write_in_flight) {
+                if (startWrite(r))
+                    return true;
+            }
+            if (r->done.load())
+                return false;
+            if (rc == 1)
+                continue; /* handshake closed out: decrypt the pending record */
+            if (rc == 0)
+                return false; /* still need more server data */
+            return finalize(r, rc); /* fatal */
+        }
+        return finalize(r, tlsCode(ss));
+    }
+}
+
 /* ---------- reference counting ---------- */
 
 void freeRequest(heliosview_http_request* r)
 {
-    if (r->ssl)
-        SSL_free(r->ssl); /* also frees rbio/wbio (SSL_set_bio ownership) */
+    if (r->tls.have_ctx)
+        DeleteSecurityContext(&r->tls.ctx);
     hv::hv_dealloc(r);
 }
 
@@ -460,20 +731,6 @@ void onWrite(int error, uint32_t bytes, void* userdata)
     release(r); /* write ref */
 }
 
-bool flushWbio(heliosview_http_request* r)
-{
-    if (!r->ssl)
-        return false;
-    char buf[16384];
-    while (BIO_ctrl_pending(r->wbio) > 0) {
-        const int n = BIO_read(r->wbio, buf, sizeof(buf));
-        if (n <= 0)
-            break;
-        r->out.append(buf, (size_t)n);
-    }
-    return startWrite(r);
-}
-
 bool startRead(heliosview_http_request* r)
 {
     r->read_started = true;
@@ -504,15 +761,28 @@ void onRead(int error, const char* data, uint32_t len, void* userdata)
             terminal = true;
         } else if (len == 0) {
             /* peer closed (EOF): finalize a connection-close-delimited body */
-            if (r->stage == Stage::Reading && !r->message_complete)
-                parseFeed(r, "", 0);
-            dispatch = finalize(r, (r->message_complete && !r->parse_error) ? 0 : -1);
+            if (r->https && r->stage == Stage::Reading && !r->tls.in.empty()) {
+                /* Flush any complete TLS records still buffered; if the last
+                 * record is incomplete the stream was truncated mid-record. */
+                const bool tlsDone = tlsReadLoop(r);
+                if (tlsDone) {
+                    dispatch = true;
+                } else if (!r->done.load()) {
+                    if (!r->message_complete)
+                        parseFeed(r, "", 0);
+                    dispatch = finalize(r, (r->message_complete && !r->parse_error) ? 0 : -1);
+                }
+            } else {
+                if (r->stage == Stage::Reading && !r->message_complete)
+                    parseFeed(r, "", 0);
+                dispatch = finalize(r, (r->message_complete && !r->parse_error) ? 0 : -1);
+            }
             terminal = true;
         } else {
             /* data chunk */
             if (r->https) {
-                BIO_write(r->rbio, data, len);
-                dispatch = pump(r); /* SSL_read -> parseFeed -> finalizeIfComplete */
+                r->tls.in.insert(r->tls.in.end(), data, data + len);
+                dispatch = pump(r); /* tlsReadLoop -> parseFeed -> finalize */
             } else if (r->stage == Stage::Reading) {
                 parseFeed(r, data, len);
                 dispatch = finalizeIfComplete(r);
@@ -549,79 +819,59 @@ bool pump(heliosview_http_request* r)
     if (r->done.load())
         return false; /* startWrite failed and finalized — the caller of pump dispatches */
 
-    /* 1) TLS handshake (https only) */
-    if (r->stage == Stage::Handshake) {
-        const int rc = SSL_do_handshake(r->ssl);
-        if (rc == 1) {
-            r->stage = Stage::Sending;
-        } else {
-            const int err = SSL_get_error(r->ssl, rc);
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                flushWbio(r);
-                return false;
+    if (r->https) {
+        /* 1) TLS handshake */
+        if (r->stage == Stage::Handshake) {
+            const int rc = tlsHandshake(r);
+            if (rc == 1) {
+                r->stage = Stage::Sending;
+            } else if (rc == 0) {
+                if (!r->out.empty() && !r->write_in_flight) {
+                    if (startWrite(r))
+                        return true;
+                }
+                return false; /* send the queued token(s), then wait for more server data */
+            } else {
+                return finalize(r, rc);
             }
-            return finalize(r, -(1000 + err));
         }
+
+        /* 2) send the request (encrypt everything, then flush once) */
+        if (r->stage == Stage::Sending) {
+            while (r->request_off < r->request_wire.size()) {
+                const int n = tlsWrite(r, r->request_wire.data() + r->request_off,
+                                       r->request_wire.size() - r->request_off);
+                if (n < 0)
+                    return finalize(r, n);
+                r->request_off += (size_t)n;
+            }
+            if (!r->out.empty() && !r->write_in_flight) {
+                if (startWrite(r))
+                    return true;
+            }
+            if (r->done.load())
+                return false;
+            r->stage = Stage::Reading;
+        }
+
+        /* 3) read the response (decrypt buffered records) */
+        if (r->stage == Stage::Reading)
+            return tlsReadLoop(r);
+        return false;
     }
 
-    /* 2) send the request */
+    /* plain http */
     if (r->stage == Stage::Sending) {
-        while (r->request_off < r->request_wire.size()) {
-            if (r->https) {
-                const int n = SSL_write(r->ssl, r->request_wire.data() + r->request_off,
-                                        (int)(r->request_wire.size() - r->request_off));
-                if (n > 0) {
-                    r->request_off += (size_t)n;
-                    if (flushWbio(r))
-                        return true;
-                } else {
-                    const int err = SSL_get_error(r->ssl, n);
-                    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                        flushWbio(r);
-                        return false;
-                    }
-                    return finalize(r, -(1000 + err));
-                }
-            } else {
-                r->out.append(r->request_wire.data() + r->request_off,
-                              r->request_wire.size() - r->request_off);
-                r->request_off = r->request_wire.size();
-            }
-        }
+        r->out.append(r->request_wire.data() + r->request_off,
+                      r->request_wire.size() - r->request_off);
+        r->request_off = r->request_wire.size();
         if (startWrite(r))
             return true;
         r->stage = Stage::Reading;
     }
 
-    /* 3) read the response */
-    if (r->stage == Stage::Reading && r->https) {
-        char buf[16384];
-        for (;;) {
-            const int n = SSL_read(r->ssl, buf, sizeof(buf));
-            if (n > 0) {
-                parseFeed(r, buf, (size_t)n);
-                if (r->message_complete || r->parse_error)
-                    return finalizeIfComplete(r);
-                if (r->done.load())
-                    return false;
-            } else {
-                const int err = SSL_get_error(r->ssl, n);
-                if (err == SSL_ERROR_WANT_READ)
-                    return false; /* wait for more inbound */
-                if (err == SSL_ERROR_WANT_WRITE) {
-                    flushWbio(r);
-                    return false;
-                }
-                if (err == SSL_ERROR_ZERO_RETURN || err == SSL_ERROR_SYSCALL) {
-                    /* peer closed (cleanly, or abruptly without a TLS close_notify):
-                     * finalize a connection-close-delimited body */
-                    if (!r->message_complete)
-                        parseFeed(r, "", 0);
-                    return finalize(r, (r->message_complete && !r->parse_error) ? 0 : -1);
-                }
-                return finalize(r, -(1000 + err));
-            }
-        }
+    if (r->stage == Stage::Reading) {
+        /* nothing left to read here: the socket read callback feeds parseFeed */
     }
     return false;
 }
@@ -643,25 +893,16 @@ void onConnect(int error, heliosview_socket_t* tcp, void* userdata)
         } else {
             r->tcp = tcp;
             if (r->https) {
-                r->ssl = SSL_new(r->client->ssl_ctx);
-                if (r->ssl) {
-                    SSL_set_connect_state(r->ssl);
-                    r->rbio = BIO_new(BIO_s_mem());
-                    r->wbio = BIO_new(BIO_s_mem());
-                    BIO_set_mem_eof_return(r->rbio, -1); /* empty read => WANT_READ, not EOF */
-                    SSL_set_bio(r->ssl, r->rbio, r->wbio);
-                    SSL_set_tlsext_host_name(r->ssl, r->host.c_str());
-                    SSL_set1_host(r->ssl, r->host.c_str());
-                    SSL_set_verify(r->ssl, SSL_VERIFY_PEER, nullptr);
-                    r->stage = Stage::Handshake;
+                r->tls.host_w = toWide(r->host);
+                if (r->tls.host_w.empty()) {
+                    dispatch = finalize(r, -1001); /* host not convertible for TLS */
                 } else {
-                    dispatch = finalize(r, -1001); /* OOM creating the SSL object */
+                    r->stage = Stage::Handshake;
                 }
             } else {
                 r->stage = Stage::Sending;
             }
             if (!dispatch && r->tcp) { /* still live (not completed above) */
-                ERR_clear_error();
                 dispatch = startRead(r);
                 if (!dispatch)
                     dispatch = pump(r);
@@ -681,18 +922,39 @@ heliosview_http_client_t* heliosview_http_client_create(heliosview_loop_t* loop)
 {
     if (!loop)
         return nullptr;
-    OPENSSL_init_ssl(0, nullptr);
 
     auto* client = hv::hv_alloc<heliosview_http_client>();
     client->loop = loop;
-    client->ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if (!client->ssl_ctx) {
+
+    /* Acquire one SChannel credential for the client; every request derives its
+     * security context from it. TLS 1.2 + 1.3 (when the OS supports it); the
+     * server certificate is validated manually (SCH_CRED_MANUAL_CRED_VALIDATION)
+     * against the system stores in verifyServerCert(). */
+    /* Use the current SCH_CREDENTIALS (v5) struct: modern SChannel builds (e.g.
+     * recent Windows 11) reject the legacy SCHANNEL_CRED with
+     * SEC_E_UNSUPPORTED_FUNCTION. It lives behind SCHANNEL_USE_BLACKLISTS in the
+     * SDK and uses TLS_PARAMETERS (grbitDisabledProtocols) to express protocol
+     * policy, so TLS 1.0/1.1 are disabled to keep a TLS 1.2 floor (matching the
+     * original OpenSSL client). */
+    TLS_PARAMETERS tlsParams{};
+    tlsParams.grbitDisabledProtocols =
+        SP_PROT_TLS1_0_CLIENT | SP_PROT_TLS1_0_SERVER
+        | SP_PROT_TLS1_1_CLIENT | SP_PROT_TLS1_1_SERVER;
+    tlsParams.dwFlags = TLS_PARAMS_OPTIONAL;
+
+    SCH_CREDENTIALS cred{};
+    cred.dwVersion = SCH_CREDENTIALS_VERSION;
+    cred.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS;
+    cred.cTlsParameters = 1;
+    cred.pTlsParameters = &tlsParams;
+    const SECURITY_STATUS ss = AcquireCredentialsHandleW(
+        nullptr, const_cast<LPWSTR>(UNISP_NAME_W), SECPKG_CRED_OUTBOUND, nullptr, &cred, nullptr,
+        nullptr, &client->cred, nullptr);
+    if (ss != SEC_E_OK) {
         hv::hv_dealloc(client);
         return nullptr;
     }
-    SSL_CTX_set_min_proto_version(client->ssl_ctx, TLS1_2_VERSION);
-    SSL_CTX_set_verify(client->ssl_ctx, SSL_VERIFY_PEER, nullptr);
-    loadWindowsCerts(client->ssl_ctx);
+    client->have_cred = true;
     return client;
 }
 
@@ -700,8 +962,8 @@ void heliosview_http_client_destroy(heliosview_http_client_t* client)
 {
     if (!client)
         return;
-    if (client->ssl_ctx)
-        SSL_CTX_free(client->ssl_ctx);
+    if (client->have_cred)
+        FreeCredentialsHandle(&client->cred);
     hv::hv_dealloc(client);
 }
 

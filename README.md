@@ -70,27 +70,28 @@ only the underlying memory comes from the allocator.
 
 ## Building
 
-Requires CMake ≥ 4.3 and a C++23 compiler. Dependencies come from a vcpkg
-install tree (classic mode) plus two vendored copies — **no FetchContent, so
-nothing is downloaded at configure time**:
+Requires CMake ≥ 4.3 and a C++23 compiler. **No vcpkg and no third-party TLS
+library are needed** — TLS for `https://` uses Windows SChannel (SSPI, part of
+the OS), and the remaining dependencies are vendored or auto-fetched:
 
 | dependency       | version           | source                        | used for                                  |
 | ---------------- | ----------------- | ----------------------------- | ----------------------------------------- |
-| OpenSSL          | 3.x               | vcpkg (`vcpkg install openssl`) | TLS for the async HTTP client (`https://`) |
-| `nlohmann/json`  | 3.12              | vcpkg (`vcpkg install nlohmann-json`) | WebView bridge auto-binding (`bindJson`) |
-| WebView2 SDK     | 1.0.3800.47       | vcpkg (`vcpkg install webview2`) | embedded WebView (win32)          |
+| TLS (SChannel)   | OS-provided (SSPI) | Windows (no dependency)      | TLS for the async HTTP client (`https://`) |
+| `nlohmann/json`  | 3.12              | vendored (`third_party/json/`) | WebView bridge auto-binding (`bindJson`) |
+| WebView2 SDK     | 1.0.4129.50       | downloaded from NuGet at configure time | embedded WebView (win32)          |
 | `stdexec`        | pinned commit b783aac (Mar 2024) | vendored (`third_party/stdexec/`) | P2300 senders/receivers (C++23 stand-in) |
 | http-parser      | 2.9.4             | vendored (`third_party/http-parser/`) | HTTP/1.1 response parsing       |
 
 `stdexec` is vendored because HeliosView.Core targets the March 2024 API
-(newer releases removed the concept tags this code uses, and vcpkg only ships
-the new API); http-parser is vendored because its vcpkg port fetches from
-codeload.github.com, which is unreachable on some networks.
+(newer releases removed the concept tags this code uses); http-parser and
+nlohmann/json are vendored so nothing depends on a package manager. The WebView2
+SDK is the only thing fetched at configure time (a `.nupkg` is just a zip of
+headers + the WebView2Loader library), and it is cached in the build directory —
+with no network, pre-seed `build/webview2-sdk/` from an earlier configure.
 
 ```sh
-vcpkg install openssl nlohmann-json webview2
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```
 
@@ -334,6 +335,12 @@ You can also use the raw C-style bridge: `bind` (JSON string of args),
 `resolve`/`reject`/`broadcast` are thread-safe (marshal to the UI thread);
 `bind`/`subscribe`/`eval` are UI-thread calls (other threads are marshalled).
 
+Every bridge name (`bind`/`bindJson`/`subscribe`/`subscribeJson`/`broadcast`)
+must be a **C identifier** `[A-Za-z_][A-Za-z0-9_]*` -- consistent with how native
+functions are named and what keeps the internal envelope framing parseable. An
+invalid name is rejected at registration (C API returns `-2`; the C++ layer on
+top also refuses it).
+
 **Events, local resources, and native dialogs** — three additions for building
 real UI on top of the bridge:
 
@@ -498,7 +505,8 @@ async.write(sock, helios::Buffer::copy(payload), cb);                // callback
 
 `helios::HttpClient` is an async HTTP/1.1 client on the Async pool (§5): DNS + TCP
 connect + reads/writes go through the pool's IOCP socket layer, HTTPS is
-OpenSSL with certificate verification against the Windows system CA store, and
+Windows SChannel (SSPI, part of the OS — no OpenSSL) with certificate
+verification against the Windows system store, and
 responses are parsed with http-parser. The whole exchange is a callback-driven
 state machine — nothing blocks a caller thread, and request timeouts are
 tracked by the pool's timer service (no polling, no per-request thread). Both
@@ -859,8 +867,9 @@ if (!req) printf("bad URL\n");
 heliosview_loop_run(loop);   /* the callback fires on a worker thread */
 ```
 
-The client supports plain `http://` and `https://` (OpenSSL, verified against
-the Windows system CA store); headers are built with `heliosview_http_headers_*`
+The client supports plain `http://` and `https://` (Windows SChannel/SSPI,
+verified against the Windows system store); headers are built with
+`heliosview_http_headers_*`
 (request headers are copied at submission; response headers are de-duplicated,
 last wins). The callback fires exactly once, from a loop worker thread, and all
 response pointers are valid only during the callback. `heliosview_http_request_cancel`
