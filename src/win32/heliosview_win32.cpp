@@ -22,7 +22,6 @@
 #include <map>
 #include <memory_resource>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -175,32 +174,49 @@ std::string hv_strerror(int code)
     return msg;
 }
 
-/* JSON string value for an error payload: {"error":<msg>} with quoting */
-std::string json_quote(const std::string& s)
+/* Bridge envelope wire format:
+ *
+ *   HV\t<kind>\t<fields>\r\n\r\n<payload>
+ *
+ * The envelope header is a small, tab-separated field list (magic "HV",
+ * a kind, then the kind's fields). Registered names are validated as C
+ * identifiers ([A-Za-z_][A-Za-z0-9_]*), so a tab or CR/LF can never appear in a
+ * header field. The payload (`args`/`result`/`data`/`error`) is an arbitrary
+ * byte string fenced by the HTTP-style "\r\n\r\n" separator and passed through
+ * verbatim; for calls/results it is JSON text, but the C side treats it as
+ * opaque and never parses it. Sharing this comment between the C side and the
+ * JS shim (kWebView2BridgeScript) keeps the two ends in sync.
+ *
+ *   up   call:      HV\tcall\t<id>\t<name>\r\n\r\n<argsJson>
+ *   up   broadcast: HV\tbroadcast\t<name>\r\n\r\n<dataJson>
+ *   down resolve:   HV\tresolve\t<id>\r\n\r\n<resultJson>
+ *   down reject:    HV\treject\t<id>\r\n\r\n<errorJson>
+ *
+ * A registered name must follow the C identifier rules (matching how native
+ * functions are named), which keeps the header free of tab / CR / LF.
+ */
+bool hv_valid_name(const char* s)
 {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s) {
-        switch (c) {
-        case '"':  out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n";  break;
-        case '\r': out += "\\r";  break;
-        case '\t': out += "\\t";  break;
-        default:   out.push_back(c); break;
-        }
+    if (!s || !s[0])
+        return false;
+    const char c0 = s[0];
+    if (!((c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z') || c0 == '_'))
+        return false;
+    for (const char* p = s + 1; *p; ++p) {
+        const char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              || c == '_'))
+            return false;
     }
-    out.push_back('"');
-    return out;
+    return true;
 }
 
-/* Post a bridge envelope to the JS page (must run on the UI thread) */
-void hv_post_json(heliosview_webview_t* wv, const std::string& json)
+/* Post a raw envelope string to the JS page (must run on the UI thread). */
+void hv_post_string(heliosview_webview_t* wv, const std::string& s)
 {
     if (wv && wv->webview && wv->ready) {
-        const std::wstring w = utf8_to_wide(json);
-        wv->webview->PostWebMessageAsJson(w.c_str());
+        const std::wstring w = utf8_to_wide(s);
+        wv->webview->PostWebMessageAsString(w.c_str());
     }
 }
 
@@ -249,20 +265,47 @@ const char* kWebView2BridgeScript = R"JS(
   var pending = new Map();            /* id -> {resolve, reject} */
   var seq = 0;
 
-  function post(obj) { window.chrome.webview.postMessage(obj); }
+  /* Bridge envelope wire format (shared with the C side - see the comment near
+   * hv_valid_name in heliosview_win32.cpp): a "HV" magic + tab-separated kind
+   * and fields, then a "\r\n\r\n" separator (HTTP-style) and a payload passed
+   * through verbatim. Registered names are C identifiers, so the header fields
+   * never contain a tab or CR/LF; the payload (JSON text for args/result/data,
+   * or a native error object) may contain anything. */
+  function pack(kind, fields, payload) {
+    var s = 'HV\t' + kind;
+    for (var i = 0; i < fields.length; i++) s += '\t' + fields[i];
+    return s + '\r\n\r\n' + (payload === undefined ? '' : payload);
+  }
+  function post(s) { window.chrome.webview.postMessage(s); }
 
+  /* Native -> page: parse an envelope string and dispatch. */
   function recv(e) {
     var m = e.data;
-    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (err) { return; } }
-    if (!m || m.__hv !== 1) return;
-    if (m.kind === 'resolve' || m.kind === 'reject') {
-      var p = pending.get(m.id);
+    if (typeof m !== 'string') return;
+    var sep = m.indexOf('\r\n\r\n');
+    if (sep < 0) return;
+    var head = m.slice(0, sep);       /* "HV\t<kind>\t<...fields>" */
+    var body = m.slice(sep + 4);
+    var h = head.split('\t');
+    if (h.length < 2 || h[0] !== 'HV') return;
+    if (h[1] === 'resolve' || h[1] === 'reject') {
+      var id = Number(h[2]);
+      var p = pending.get(id);
       if (!p) return;
-      pending.delete(m.id);
-      if (m.kind === 'resolve') p.resolve(m.result);
-      else p.reject(new Error(JSON.stringify(m.error)));
-    } else if (m.kind === 'broadcast') {
-      dispatchBC(m.name, m.data);
+      pending.delete(id);
+      if (h[1] === 'resolve') {
+        try { p.resolve(body === '' ? null : JSON.parse(body)); }
+        catch (e2) { p.reject(e2); }
+      } else {
+        var err;
+        try { err = new Error((JSON.parse(body) || {}).message || 'bridge error'); }
+        catch (e3) { err = new Error(body || 'bridge error'); }
+        p.reject(err);
+      }
+    } else if (h[1] === 'broadcast' && h.length >= 3) {
+      var data = null;
+      try { data = body === '' ? null : JSON.parse(body); } catch (e4) {}
+      dispatchBC(h[2], data);
     }
   }
 
@@ -274,7 +317,7 @@ const char* kWebView2BridgeScript = R"JS(
       return new Promise(function (resolve, reject) {
         var id = ++seq;
         pending.set(id, { resolve: resolve, reject: reject });
-        post({ __hv: 1, kind: 'call', id: id, name: name, args: args });
+        post(pack('call', [String(id), name], JSON.stringify(args)));
       });
     }
   };
@@ -298,7 +341,7 @@ const char* kWebView2BridgeScript = R"JS(
     var origPost = ch.postMessage.bind(ch);
     var origClose = ch.close.bind(ch);
     ch.postMessage = function (data) {
-      post({ __hv: 1, kind: 'broadcast', name: name, data: data === undefined ? null : data });
+      post(pack('broadcast', [name], JSON.stringify(data === undefined ? null : data)));
       return origPost(data);
     };
     ch.close = function () { live.delete(ch); return origClose(); };
@@ -1103,46 +1146,93 @@ int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window)
 
 namespace {
 
-/* Parse the JS->native call envelope {__hv, kind, id, name, args} posted by the
- * JS shim. Returns true for a "call" message, filling id/name/args. */
-bool parse_call_envelope(const std::string& msg, uint64_t& id, std::string& name, std::string& args)
-{
-    nlohmann::json env;
-    try {
-        env = nlohmann::json::parse(msg);
-        if (!env.is_object() || env.value("__hv", 0) != 1 || env.value("kind", "") != "call")
-            return false;
+/* ---- JS <-> native envelope parsing ----
+ *
+ * The JS shim (kWebView2BridgeScript) sends and receives messages in a compact,
+ * JSON-free framing (see the wire-format comment near hv_valid_name above):
+ * a tab-separated header plus a "\r\n\r\n"-fenced payload passed through
+ * verbatim. Registered names are validated as C identifiers, so the header can
+ * never contain a tab or CR/LF; the payload may contain anything. Parsing is
+ * therefore just a header split + an id/name lookup — no JSON at all. */
 
-        id = env.value("id", 0ull);
-        name = env.value("name", "");
-        /* args as raw JSON text, so the native side still gets the original string */
-        args = env.contains("args") ? env["args"].dump() : "[]";
-        return !name.empty();
-    } catch (...) {
-        /* page input: any unexpected shape is not a call; never throw into the COM callback */
-        return false;
+/* Split the leading tab-separated header from the payload. On success returns
+ * the byte offset just after the "\r\n\r\n" separator; msg.begin()+off is the
+ * payload. Returns std::string::npos if there is no separator or the header is
+ * malformed (must start with "HV"). */
+size_t split_envelope(const std::string& msg, std::vector<std::string>& head, std::string& payload)
+{
+    const size_t sep = msg.find("\r\n\r\n");
+    if (sep == std::string::npos)
+        return std::string::npos;
+    /* header: "HV\t<kind>\t<...fields>" */
+    const std::string h = msg.substr(0, sep);
+    if (h.compare(0, 2, "HV") != 0)
+        return std::string::npos;
+    size_t start = 0;
+    head.clear();
+    for (size_t pos = 0; pos <= h.size(); ++pos) {
+        if (pos == h.size() || h[pos] == '\t') {
+            head.push_back(h.substr(start, pos - start));
+            start = pos + 1;
+        }
     }
+    payload = msg.substr(sep + 4);
+    return sep + 4;
 }
 
-/* Parse the JS->native broadcast envelope {__hv, kind:'broadcast', name, data} posted by
- * the shim's BroadcastChannel.postMessage wrapper. Returns true for a "broadcast"
- * message, filling name and the raw JSON text of the posted value. */
+/* Parse the "HV\tcall\t<id>\t<name>\r\n\r\n<args>" message. Returns true for a
+ * call, filling id / name / args (args is the raw payload text, or "[]" when the
+ * JS side sent none). */
+bool parse_call_envelope(const std::string& msg, uint64_t& id, std::string& name, std::string& args)
+{
+    id = 0;
+    name.clear();
+    args = "[]";
+    std::vector<std::string> head;
+    std::string payload;
+    const size_t sep = split_envelope(msg, head, payload);
+    if (sep == std::string::npos)
+        return false;
+    if (head.size() != 4 || head[1] != "call")
+        return false;
+
+    /* id */
+    uint64_t v = 0;
+    for (char c : head[2]) {
+        if (c < '0' || c > '9')
+            return false;
+        v = v * 10 + (uint64_t)(c - '0');
+    }
+    id = v;
+
+    /* name must be a valid C identifier (keeps the header separator-safe) */
+    if (!hv_valid_name(head[3].c_str()))
+        return false;
+    name = head[3];
+
+    if (!payload.empty())
+        args = payload;
+    return true;
+}
+
+/* Parse the "HV\tbroadcast\t<name>\r\n\r\n<data>" message. Returns true for a
+ * broadcast, filling name and the raw payload text `data` ("" when absent). */
 bool parse_broadcast_envelope(const std::string& msg, std::string& name, std::string& data)
 {
-    nlohmann::json env;
-    try {
-        env = nlohmann::json::parse(msg);
-        if (!env.is_object() || env.value("__hv", 0) != 1 || env.value("kind", "") != "broadcast")
-            return false;
-
-        name = env.value("name", "");
-        /* data as raw JSON text, so the native side still gets the original string */
-        data = env.contains("data") ? env["data"].dump() : "";
-        return !name.empty();
-    } catch (...) {
-        /* page input: any unexpected shape is not a broadcast; never throw into the COM callback */
+    name.clear();
+    data.clear();
+    std::vector<std::string> head;
+    std::string payload;
+    const size_t sep = split_envelope(msg, head, payload);
+    if (sep == std::string::npos)
         return false;
-    }
+    if (head.size() != 3 || head[1] != "broadcast")
+        return false;
+    if (!hv_valid_name(head[2].c_str()))
+        return false;
+    name = head[2];
+    data = payload;
+    return true;
 }
 
 /* Dispatch a JS call to the bound native function. Runs on the UI thread. */
@@ -1213,7 +1303,10 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                         [webview](ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
                             (void)sender;
                             LPWSTR raw = nullptr;
-                            if (SUCCEEDED(args->get_WebMessageAsJson(&raw)) && raw) {
+                            /* The shim posts strings, so read the raw message text
+                             * (TryGetWebMessageAsString fails if the page posted a
+                             * non-string, which we intentionally ignore). */
+                            if (SUCCEEDED(args->TryGetWebMessageAsString(&raw)) && raw) {
                                 const std::string msg = wide_to_utf8(raw);
                                 CoTaskMemFree(raw);
                                 uint64_t id = 0;
@@ -1371,6 +1464,10 @@ int heliosview_webview_bind(heliosview_webview_t* webview, const char* name,
 {
     if (!webview || !name || !callback)
         return -1;
+    /* names must be C identifiers ([A-Za-z_][A-Za-z0-9_]*): this is both the
+     * binding convention and what keeps the wire header separator-safe. */
+    if (!hv_valid_name(name))
+        return -2;
     /* bindings are owned by the UI thread */
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, name = std::string(name), callback, userdata, dtor] {
@@ -1395,9 +1492,9 @@ int heliosview_webview_resolve(heliosview_webview_t* webview, uint64_t call_id, 
         });
         return 0;
     }
-    std::string json = "{\"__hv\":1,\"kind\":\"resolve\",\"id\":" + std::to_string(call_id)
-                     + ",\"result\":" + (result_json ? result_json : "null") + "}";
-    hv_post_json(webview, json);
+    std::string s = "HV\tresolve\t" + std::to_string(call_id) + "\r\n\r\n"
+                  + (result_json ? result_json : "null");
+    hv_post_string(webview, s);
     return 0;
 }
 
@@ -1411,9 +1508,9 @@ int heliosview_webview_reject(heliosview_webview_t* webview, uint64_t call_id, c
         });
         return 0;
     }
-    std::string json = "{\"__hv\":1,\"kind\":\"reject\",\"id\":" + std::to_string(call_id)
-                     + ",\"error\":" + (error_json ? error_json : "{}") + "}";
-    hv_post_json(webview, json);
+    std::string s = "HV\treject\t" + std::to_string(call_id) + "\r\n\r\n"
+                  + (error_json ? error_json : "{}");
+    hv_post_string(webview, s);
     return 0;
 }
 
@@ -1457,6 +1554,8 @@ int heliosview_webview_broadcast(heliosview_webview_t* webview, const char* name
 {
     if (!webview || !name)
         return -1;
+    if (!hv_valid_name(name))
+        return -2; /* would break the wire header */
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, name = std::string(name),
                         data = std::string(data_json ? data_json : "null")] {
@@ -1464,9 +1563,9 @@ int heliosview_webview_broadcast(heliosview_webview_t* webview, const char* name
         });
         return 0;
     }
-    std::string json = "{\"__hv\":1,\"kind\":\"broadcast\",\"name\":" + json_quote(name)
-                     + ",\"data\":" + (data_json ? data_json : "null") + "}";
-    hv_post_json(webview, json);
+    std::string s = std::string("HV\tbroadcast\t") + name + "\r\n\r\n"
+                  + (data_json ? data_json : "null");
+    hv_post_string(webview, s);
     return 0;
 }
 
@@ -1476,6 +1575,10 @@ int heliosview_webview_subscribe(heliosview_webview_t* webview, const char* name
 {
     if (!webview || !name || !callback)
         return -1;
+    /* names must be C identifiers, same rule as bind (keeps the wire header
+     * separator-safe and consistent with the function-naming convention). */
+    if (!hv_valid_name(name))
+        return -2;
     /* subscriptions are owned by the UI thread */
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, name = std::string(name), callback, userdata, dtor] {

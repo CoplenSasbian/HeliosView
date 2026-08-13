@@ -9,25 +9,30 @@ if(WIN32)
     target_sources(HeliosView PRIVATE
         win32/heliosview_win32.cpp        # windows / message loop / native message translation / WebView2
         win32/heliosview_io_win32.cpp     # IOCP thread pool + async TCP/file I/O
-        win32/heliosview_http_win32.cpp   # async HTTP client (OpenSSL + http-parser over async socket I/O)
+        win32/heliosview_http_win32.cpp   # async HTTP client (SChannel TLS + http-parser over async socket I/O)
     )
-    # OpenSSL / nlohmann-json: from vcpkg (manifest mode); http-parser: vendored
-    # (see the top-level CMakeLists.txt).
-    find_package(OpenSSL REQUIRED)
+    # This backend's OS system libraries (Winsock, SChannel/SSPI, CertStore,
+    # user32/shell/COM) come through the platform macro so the "which libraries a
+    # platform needs" lives in one place (cmake/PlatformLibs.cmake). It links:
+    #   ws2_32 crypt32 secur32 user32 shell32 ole32
+    heliosview_link_platform_system_libs(HeliosView)
+
+    # Third-party, non-OS deps: http-parser (vendored) is the only compiled
+    # dependency the DLL needs. The WebView2 bridge envelope parsing is a
+    # hand-rolled lightweight scanner (see heliosview_win32.cpp), so the C
+    # library has no nlohmann dependency -- nlohmann is only needed by the C++
+    # Core headers (HeliosView::Core, for Http.h / WebViewJson.h).
     target_link_libraries(HeliosView PRIVATE
-        ws2_32 crypt32 OpenSSL::SSL OpenSSL::Crypto
-        http_parser nlohmann_json::nlohmann_json
+        http_parser
     )
 
-    # WebView2 SDK: from the vcpkg `webview2` port (headers via the toolchain's
-    # global include; the loader lib/dll from the installed tree).
-    target_link_libraries(HeliosView PRIVATE
-        "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/WebView2Loader.dll.lib"
-    )
+    # WebView2 SDK: header-only interface target populated at configure time
+    # (see the top-level CMakeLists.txt), linking the WebView2Loader import lib.
+    target_link_libraries(HeliosView PRIVATE WebView2::SDK)
     # WebView2Loader.dll must sit next to the exe (the static loader loads it at runtime)
     add_custom_command(TARGET HeliosView POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/WebView2Loader.dll"
+            "${HELIOSVIEW_WEBVIEW2_LOADER_DLL}"
             $<TARGET_FILE_DIR:HeliosView>
     )
 endif()

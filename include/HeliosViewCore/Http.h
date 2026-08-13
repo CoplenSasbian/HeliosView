@@ -4,10 +4,11 @@
  * HeliosView.Core -- Http: client-style async HTTP client (header-only wrapper
  * over the C layer).
  *
- * A HttpClient owns an SSL context + is bound to an Async loop and issues
- * GET/POST/... requests over http:// or https://. TLS is implemented with
- * OpenSSL; connections are established through the loop's async socket layer;
- * responses are parsed with http-parser. Both a callback API and a
+ * A HttpClient owns an SChannel credential + is bound to an Async loop and issues
+ * GET/POST/... requests over http:// or https://. TLS is implemented with Windows
+ * SChannel (SSPI, part of the OS -- no OpenSSL, no vcpkg); connections are
+ * established through the loop's async socket layer; responses are parsed with
+ * http-parser. Both a callback API and a
  * std::execution sender API are provided, so it composes with coroutines:
  *
  *   helios::HttpClient http(async);
@@ -233,10 +234,10 @@ void httpCallbackTramp(heliosview_http_request_t* request, int error,
 
 /* ---------- public API ---------- */
 
-// An async HTTP client: owns an SSL context and is bound to the given Async loop.
-// The client must outlive every in-flight request; destroy it only when none are
-// pending. Construction loads the Windows system CA store synchronously (a
-// one-time cost paid per client, on the constructing thread).
+// An async HTTP client: owns an SChannel credential and is bound to the given
+// Async loop. The client must outlive every in-flight request; destroy it only
+// when none are pending. Server certificates are validated per request against
+// the Windows system store at handshake time.
 class HttpClient {
 public:
     explicit HttpClient(const Async& async)
