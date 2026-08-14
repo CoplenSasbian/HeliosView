@@ -97,6 +97,34 @@ public:
         return static_cast<ShowState>(heliosview_window_state(m_window));
     }
 
+    // Minimize / maximize / restore the window (convenience over showState)
+    void minimize() { heliosview_window_minimize(m_window); }
+    void maximize() { heliosview_window_maximize(m_window); }
+    void restore() { heliosview_window_restore(m_window); }
+
+    // Toggle between normal and maximized (e.g. for a title-bar maximize button)
+    void toggleMaximize() { heliosview_window_toggle_maximize(m_window); }
+
+    // Enable/disable user resizing (and the maximize box). Applied immediately
+    // on a shown window; honored at creation otherwise.
+    void setResizable(bool resizable) { heliosview_window_set_resizable(m_window, resizable ? 1 : 0); }
+
+    // ---- frameless dragging ----
+
+    // Register a client-area drag region: mouse-down + drag inside it moves the
+    // window like a title bar (WM_NCHITTEST -> HTCAPTION). Call this for each
+    // custom title-bar strip of a frameless/borderless window.
+    void addDragRegion(int32_t x, int32_t y, int32_t width, int32_t height)
+    {
+        heliosview_window_add_drag_region(m_window, x, y, width, height);
+    }
+
+    // Remove all registered drag regions
+    void clearDragRegions() { heliosview_window_clear_drag_regions(m_window); }
+
+    // The window's DPI (per-monitor; 0 if not created)
+    uint32_t dpi() const { return heliosview_window_dpi(m_window); }
+
     // Request to close the window; goes through the event pipeline
     // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
     void requestClose() { heliosview_window_close(m_window); }
@@ -203,6 +231,8 @@ public:
 
     Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
+    Signal<> focused;                                      // window gained focus (activated)
+    Signal<> blurred;                                      // window lost focus (deactivated)
     Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered)
     Signal<KeyCode> keyReleased;                           // key released
     Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
@@ -217,6 +247,12 @@ public:
         switch (e.type) {
         case EventType::WindowResize:
             resized(e.width, e.height);
+            return true;
+        case EventType::WindowFocus:
+            focused();
+            return true;
+        case EventType::WindowBlur:
+            blurred();
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

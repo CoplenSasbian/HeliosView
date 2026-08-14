@@ -8,13 +8,28 @@ int main()
 {
     std::printf("HeliosView %s\n", helios::version().c_str());
 
+    helios::enableDpiAwareness(); // before any window: crisp, per-monitor DPI
+
     helios::App app;
     helios::Window window(800, 600, "HeliosView Demo");
     window.show();
 
+    // Frameless window with a custom title bar: register a drag region so the
+    // top strip moves the window (like a native title bar). Keys toggle the
+    // remaining window state.
+    helios::Window frameless(480, 320, "Frameless", helios::WindowStyle::Frameless);
+    frameless.addDragRegion(0, 0, 480, 40); // the custom title-bar strip
+    frameless.resized.connect([](int32_t w, int32_t) {
+        // keep the drag strip spanning the (new) window width
+        std::printf("[frameless] resize %d\n", w);
+    });
+    frameless.show();
+
     helios::Menu menu(window.nativeHandle());
     helios::Menu::Item* showItem = menu.addItem("Show / Restore");
     helios::Menu::Item* minimizeItem = menu.addItem("Minimize");
+    helios::Menu::Item* maximizeItem = menu.addItem("Maximize");
+    helios::Menu::Item* resizableItem = menu.addItem("Toggle Resizable");
     menu.addSeparator();
     helios::Menu::Item* quitItem = menu.addItem("Quit");
     showItem->triggered.connect([&window] {
@@ -23,7 +38,16 @@ int main()
     });
     minimizeItem->triggered.connect([&window] {
         std::printf("[win] menu: minimize\n");
-        window.showMinimized();
+        window.minimize();
+    });
+    maximizeItem->triggered.connect([&window] {
+        std::printf("[win] menu: toggle maximize\n");
+        window.toggleMaximize();
+    });
+    resizableItem->triggered.connect([&window] {
+        const bool on = window.state() != helios::ShowState::Maximized; // demo: arbitrary
+        std::printf("[win] menu: resizable = %d\n", on);
+        window.setResizable(on);
     });
     quitItem->triggered.connect([&app] {
         std::printf("[win] menu: quit\n");
@@ -50,9 +74,30 @@ int main()
 
     window.keyPressed.connect([&](helios::KeyCode key) {
         std::printf("[win] key down: %d\n", static_cast<int>(key));
-        if (key == helios::KeyCode::Escape)
+        switch (key) {
+        case helios::KeyCode::Escape:
             window.close();
+            break;
+        case helios::KeyCode::F1:
+            window.toggleMaximize();
+            break;
+        case helios::KeyCode::F2:
+            window.minimize();
+            break;
+        case helios::KeyCode::F3:
+            window.restore();
+            break;
+        case helios::KeyCode::F4:
+            window.setResizable(window.state() != helios::ShowState::Maximized);
+            break;
+        default:
+            break;
+        }
     });
+
+    window.focused.connect([] { std::printf("[win] focus gained\n"); });
+    window.blurred.connect([] { std::printf("[win] focus lost\n"); });
+    std::printf("[win] dpi = %u\n", window.dpi());
 
     window.mouseMoved.connect([](int32_t x, int32_t y) {
         std::printf("[win] mouse move: %d, %d\n", x, y);
