@@ -732,15 +732,15 @@ HELIOSVIEW_API void heliosview_file_close(heliosview_file_t* file);
 /* ================= Async HTTP client =================
  *
  * A client-style async HTTP/1.1 client (GET/POST/...). A heliosview_http_client_t
- * is bound to a loop and owns an SChannel credential; requests are issued from
+ * is bound to a loop and owns a TLS credential; requests are issued from
  * the client and share its resources. Each request uses its own connection
  * (sent with "Connection: close"): there is no keep-alive or connection
  * pooling, so every exchange pays DNS + TCP (+ TLS) setup in full.
  *
  * Transport: plain http:// and https:// are both supported. HTTPS is implemented
- * with Windows SChannel (SSPI) -- no third-party TLS library, no vcpkg, no
- * OpenSSL; server certificates are validated against the Windows system store
- * with a hostname check. DNS resolution + TCP connect + reads/writes go through
+ * with the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on Linux);
+ * server certificates are validated against the platform's trust store with a
+ * hostname check. DNS resolution + TCP connect + reads/writes go through
  * the loop's async socket layer (heliosview_socket_*); the response is parsed
  * with http-parser. Nothing blocks a caller thread: the exchange is a
  * callback-driven state machine running on the loop's worker threads, and
@@ -850,11 +850,12 @@ typedef void (*heliosview_http_response_cb)(heliosview_http_request_t* request,
  * with heliosview_http_request_cancel (error == HELIOSVIEW_HTTP_CANCELLED). */
 #define HELIOSVIEW_HTTP_CANCELLED (-1000)
 
-/* Create an HTTP client bound to `loop`. The client acquires an SChannel
- * credential (Windows SSPI; no third-party TLS dependency); it must be destroyed
- * only after all its requests complete. Server certificate validation happens
- * per request, at handshake time, against the Windows system store. Returns
- * NULL on failure (e.g. credential acquisition failure). */
+/* Create an HTTP client bound to `loop`. The client acquires a TLS credential
+ * through the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on
+ * Linux); it must be destroyed only after all its requests complete. Server
+ * certificate validation happens per request, at handshake time, against the
+ * platform's trust store. Returns NULL on failure (e.g. credential acquisition
+ * failure). */
 HELIOSVIEW_API heliosview_http_client_t* heliosview_http_client_create(heliosview_loop_t* loop);
 
 /* Destroy the client and free its resources. Precondition: no request issued from

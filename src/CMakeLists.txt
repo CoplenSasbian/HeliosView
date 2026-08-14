@@ -1,15 +1,17 @@
 add_library(HeliosView SHARED
     heliosview.cpp
+    heliosview_http.cpp   # async HTTP client core (platform-neutral: URL/wire/parser/state machine)
 )
 
 # Platform backends: each platform adds its implementation files under
 # src/<platform>/. The cross-platform API lives in include/HeliosView/heliosview.h;
-# porting to another platform only requires rewriting these files.
+# porting to another platform only requires rewriting these files (plus the
+# TLS backend the HTTP core drives through hv_tls_ops).
 if(WIN32)
     target_sources(HeliosView PRIVATE
         win32/heliosview_win32.cpp        # windows / message loop / native message translation / WebView2
         win32/heliosview_io_win32.cpp     # IOCP thread pool + async TCP/file I/O
-        win32/heliosview_http_win32.cpp   # async HTTP client (SChannel TLS + http-parser over async socket I/O)
+        win32/heliosview_tls_win32.cpp    # SChannel (SSPI) TLS backend for the async HTTP client
     )
     # This backend's OS system libraries (Winsock, SChannel/SSPI, CertStore,
     # user32/shell/COM) come through the platform macro so the "which libraries a
