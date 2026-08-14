@@ -433,10 +433,13 @@ HELIOSVIEW_API int heliosview_window_add_control_button(heliosview_window_t* win
 /* Remove all registered control buttons. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_clear_control_buttons(heliosview_window_t* window);
 
-/* Compatibility no-op. FRAMELESS windows always show the real system
- * minimize / maximize / close buttons (drawn by DWM, Electron "hidden title
- * bar" style, including the Win11 snap-layouts popup on maximize hover). This
- * call simply re-frames the window so any pending style change takes effect.
+/* Draw the control buttons in the modern Windows style (on != 0) or leave them
+ * to the app (on == 0, the default). When enabled, each registered
+ * control-button rectangle becomes a real child window drawn with MDL2 glyphs
+ * (the same ones as the system title bar) plus hover/pressed feedback that
+ * follows the light/dark theme. The child window sits above the WebView; a
+ * click performs the action and the maximize button shows the restore glyph
+ * while maximized. Call after show() (the child windows need the parent HWND).
  * 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on);
 
