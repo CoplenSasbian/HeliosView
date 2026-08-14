@@ -140,11 +140,9 @@ public:
     // Remove all registered control buttons
     void clearControlButtons() { heliosview_window_clear_control_buttons(m_window); }
 
-    // Draw the registered control buttons the modern Windows way (Segoe MDL2
-    // glyphs — the same ones as the system title bar — with hover/pressed
-    // feedback following the light/dark theme), as child windows layered above
-    // the WebView. The alternative is drawing them yourself in the client area.
-    // Call after show(). Pass false to return to app-drawn buttons.
+    // Compatibility no-op. Frameless windows always show the real system
+    // minimize / maximize / close buttons (drawn by DWM, including the Win11
+    // snap-layouts popup on maximize hover); this re-frames the window.
     void enableNativeButtons(bool on) { heliosview_window_enable_native_buttons(m_window, on ? 1 : 0); }
 
     // The window's DPI (per-monitor; 0 if not created)

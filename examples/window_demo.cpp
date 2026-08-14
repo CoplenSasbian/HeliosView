@@ -18,22 +18,18 @@ int main()
     window.setMinimumSize(400, 300);
     window.setMaximumSize(1200, 900);
 
-    // Frameless window with a custom title bar: register a drag region so the
-    // top strip moves the window, and three window control buttons (minimize /
-    // maximize / close) at the top-right corner. enableNativeButtons draws them
-    // with the system title-bar button theme (DrawThemeBackground, same as
-    // Chromium's Window Controls Overlay) as child windows above the WebView.
+    // Frameless window with a hidden title bar: the caption is kept (so the real
+    // system minimize/maximize/close buttons — including Win11 snap-layouts on
+    // maximize hover — are drawn by DWM), the title text is hidden, and the
+    // frame is extended so the content fills the caption area. The top strip
+    // below the buttons drags the window.
     helios::Window frameless(480, 320, "Frameless", helios::WindowStyle::Frameless);
-    frameless.addDragRegion(0, 0, 480, 40); // the custom title-bar strip
-    frameless.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
-    frameless.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
-    frameless.addControlButton(helios::ControlButton::Close, 480 - 1 * 46, 0, 46, 40);
+    frameless.addDragRegion(0, 0, 480, 32); // the custom title-bar strip
     frameless.resized.connect([](int32_t w, int32_t) {
         // keep the drag strip spanning the (new) window width
         std::printf("[frameless] resize %d\n", w);
     });
     frameless.show();
-    frameless.enableNativeButtons(true); // after show(): system-theme-drawn buttons
 
     helios::Menu menu(window.nativeHandle());
     helios::Menu::Item* showItem = menu.addItem("Show / Restore");

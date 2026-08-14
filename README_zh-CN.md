@@ -193,19 +193,11 @@ win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
 win.show();
 ```
 
-**自定义控制按钮。** 在客户区自行绘制最小化 / 最大化 / 关闭按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。按钮外观完全由你绘制：
+**原生控制按钮（隐藏标题栏）。** `Frameless` 窗口保留系统标题栏样式（因此 DWM 绘制**真正的系统**最小化 / 最大化 / 关闭按钮 —— 包括最大化按钮悬停时弹出的 Win11 停靠布局），隐藏标题文字，并扩展 DWM 边框让 WebView 内容填满标题栏区域，按钮悬浮在内容之上（Electron "hidden title bar" / Window Controls Overlay 行为）。无需绘制或注册：
 
 ```cpp
-win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
-```
-
-或者让库用**现代 Windows 风格**绘制 —— 使用 `Segoe MDL2 Assets` 图标字体（与系统标题栏相同的 glyph），hover / 按下反馈跟随深浅色主题，作为子窗口层叠在 WebView 之上：
-
-```cpp
-win.show();
-win.enableNativeButtons(true);   // Windows 11 风格的控制按钮
+helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
+win.show();   // 真正的系统按钮；悬停最大化按钮可弹出 Win11 停靠布局
 ```
 
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。

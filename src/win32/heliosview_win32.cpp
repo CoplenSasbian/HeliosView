@@ -76,10 +76,6 @@ struct heliosview_window {
         RECT rect{};
     };
     std::vector<control_button> control_buttons;
-    /* Native-look child windows for the control buttons (created by
-     * heliosview_window_enable_native_buttons(1)), painted with the system
-     * title-bar button theme. Indexed 1:1 with control_buttons. */
-    std::vector<HWND> native_buttons;
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
@@ -547,12 +543,14 @@ DWORD map_win32_style(const heliosview_window_t* window)
         style = WS_POPUP; /* borderless and titleless; fully custom */
         break;
     case HELIOSVIEW_WINDOW_FRAMELESS:
-        /* No system title bar or caption buttons; the app draws its own chrome.
-         * The library can draw native-look control buttons on request (see
-         * enableNativeButtons): real child windows painted with the system
-         * title-bar button theme (DrawThemeBackground), floating above the
-         * WebView. WS_THICKFRAME keeps the resize border. */
-        style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        /* "Hidden title bar" (Electron titleBarStyle:hidden / Window Controls
+         * Overlay): keep the full caption styles so DWM draws the real system
+         * minimize/maximize/close buttons (including Win11 snap-layouts on the
+         * maximize hover) — the caption is 100% native. The library then hides
+         * the title-bar text and extends the frame (DwmExtendFrameIntoClientArea)
+         * so the WebView content fills the caption area while DWM keeps the
+         * buttons floating above it. */
+        style = WS_OVERLAPPEDWINDOW;
         break;
     default:
         style = WS_OVERLAPPEDWINDOW;
@@ -766,222 +764,6 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     return 1;
 }
 
-/* ================= Native-look title-bar control buttons =================
- *
- * Each registered control-button rectangle can be backed by a real child window
- * that draws the buttons the way Windows 10/11 does: glyphs from the "Segoe
- * MDL2 Assets" icon font (the same glyphs the system title bar uses) plus a
- * hover/pressed highlight. The child window sits above the WebView (it is a
- * sibling created later, so it is on top), tracks hover/pressed states, and
- * performs the action on click. Because Win32 child windows cannot be
- * transparent (no WS_EX_LAYERED), the button background is filled with the
- * title-bar color so it blends with the app's title bar. */
-
-namespace {
-
-constexpr wchar_t kNativeButtonClass[] = L"HeliosViewTitleButton";
-
-/* Segoe MDL2 Assets glyphs for the standard title-bar buttons. */
-constexpr wchar_t kGlyphMinimize = 0xE921; /* Minimize   */
-constexpr wchar_t kGlyphMaximize = 0xE922; /* Maximize   */
-constexpr wchar_t kGlyphRestore  = 0xE923; /* Restore    */
-constexpr wchar_t kGlyphClose    = 0xE8BB; /* ChromeClose */
-
-/* Per-child state: which action, and the owning window (to act on it). */
-struct native_button_state {
-    heliosview_control_button_t button = HELIOSVIEW_CONTROL_MINIMIZE;
-    HWND owner = nullptr;
-    bool hover = false;
-    bool pressed = false;
-};
-
-/* Is the owner using the dark theme? (per-window DWM flag, else the system
- * AppsUseLightTheme setting). */
-bool owner_dark(HWND hwnd)
-{
-    BOOL dark = FALSE;
-    const HRESULT hr = DwmGetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                             &dark, sizeof(dark));
-    if (FAILED(hr)) {
-        DWORD value = 0, size = sizeof(value);
-        const LONG ok = RegGetValueW(HKEY_CURRENT_USER,
-                                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                                     L"AppsUseLightTheme", RRF_RT_REG_DWORD,
-                                     nullptr, &value, &size);
-        dark = (ok == ERROR_SUCCESS) ? (value == 0) : FALSE;
-    }
-    return dark != FALSE;
-}
-
-/* Colors for the button: background (blends with the app title bar behind it)
- * and glyph. */
-void button_colors(bool dark, heliosview_control_button_t btn, bool hover,
-                   bool pressed, COLORREF* bg, COLORREF* fg)
-{
-    if (btn == HELIOSVIEW_CONTROL_CLOSE && (hover || pressed)) {
-        *bg = RGB(232, 17, 35);   /* red, like the real close button */
-        *fg = RGB(255, 255, 255);
-        return;
-    }
-    if (dark) {
-        *bg = pressed ? RGB(80, 80, 80) : hover ? RGB(52, 52, 52) : RGB(32, 32, 32);
-        *fg = RGB(255, 255, 255);
-    } else {
-        *bg = pressed ? RGB(190, 190, 190) : hover ? RGB(224, 224, 224) : RGB(255, 255, 255);
-        *fg = RGB(32, 32, 32);
-    }
-}
-
-void paint_native_button(HWND hwnd, native_button_state* st)
-{
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(hwnd, &ps);
-    RECT rc{};
-    GetClientRect(hwnd, &rc);
-
-    const bool maximized = IsZoomed(st->owner) != FALSE;
-    const bool dark = owner_dark(st->owner);
-    COLORREF bg = RGB(32, 32, 32), fg = RGB(255, 255, 255);
-    button_colors(dark, st->button, st->hover, st->pressed, &bg, &fg);
-
-    /* Opaque background: the title-bar color (blends with the app title bar). */
-    HBRUSH back = CreateSolidBrush(bg);
-    FillRect(dc, &rc, back);
-    DeleteObject(back);
-
-    /* Glyph from the Segoe MDL2 Assets font (the system title-bar glyphs),
-     * centered, scaled with the owner's DPI. */
-    const wchar_t glyph =
-        st->button == HELIOSVIEW_CONTROL_MINIMIZE ? kGlyphMinimize
-        : st->button == HELIOSVIEW_CONTROL_MAXIMIZE ? (maximized ? kGlyphRestore : kGlyphMaximize)
-        : kGlyphClose;
-    const UINT dpi = GetDpiForWindow(st->owner);
-    const int h = MulDiv(rc.bottom - rc.top, dpi, 96);
-    HFONT font = CreateFontW(-h * 3 / 5, 0, 0, 0, FW_NORMAL,
-                             FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                             L"Segoe MDL2 Assets");
-    HFONT old = static_cast<HFONT>(SelectObject(dc, font));
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, fg);
-    wchar_t text[2] = {glyph, 0};
-    DrawTextW(dc, text, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, old);
-    DeleteObject(font);
-
-    EndPaint(hwnd, &ps);
-}
-
-LRESULT CALLBACK native_button_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
-{
-    auto* st = reinterpret_cast<native_button_state*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (!st)
-        return DefWindowProcW(hwnd, message, wparam, lparam);
-
-    switch (message) {
-    case WM_PAINT:
-        paint_native_button(hwnd, st);
-        return 0;
-    case WM_ERASEBKGND:
-        return 1; /* background handled in WM_PAINT */
-    case WM_MOUSEMOVE: {
-        if (!st->hover) {
-            st->hover = true;
-            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&tme);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
-    }
-    case WM_MOUSELEAVE:
-        st->hover = false;
-        st->pressed = false;
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    case WM_LBUTTONDOWN:
-        SetCapture(hwnd);
-        st->pressed = true;
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    case WM_LBUTTONUP: {
-        st->pressed = false;
-        ReleaseCapture();
-        POINT pt{};
-        GetCursorPos(&pt);
-        RECT rc{};
-        GetWindowRect(hwnd, &rc);
-        const bool inside = PtInRect(&rc, pt) != FALSE;
-        InvalidateRect(hwnd, nullptr, FALSE);
-        if (inside) {
-            switch (st->button) {
-            case HELIOSVIEW_CONTROL_MINIMIZE:
-                ShowWindow(st->owner, SW_MINIMIZE);
-                break;
-            case HELIOSVIEW_CONTROL_MAXIMIZE:
-                ShowWindow(st->owner, IsZoomed(st->owner) ? SW_RESTORE : SW_MAXIMIZE);
-                break;
-            case HELIOSVIEW_CONTROL_CLOSE:
-            default:
-                PostMessageW(st->owner, WM_CLOSE, 0, 0);
-                break;
-            }
-        }
-        return 0;
-    }
-    default:
-        return DefWindowProcW(hwnd, message, wparam, lparam);
-    }
-}
-
-/* Create the child windows for every registered control button. Returns 0 on success. */
-int create_native_buttons(heliosview_window_t* win)
-{
-    if (!win->hwnd)
-        return -1;
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = native_button_wndproc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-    wc.lpszClassName = kNativeButtonClass;
-    RegisterClassExW(&wc); /* re-registering is harmless */
-
-    win->native_buttons.clear();
-    for (const auto& cb : win->control_buttons) {
-        auto* st = hv::hv_alloc<native_button_state>();
-        st->button = cb.button;
-        st->owner = win->hwnd;
-        HWND child = CreateWindowExW(0, kNativeButtonClass, L"",
-                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                     cb.rect.left, cb.rect.top,
-                                     cb.rect.right - cb.rect.left,
-                                     cb.rect.bottom - cb.rect.top,
-                                     win->hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!child) {
-            hv::hv_dealloc(st);
-            for (HWND h : win->native_buttons)
-                DestroyWindow(h);
-            win->native_buttons.clear();
-            return -1;
-        }
-        SetWindowLongPtrW(child, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
-        win->native_buttons.push_back(child);
-    }
-    return 0;
-}
-
-void destroy_native_buttons(heliosview_window_t* win)
-{
-    for (HWND h : win->native_buttons) {
-        auto* st = reinterpret_cast<native_button_state*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-        if (st)
-            hv::hv_dealloc(st);
-        DestroyWindow(h);
-    }
-    win->native_buttons.clear();
-}
-
 } // namespace
 
 LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
@@ -998,14 +780,15 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    /* WM_NCHITTEST: registered control buttons report as real title-bar buttons
-     * (HTMINBUTTON / HTMAXBUTTON / HTCLOSE -> DefWindowProc performs the action
-     * and clicks never drag the window); registered drag regions act as a title
-     * bar (move the window on drag). Any other point falls through to
-     * DefWindowProc (borders keep resize handles). */
+    /* WM_NCHITTEST: the top strip of a FRAMELESS (hidden title bar) window acts
+     * as the title bar (drag = HTCAPTION). The right corner is left to
+     * DefWindowProc so the *system* buttons (which DWM paints there) are hit and
+     * their actions + Win11 snap-layouts work. Registered control buttons and
+     * drag regions also participate. */
     if (message == WM_NCHITTEST) {
         auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (win && (!win->control_buttons.empty() || !win->drag_regions.empty())) {
+        if (win && (!win->control_buttons.empty() || !win->drag_regions.empty()
+                    || win->style == HELIOSVIEW_WINDOW_FRAMELESS)) {
             const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
                                static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
             POINT client = screen;
@@ -1033,6 +816,19 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                     if (client.x >= r.left && client.x < r.right
                         && client.y >= r.top && client.y < r.bottom)
                         return HTCAPTION;
+                }
+                /* Hidden-titlebar window: the top ~39px is the caption strip. The
+                 * rightmost ~135px is the system button area — return HTCLIENT
+                 * there so DefWindowProc still gets to handle the button hit-test
+                 * (HTMINBUTTON/HTMAXBUTTON/HTCLOSE + snap layouts). The rest of
+                 * the strip drags the window. */
+                if (win->style == HELIOSVIEW_WINDOW_FRAMELESS
+                    && client.y >= 0 && client.y < 39 && !IsZoomed(hwnd)) {
+                    RECT cr{};
+                    GetClientRect(hwnd, &cr);
+                    if (client.x >= cr.right - 135)
+                        return HTCLIENT; /* system buttons handle it */
+                    return HTCAPTION;
                 }
             }
         }
@@ -1104,8 +900,6 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
     return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
 }
-
-} // namespace
 
 /* ================= Message loop ================= */
 
@@ -1195,7 +989,6 @@ void heliosview_window_destroy(heliosview_window_t* window)
     if (!window)
         return;
     g_windows_by_id.erase(window->id);
-    destroy_native_buttons(window);
     if (window->hwnd) {
         /* The window is a passive registry only: it does not own trays/menus.
          * Their C++ wrappers (Tray/Menu) must be destroyed before the window. */
@@ -1228,7 +1021,7 @@ int heliosview_window_show(heliosview_window_t* window)
     const std::wstring title = utf8_to_wide(window->title);
 
     /* compute the window size for the preset style (AdjustWindowRect is the
-     * identity for borderless/popup styles) */
+     * identity for borderless styles) */
     const DWORD style = map_win32_style(window);
     RECT rect{0, 0, window->width, window->height};
     AdjustWindowRect(&rect, style, FALSE);
@@ -1240,8 +1033,15 @@ int heliosview_window_show(heliosview_window_t* window)
     if (!window->hwnd)
         return -2;
 
-    /* For FRAMELESS windows with native control buttons, the buttons are real
-     * child windows created by enableNativeButtons() after this call. */
+    /* For FRAMELESS (hidden title bar) windows: clear the title text so no label
+     * shows in the caption, and extend the DWM frame into the client area so the
+     * WebView content fills the caption area while DWM keeps drawing the native
+     * system buttons (incl. Win11 snap-layouts) floating above it. */
+    if (window->style == HELIOSVIEW_WINDOW_FRAMELESS) {
+        SetWindowTextW(window->hwnd, L"");
+        MARGINS margins{0, 0, 1, 0};
+        DwmExtendFrameIntoClientArea(window->hwnd, &margins);
+    }
 
     /* already registered in WM_NCCREATE; fall back here if that did not happen */
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
@@ -1536,26 +1336,22 @@ int heliosview_window_clear_control_buttons(heliosview_window_t* window)
 {
     if (!window)
         return -1;
-    destroy_native_buttons(window);
     window->control_buttons.clear();
     return 0;
 }
 
 int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on)
 {
-    /* Draw the registered control buttons as real child windows painted with the
-     * system title-bar button theme (DrawThemeBackground, the same approach
-     * Chromium's Window Controls Overlay uses). The child windows sit above the
-     * WebView and perform the action on click. Disable destroys them (the app
-     * draws its own buttons instead). */
+    /* With the hidden-titlebar (Frameless) mechanism the minimize/maximize/close
+     * buttons are drawn natively by DWM (with the caption styles present) — there
+     * is nothing to install. Kept for API compatibility: re-frames the window so
+     * the change takes effect. */
     if (!window)
         return -1;
-    if (on) {
-        if (!window->hwnd)
-            return -1; /* child windows need the parent HWND: call after show() */
-        return create_native_buttons(window);
+    if (on && window->hwnd) {
+        SetWindowPos(window->hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
-    destroy_native_buttons(window);
     return 0;
 }
 
