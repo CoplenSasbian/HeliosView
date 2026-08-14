@@ -201,11 +201,11 @@ win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
 win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
 ```
 
-或者让库用**系统标题栏按钮主题**绘制（`DrawThemeBackground` —— 与 Chromium 的 Window Controls Overlay 相同的做法，即 OS 自带的按钮外观，含悬停 / 按下反馈与深浅色模式），作为子窗口层叠在 WebView 之上：
+或者让库用**现代 Windows 风格**绘制 —— 使用 `Segoe MDL2 Assets` 图标字体（与系统标题栏相同的 glyph），hover / 按下反馈跟随深浅色主题，作为子窗口层叠在 WebView 之上：
 
 ```cpp
 win.show();
-win.enableNativeButtons(true);   // 系统主题绘制的控制按钮
+win.enableNativeButtons(true);   // Windows 11 风格的控制按钮
 ```
 
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。

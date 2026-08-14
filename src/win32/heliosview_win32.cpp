@@ -22,7 +22,6 @@
 #include <objbase.h>  /* CoCreateInstance */
 #include <shobjidl.h> /* IFileOpenDialog / IShellItem (file pickers) / ITaskbarList3 */
 #include <dwmapi.h>   /* DwmSetWindowAttribute (backdrop / dark mode) */
-#include <uxtheme.h>  /* DrawThemeBackground (system title-bar button look) */
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
@@ -767,41 +766,26 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     return 1;
 }
 
-/* ================= Native-look (system theme) title-bar control buttons =================
+/* ================= Native-look title-bar control buttons =================
  *
  * Each registered control-button rectangle can be backed by a real child window
- * painted with DrawThemeBackground (the same theme parts the OS uses for its own
- * title-bar buttons, and the same approach Chromium's Window Controls Overlay
- * uses), so the buttons look like the system's. The child window sits above the
- * WebView (it is a sibling created later, so it is on top), tracks hover/pressed
- * states, and performs the action on click. Because Win32 child windows cannot
- * be transparent (no WS_EX_LAYERED), the button background is filled with the
+ * that draws the buttons the way Windows 10/11 does: glyphs from the "Segoe
+ * MDL2 Assets" icon font (the same glyphs the system title bar uses) plus a
+ * hover/pressed highlight. The child window sits above the WebView (it is a
+ * sibling created later, so it is on top), tracks hover/pressed states, and
+ * performs the action on click. Because Win32 child windows cannot be
+ * transparent (no WS_EX_LAYERED), the button background is filled with the
  * title-bar color so it blends with the app's title bar. */
 
 namespace {
 
 constexpr wchar_t kNativeButtonClass[] = L"HeliosViewTitleButton";
 
-/* WP_*BUTTON / *BS_* theme parts are gated behind _WIN32_WINNT >= 0x0A00 in the
- * SDK; define the ones we use so the code compiles without setting it. */
-#ifndef WP_MINBUTTON
-#define WP_MINBUTTON 15
-#define MBS_NORMAL 1
-#define MBS_HOT 2
-#define MBS_PUSHED 3
-#define WP_MAXBUTTON 16
-#define MAXBS_NORMAL 1
-#define MAXBS_HOT 2
-#define MAXBS_PUSHED 3
-#define WP_RESTOREBUTTON 17
-#define RBS_NORMAL 1
-#define RBS_HOT 2
-#define RBS_PUSHED 3
-#define WP_CLOSEBUTTON 18
-#define CBS_NORMAL 1
-#define CBS_HOT 2
-#define CBS_PUSHED 3
-#endif
+/* Segoe MDL2 Assets glyphs for the standard title-bar buttons. */
+constexpr wchar_t kGlyphMinimize = 0xE921; /* Minimize   */
+constexpr wchar_t kGlyphMaximize = 0xE922; /* Maximize   */
+constexpr wchar_t kGlyphRestore  = 0xE923; /* Restore    */
+constexpr wchar_t kGlyphClose    = 0xE8BB; /* ChromeClose */
 
 /* Per-child state: which action, and the owning window (to act on it). */
 struct native_button_state {
@@ -811,8 +795,8 @@ struct native_button_state {
     bool pressed = false;
 };
 
-/* The color behind the button (the app's title-bar background), so the opaque
- * child blends in: dark theme -> #202020, light theme -> white. */
+/* Is the owner using the dark theme? (per-window DWM flag, else the system
+ * AppsUseLightTheme setting). */
 bool owner_dark(HWND hwnd)
 {
     BOOL dark = FALSE;
@@ -829,28 +813,23 @@ bool owner_dark(HWND hwnd)
     return dark != FALSE;
 }
 
-/* Theme part + state for a button given the current show state. */
-void theme_button_part(heliosview_control_button_t btn, bool maximized,
-                       bool hover, bool pressed, int* part, int* state)
+/* Colors for the button: background (blends with the app title bar behind it)
+ * and glyph. */
+void button_colors(bool dark, heliosview_control_button_t btn, bool hover,
+                   bool pressed, COLORREF* bg, COLORREF* fg)
 {
-    const int p = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? WP_MINBUTTON
-                  : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? WP_RESTOREBUTTON : WP_MAXBUTTON)
-                  : WP_CLOSEBUTTON;
-    int s;
-    if (pressed)
-        s = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_PUSHED
-            : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_PUSHED : MAXBS_PUSHED)
-            : CBS_PUSHED;
-    else if (hover)
-        s = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_HOT
-            : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_HOT : MAXBS_HOT)
-            : CBS_HOT;
-    else
-        s = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_NORMAL
-            : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_NORMAL : MAXBS_NORMAL)
-            : CBS_NORMAL;
-    *part = p;
-    *state = s;
+    if (btn == HELIOSVIEW_CONTROL_CLOSE && (hover || pressed)) {
+        *bg = RGB(232, 17, 35);   /* red, like the real close button */
+        *fg = RGB(255, 255, 255);
+        return;
+    }
+    if (dark) {
+        *bg = pressed ? RGB(80, 80, 80) : hover ? RGB(52, 52, 52) : RGB(32, 32, 32);
+        *fg = RGB(255, 255, 255);
+    } else {
+        *bg = pressed ? RGB(190, 190, 190) : hover ? RGB(224, 224, 224) : RGB(255, 255, 255);
+        *fg = RGB(32, 32, 32);
+    }
 }
 
 void paint_native_button(HWND hwnd, native_button_state* st)
@@ -860,20 +839,37 @@ void paint_native_button(HWND hwnd, native_button_state* st)
     RECT rc{};
     GetClientRect(hwnd, &rc);
 
+    const bool maximized = IsZoomed(st->owner) != FALSE;
+    const bool dark = owner_dark(st->owner);
+    COLORREF bg = RGB(32, 32, 32), fg = RGB(255, 255, 255);
+    button_colors(dark, st->button, st->hover, st->pressed, &bg, &fg);
+
     /* Opaque background: the title-bar color (blends with the app title bar). */
-    HBRUSH back = CreateSolidBrush(owner_dark(st->owner) ? RGB(32, 32, 32) : RGB(255, 255, 255));
+    HBRUSH back = CreateSolidBrush(bg);
     FillRect(dc, &rc, back);
     DeleteObject(back);
 
-    /* System theme button (the OS's own title-bar button look). */
-    const bool maximized = IsZoomed(st->owner) != FALSE;
-    int part = WP_CLOSEBUTTON, state = CBS_NORMAL;
-    theme_button_part(st->button, maximized, st->hover, st->pressed, &part, &state);
-    HTHEME theme = OpenThemeData(hwnd, L"WINDOW");
-    if (theme) {
-        DrawThemeBackground(theme, dc, part, state, &rc, nullptr);
-        CloseThemeData(theme);
-    }
+    /* Glyph from the Segoe MDL2 Assets font (the system title-bar glyphs),
+     * centered, scaled with the owner's DPI. */
+    const wchar_t glyph =
+        st->button == HELIOSVIEW_CONTROL_MINIMIZE ? kGlyphMinimize
+        : st->button == HELIOSVIEW_CONTROL_MAXIMIZE ? (maximized ? kGlyphRestore : kGlyphMaximize)
+        : kGlyphClose;
+    const UINT dpi = GetDpiForWindow(st->owner);
+    const int h = MulDiv(rc.bottom - rc.top, dpi, 96);
+    HFONT font = CreateFontW(-h * 3 / 5, 0, 0, 0, FW_NORMAL,
+                             FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                             L"Segoe MDL2 Assets");
+    HFONT old = static_cast<HFONT>(SelectObject(dc, font));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, fg);
+    wchar_t text[2] = {glyph, 0};
+    DrawTextW(dc, text, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, old);
+    DeleteObject(font);
+
     EndPaint(hwnd, &ps);
 }
 

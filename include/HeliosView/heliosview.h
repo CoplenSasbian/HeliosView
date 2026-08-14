@@ -433,14 +433,15 @@ HELIOSVIEW_API int heliosview_window_add_control_button(heliosview_window_t* win
 /* Remove all registered control buttons. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_clear_control_buttons(heliosview_window_t* window);
 
-/* Draw the control buttons with the system title-bar button theme (on != 0) or
- * leave them to the app (on == 0, the default). When enabled, each registered
- * control-button rectangle becomes a real child window painted with
- * DrawThemeBackground (the same theme parts the OS uses for its own title-bar
- * buttons — the approach Chromium's Window Controls Overlay uses), layered above
- * the WebView with hover/pressed feedback. Clicks perform the action; the
- * maximize button shows the restore glyph while maximized. Call after show()
- * (the child windows need the parent HWND). 0 = success, negative = error. */
+/* Draw the control buttons in the modern Windows style (on != 0) or leave them
+ * to the app (on == 0, the default). When enabled, each registered
+ * control-button rectangle becomes a real child window drawn the way Windows
+ * 10/11 draws its own title-bar buttons: glyphs from the "Segoe MDL2 Assets"
+ * icon font (the same glyphs as the system title bar) plus hover/pressed
+ * feedback that follows the light/dark theme. The child window sits above the
+ * WebView; a click performs the action and the maximize button shows the restore
+ * glyph while maximized. Call after show() (the child windows need the parent
+ * HWND). 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on);
 
 /* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */

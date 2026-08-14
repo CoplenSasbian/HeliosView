@@ -254,14 +254,14 @@ win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
 win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
 ```
 
-Or let the library draw them with the **system title-bar button theme**
-(`DrawThemeBackground`, the same approach Chromium's Window Controls Overlay
-uses) — the OS's own button look, hover/pressed feedback, light/dark theme —
-as child windows layered above the WebView:
+Or let the library draw them the modern Windows way — glyphs from the `Segoe
+MDL2 Assets` icon font (the same ones as the system title bar) with
+hover/pressed feedback following the light/dark theme — as child windows layered
+above the WebView:
 
 ```cpp
 win.show();
-win.enableNativeButtons(true);   // system-theme-drawn control buttons
+win.enableNativeButtons(true);   // Windows-11-style control buttons
 ```
 
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
