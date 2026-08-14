@@ -776,20 +776,44 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
 
     /* WM_NCCALCSIZE: for FRAMELESS windows the caption is part of the client
-     * area (Electron-style "hidden title bar"): the content extends to the top
-     * of the window, while the caption *styles* stay set so DWM keeps drawing
-     * the native minimize/maximize/close buttons over the content. */
+     * area (Electron-style "hidden title bar"): the client rect covers the whole
+     * window, while the caption *styles* stay set so DWM keeps drawing the
+     * native minimize/maximize/close buttons (DwmExtendFrameIntoClientArea makes
+     * DWM render them over the extended client area). */
     if (message == WM_NCCALCSIZE) {
         auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (win && wparam && win->style == HELIOSVIEW_WINDOW_FRAMELESS) {
-            const auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
-            /* rgrc[0] is the proposed client rect; rgrc[2] is the window rect.
-             * Pull the client rect up to the window top so the caption area is
-             * absorbed into the client (WebView) area. */
-            RECT client = params->rgrc[0];
-            client.top = params->rgrc[2].top;
-            *const_cast<RECT*>(&params->rgrc[0]) = client;
-            return WVR_REDRAW;
+        if (win && win->style == HELIOSVIEW_WINDOW_FRAMELESS) {
+            /* Electron-style hidden title bar: keep the resize borders but absorb
+             * the caption. Compute the window->client border inset from the window
+             * styles; the client rect starts at the window top (caption gone) and
+             * keeps the left/right/bottom borders so the window stays resizable.
+             * DWM paints the native buttons over the extended top area. */
+            const LONG style = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+            const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            RECT border{0, 0, 0, 0};
+            AdjustWindowRectEx(&border, style, FALSE, ex);
+            RECT wnd{};
+            GetWindowRect(hwnd, &wnd);
+            if (wparam) {
+                auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+                RECT client = wnd;
+                client.left += border.left;
+                client.right -= border.right;
+                client.bottom -= border.bottom;
+                client.top = wnd.top; /* absorb the caption */
+                p->rgrc[0] = client;
+                return WVR_REDRAW;
+            }
+            /* wParam == 0: lParam is a RECT* (client rect). Apply the same inset
+             * (this is the creation-time call). */
+            RECT* rc = reinterpret_cast<RECT*>(lparam);
+            RECT client = wnd;
+            client.left += border.left;
+            client.right -= border.right;
+            client.bottom -= border.bottom;
+            client.top = wnd.top;
+            *rc = client;
+            return 0;
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
@@ -1037,10 +1061,14 @@ int heliosview_window_show(heliosview_window_t* window)
 
     const std::wstring title = utf8_to_wide(window->title);
 
-    /* compute the window size for the preset style (AdjustWindowRect is the identity for borderless styles) */
+    /* compute the window size for the preset style (AdjustWindowRect is the
+     * identity for borderless styles). For FRAMELESS the caption is absorbed
+     * into the client area (WM_NCCALCSIZE), so the requested size is used
+     * directly. */
     const DWORD style = map_win32_style(window);
     RECT rect{0, 0, window->width, window->height};
-    AdjustWindowRect(&rect, style, FALSE);
+    if (window->style != HELIOSVIEW_WINDOW_FRAMELESS)
+        AdjustWindowRect(&rect, style, FALSE);
 
     window->hwnd = CreateWindowExW(0, L"HeliosViewWindow", title.c_str(), style,
                                    CW_USEDEFAULT, CW_USEDEFAULT,
@@ -1048,6 +1076,14 @@ int heliosview_window_show(heliosview_window_t* window)
                                    nullptr, nullptr, GetModuleHandleW(nullptr), window);
     if (!window->hwnd)
         return -2;
+
+    /* For FRAMELESS windows DWM keeps painting the native title-bar buttons over
+     * the (hidden-caption) client area: extend the frame 1px so the buttons are
+     * rendered there (Electron "hidden title bar" behavior). */
+    if (window->style == HELIOSVIEW_WINDOW_FRAMELESS) {
+        MARGINS margins{0, 0, 1, 0};
+        DwmExtendFrameIntoClientArea(window->hwnd, &margins);
+    }
 
     /* already registered in WM_NCCREATE; fall back here if that did not happen */
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
@@ -1158,7 +1194,8 @@ int heliosview_window_set_size(heliosview_window_t* window, int32_t width, int32
     if (!window || !window->hwnd)
         return -1;
     RECT rc{0, 0, width, height};
-    AdjustWindowRect(&rc, map_win32_style(window), FALSE);
+    if (window->style != HELIOSVIEW_WINDOW_FRAMELESS)
+        AdjustWindowRect(&rc, map_win32_style(window), FALSE);
     window->width = width;
     window->height = height;
     return SetWindowPos(window->hwnd, nullptr, 0, 0,
