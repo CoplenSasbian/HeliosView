@@ -18,22 +18,15 @@ int main()
     window.setMinimumSize(400, 300);
     window.setMaximumSize(1200, 900);
 
-    // Frameless window with a custom title bar: register a drag region so the
-    // top strip moves the window (like a native title bar), and three window
-    // control buttons (minimize / maximize / close) at the top-right corner.
-    // enableNativeButtons draws them with the OS title-bar button theme (same
-    // look as the system's own buttons, incl. hover/pressed + dark mode).
+    // Frameless window with a custom title bar: the top strip drags the window,
+    // and the native system minimize / maximize / close buttons appear at its
+    // top-right corner (drawn by the OS, Electron "hidden title bar" style) —
+    // no custom drawing or registration needed.
     helios::Window frameless(480, 320, "Frameless", helios::WindowStyle::Frameless);
-    frameless.addDragRegion(0, 0, 480, 40); // the custom title-bar strip
-    frameless.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
-    frameless.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
-    frameless.addControlButton(helios::ControlButton::Close, 480 - 1 * 46, 0, 46, 40);
     frameless.resized.connect([](int32_t w, int32_t) {
-        // keep the drag strip spanning the (new) window width
         std::printf("[frameless] resize %d\n", w);
     });
     frameless.show();
-    frameless.enableNativeButtons(true); // after show(): native-drawn buttons
 
     helios::Menu menu(window.nativeHandle());
     helios::Menu::Item* showItem = menu.addItem("Show / Restore");
