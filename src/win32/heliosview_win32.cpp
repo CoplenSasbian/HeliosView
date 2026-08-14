@@ -3,6 +3,18 @@
 #include <HeliosView/heliosview.h>
 #include "../heliosview_internal.h"
 
+/* Enable modern (visual-styled) common controls for the whole process, from the
+ * library itself: embed a Common-Controls v6 dependency in HeliosView.dll's own
+ * manifest. The loader merges a DLL's manifest dependencies into the hosting
+ * process, so any app that loads HeliosView.dll gets the themed ComCtl32 v6
+ * (instead of the legacy v5 look) without needing its own manifest. This is the
+ * library-side equivalent of the classic application manifest, and it keeps the
+ * examples and consumers manifest-free. */
+#pragma comment(linker, "/manifestdependency:\"type='win32' " \
+                        "name='Microsoft.Windows.Common-Controls' " \
+                        "version='6.0.0.0' processorArchitecture='*' " \
+                        "publicKeyToken='6595b64144ccf1df' language='*'\"")
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATA (tray icon) */
