@@ -1,5 +1,7 @@
 # HeliosView
 
+> **English | [简体中文](README_zh-CN.md)**
+
 A C++ **WebView** library: embed a webview, drive it from C++ or C, and build
 the rest of the app (windows, tray, async I/O, HTTP) around it. Two layers:
 
@@ -22,8 +24,8 @@ Include one header and link one CMake target:
 target_link_libraries(my_app PRIVATE HeliosView::Core)
 ```
 
-Everything here is Windows (win32) at the moment; the C API is the porting
-boundary — other platforms re-implement `src/<platform>/` behind it.
+Everything here is Windows (win32); the C API is the porting boundary — other
+platforms re-implement `src/<platform>/` behind it.
 
 ---
 
@@ -70,24 +72,22 @@ only the underlying memory comes from the allocator.
 
 ## Building
 
-Requires CMake ≥ 4.3 and a C++23 compiler. **No vcpkg and no third-party TLS
-library are needed** — TLS for `https://` uses Windows SChannel (SSPI, part of
-the OS), and the remaining dependencies are vendored or auto-fetched:
+Requires CMake ≥ 4.3 and a C++23 compiler. TLS for `https://` uses Windows
+SChannel; the remaining dependencies are vendored or auto-fetched:
 
 | dependency       | version           | source                        | used for                                  |
 | ---------------- | ----------------- | ----------------------------- | ----------------------------------------- |
-| TLS (SChannel)   | OS-provided (SSPI) | Windows (no dependency)      | TLS for the async HTTP client (`https://`) |
+| TLS (SChannel)   | OS-provided       | Windows                       | TLS for the async HTTP client (`https://`) |
 | `nlohmann/json`  | 3.12              | vendored (`third_party/json/`) | WebView bridge auto-binding (`bindJson`) |
 | WebView2 SDK     | 1.0.4129.50       | downloaded from NuGet at configure time | embedded WebView (win32)          |
-| `stdexec`        | pinned commit b783aac (Mar 2024) | vendored (`third_party/stdexec/`) | P2300 senders/receivers (C++23 stand-in) |
+| `stdexec`        | pinned commit b783aac (Mar 2024) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
 | http-parser      | 2.9.4             | vendored (`third_party/http-parser/`) | HTTP/1.1 response parsing       |
 
-`stdexec` is vendored because HeliosView.Core targets the March 2024 API
-(newer releases removed the concept tags this code uses); http-parser and
-nlohmann/json are vendored so nothing depends on a package manager. The WebView2
-SDK is the only thing fetched at configure time (a `.nupkg` is just a zip of
-headers + the WebView2Loader library), and it is cached in the build directory —
-with no network, pre-seed `build/webview2-sdk/` from an earlier configure.
+`stdexec`, http-parser, and nlohmann/json are vendored at the versions listed
+above, so nothing depends on a package manager. The WebView2 SDK is the only
+thing fetched at configure time (a `.nupkg` is just a zip of headers + the
+WebView2Loader library), and it is cached in the build directory — with no
+network, pre-seed `build/webview2-sdk/` from an earlier configure.
 
 ```sh
 git submodule update --init --recursive
@@ -206,7 +206,7 @@ Signals report input (signals/slots: §2):
 int main()
 {
     helios::App app;
-    helios::Window window(800, 600, "Hello");
+    helios::Window window(800, 600, L"Hello");
     window.show();
 
     window.resized.connect([](int32_t w, int32_t h) { std::println("resized {}x{}", w, h); });
@@ -249,7 +249,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GreetReq, name)
 int main()
 {
     auto app    = std::make_shared<helios::App>();
-    auto window = std::make_shared<helios::WebViewWindow>(900, 640, "WebView Demo");
+    auto window = std::make_shared<helios::WebViewWindow>(900, 640, L"WebView Demo");
     window->show();
     window->createWebView();
 
@@ -417,11 +417,8 @@ and `heliosview_select_folder`.
 ### 5. Coroutines + async I/O (`Async`)
 
 `helios::Async` is a **background thread pool + platform multiplexer** (IOCP on
-win32) — a thin C++ wrapper over the C layer's `heliosview_loop`. There is only
-**one** thread pool, owned by the C layer: `heliosview_loop_create` spawns the
-worker threads. `Async` just holds that same loop, and stdexec only supplies the
-sender/receiver plumbing (`schedule`/`co_await`) — it never creates threads.
-So the C API and the C++ API are two faces of the same pool:
+win32) — a C++ wrapper over the C layer's `heliosview_loop`. `Async` and the C
+API drive the same pool:
 
 ```cpp
 helios::Async async;              // 0 = hardware-concurrency worker threads
@@ -532,8 +529,8 @@ async.write(sock, helios::Buffer::copy(payload), cb);                // callback
 
 `helios::HttpClient` is an async HTTP/1.1 client on the Async pool (§5): DNS + TCP
 connect + reads/writes go through the pool's IOCP socket layer, HTTPS is
-Windows SChannel (SSPI, part of the OS — no OpenSSL) with certificate
-verification against the Windows system store, and
+Windows SChannel with certificate verification against the Windows system
+store, and
 responses are parsed with http-parser. The whole exchange is a callback-driven
 state machine — nothing blocks a caller thread, and request timeouts are
 tracked by the pool's timer service (no polling, no per-request thread). Both
@@ -667,10 +664,10 @@ See **Memory allocation** at the top of this page for how the C allocator works.
 
 int main(void)
 {
-    heliosview_window_t* win = heliosview_window_create(800, 600, "C demo");
+    heliosview_window_t* win = heliosview_window_create(800, 600, L"C demo");
     heliosview_window_show(win);
 
-    heliosview_window_t* win2 = heliosview_window_create(320, 200, "second");
+    heliosview_window_t* win2 = heliosview_window_create(320, 200, L"second");
     heliosview_window_show(win2);
     heliosview_window_set_position(win2, 40, 40);      /* move */
     heliosview_window_set_opacity(win2, 0.8f);
@@ -741,7 +738,7 @@ Custom native-message → event conversion uses an ordered, id-keyed registry
 handlers in registration order; the first returning 1/0 wins):
 
 ```c
-uint32_t id = heliosview_add_native_handler(my_convert);   /* replaces set_native_handler */
+uint32_t id = heliosview_add_native_handler(my_convert);   /* register a custom converter */
 heliosview_remove_native_handler(id);
 ```
 
@@ -777,7 +774,7 @@ static void eval_cb(int error, const char* result_json, void* userdata)
 
 int main(void)
 {
-    heliosview_window_t* win = heliosview_window_create(900, 640, "webview");
+    heliosview_window_t* win = heliosview_window_create(900, 640, L"webview");
     heliosview_window_show(win);
 
     heliosview_webview_t* wv = heliosview_webview_create(win);
@@ -810,11 +807,10 @@ nlohmann sugar (`bindJson`/`subscribeJson`) is a C++ convenience, not required.
 #### Async I/O (thread pool + TCP + file)
 
 `heliosview_loop` **is** the thread pool: `heliosview_loop_create` spawns the
-worker threads (IOCP on win32). The C++ `helios::Async` wraps exactly this
-handle, and stdexec only adds sender/receiver sugar on top — the C API and the
-C++ API drive the same pool. All callbacks run on the worker threads and may
-fire concurrently; error codes are `0` = success, negative = negated platform
-error.
+worker threads (IOCP on win32), and the C++ `helios::Async` wraps the same
+handle — the C API and the C++ API drive the same pool. All callbacks run on
+the worker threads and may fire concurrently; error codes are `0` = success,
+negative = negated platform error.
 
 ```c
 static void on_connect(int error, heliosview_socket_t* tcp, void* userdata)
@@ -894,8 +890,8 @@ if (!req) printf("bad URL\n");
 heliosview_loop_run(loop);   /* the callback fires on a worker thread */
 ```
 
-The client supports plain `http://` and `https://` (Windows SChannel/SSPI,
-verified against the Windows system store); headers are built with
+The client supports plain `http://` and `https://` (Windows SChannel, verified
+against the Windows system store); headers are built with
 `heliosview_http_headers_*`
 (request headers are copied at submission; response headers are de-duplicated,
 last wins). The callback fires exactly once, from a loop worker thread, and all
@@ -922,7 +918,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Dialogs.h                           native dialog helpers (folder picker)
   Tray.h                              system notification-area (tray) icon + signals
   Menu.h                              popup / context menu + signals
-  Execution.h                         C++26 <execution> compat (stdexec on C++23)
+  Execution.h                         schedulers/senders (stdexec, P2300)
   Async.h                             thread pool + file/TCP async APIs + one-shot timers
   Http.h                              async HTTP client (HttpClient / HttpRequest / HttpResponse)
   WebViewWindow.h                     window embedding a WebView
