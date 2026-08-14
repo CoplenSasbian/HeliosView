@@ -1,10 +1,11 @@
-// HeliosView.dll - platform-independent core: version, event queue, conversion-delegate registration.
-// Platform-specific implementation lives in src/win32/ (window/message loop, IOCP async I/O).
+// HeliosView.dll - platform-independent core: version, allocator, events, conversion-delegate registration.
+// Platform-specific implementation lives in src/win32/ (window/message loop, WebView2, dialogs, toasts).
 #include <HeliosView/heliosview.h>
 #include "heliosview_internal.h"
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <thread>
@@ -24,6 +25,16 @@ void heliosview_set_allocator(const heliosview_allocator_t* allocator)
         hv::g_allocator = *allocator;
     else
         hv::g_allocator = heliosview_allocator_t{}; /* restore malloc/free */
+}
+
+void heliosview_free(void* ptr)
+{
+    if (!ptr)
+        return;
+    if (hv::g_allocator.free_)
+        hv::g_allocator.free_(ptr, hv::g_allocator.context);
+    else
+        std::free(ptr);
 }
 
 /* ================= Event queue (thread-local) =================

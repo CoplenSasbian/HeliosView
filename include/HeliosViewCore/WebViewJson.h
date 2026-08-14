@@ -92,9 +92,9 @@ namespace detail {
 // at the user-owned object directly).
 
 // A heap copy of the handler whose first member records the memory_resource that
-// owns it (mirrors Async.h's Ctx pattern): pmrRelease reads it back instead of
-// re-querying the process default, so the binding stays correct even if the default
-// resource is swapped while the binding is alive.
+// owns it: pmrRelease reads it back instead of re-querying the process default,
+// so the binding stays correct even if the default resource is swapped while the
+// binding is alive.
 template <class Fn>
 struct pmr_box {
     std::pmr::memory_resource* resource;

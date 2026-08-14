@@ -9,14 +9,14 @@ int main()
     std::printf("HeliosView %s\n", helios::version().c_str());
 
     helios::App app;
-    helios::Window window(800, 600, L"HeliosView Demo");
+    helios::Window window(800, 600, "HeliosView Demo");
     window.show();
 
     helios::Menu menu(window.nativeHandle());
-    helios::Menu::Item* showItem = menu.addItem(L"Show / Restore");
-    helios::Menu::Item* minimizeItem = menu.addItem(L"Minimize");
+    helios::Menu::Item* showItem = menu.addItem("Show / Restore");
+    helios::Menu::Item* minimizeItem = menu.addItem("Minimize");
     menu.addSeparator();
-    helios::Menu::Item* quitItem = menu.addItem(L"Quit");
+    helios::Menu::Item* quitItem = menu.addItem("Quit");
     showItem->triggered.connect([&window] {
         std::printf("[win] menu: show/restore\n");
         window.showNormal();
@@ -32,7 +32,7 @@ int main()
 
     // Tray icon (notification area). The native window must exist first, so this
     // runs after show(). Connect signals to respond to clicks on the icon.
-    helios::Tray tray(window.nativeHandle(), L"HeliosView Demo");
+    helios::Tray tray(window.nativeHandle(), "HeliosView Demo");
     tray.leftClicked.connect([] { std::printf("[win] tray left-click\n"); });
     tray.rightClicked.connect([&] {
         std::printf("[win] tray right-click -> menu\n");

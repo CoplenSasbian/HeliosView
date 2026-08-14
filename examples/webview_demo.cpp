@@ -57,7 +57,7 @@ int main()
 
     auto app = std::make_shared<helios::App>();
 
-    auto window = std::make_shared<helios::WebViewWindow>(900, 640, L"HeliosView WebView Demo");
+    auto window = std::make_shared<helios::WebViewWindow>(900, 640, "HeliosView WebView Demo");
     window->show();
     window->createWebView();
 

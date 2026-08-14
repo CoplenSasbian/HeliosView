@@ -23,7 +23,7 @@ int main()
     std::println("HeliosView {}", helios::version());
 
     auto app    = std::make_shared<helios::App>();
-    auto window = std::make_shared<helios::WebViewWindow>(900, 640, L"HeliosView WebView Events Demo");
+    auto window = std::make_shared<helios::WebViewWindow>(900, 640, "HeliosView WebView Events Demo");
     window->show();
     window->createWebView();
 
@@ -53,7 +53,7 @@ int main()
     // titleChanged: the page's <title> changed.
     window->titleChanged.connect([&](std::string title) {
         std::println("[title] '{}'", title);
-        window->setTitle(helios::utf8ToWide(title));
+        window->setTitle(title);
     });
 
     // navigationCompleted: know when the page is ready (and when it failed).

@@ -7,7 +7,8 @@
 #include <windows.h>
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATA (tray icon) */
 #include <objbase.h>  /* CoCreateInstance */
-#include <shobjidl.h> /* IFileOpenDialog / IShellItem (folder picker) */
+#include <shobjidl.h> /* IFileOpenDialog / IShellItem (file pickers) / ITaskbarList3 */
+#include <dwmapi.h>   /* DwmSetWindowAttribute (backdrop / dark mode) */
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
@@ -40,10 +41,11 @@ struct heliosview_window {
     int32_t id = 0;
     int width = 0;
     int height = 0;
-    std::wstring title; /* UTF-16 */
+    std::string title; /* UTF-8 */
     heliosview_window_style_t style = HELIOSVIEW_WINDOW_NORMAL;
     HWND hwnd = nullptr;
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
+    HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
@@ -62,7 +64,7 @@ struct heliosview_tray {
     UINT callback_msg = 0;     /* WM_APP-based callback message id, unique per tray */
     UINT uid = 0;              /* tray icon id */
     HICON icon = nullptr;      /* current icon (owned; NULL = default) */
-    std::wstring tooltip;      /* UTF-16 */
+    std::string tooltip;       /* UTF-8 */
     bool added = false;        /* NIM_ADD succeeded (so NIM_DELETE is safe) */
     void* userdata = nullptr;  /* caller data (the C++ wrapper stores an object pointer) */
 };
@@ -750,12 +752,12 @@ int heliosview_run(heliosview_loop_callback frame_callback, void* userdata)
 
 /* ================= Window ================= */
 
-heliosview_window_t* heliosview_window_create(int width, int height, const wchar_t* title)
+heliosview_window_t* heliosview_window_create(int width, int height, const char* title)
 {
     return heliosview_window_create_ex(width, height, title, HELIOSVIEW_WINDOW_NORMAL, nullptr);
 }
 
-heliosview_window_t* heliosview_window_create_ex(int width, int height, const wchar_t* title,
+heliosview_window_t* heliosview_window_create_ex(int width, int height, const char* title,
                                                  heliosview_window_style_t style, void* userdata)
 {
     if (!title)
@@ -804,6 +806,8 @@ void heliosview_window_destroy(heliosview_window_t* window)
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */
     }
+    if (window->icon)
+        DestroyIcon(window->icon);
     hv::hv_dealloc(window);
 }
 
@@ -825,7 +829,7 @@ int heliosview_window_show(heliosview_window_t* window)
     wc.lpszClassName = L"HeliosViewWindow";
     RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
 
-    const std::wstring& title = window->title;
+    const std::wstring title = utf8_to_wide(window->title);
 
     /* compute the window size for the preset style (AdjustWindowRect is the identity for borderless styles) */
     const DWORD style = map_win32_style(window->style);
@@ -968,12 +972,13 @@ int heliosview_window_size(const heliosview_window_t* window, int32_t* out_width
     return 0;
 }
 
-int heliosview_window_set_title(heliosview_window_t* window, const wchar_t* title)
+int heliosview_window_set_title(heliosview_window_t* window, const char* title)
 {
     if (!window || !window->hwnd || !title)
         return -1;
     window->title = title;
-    return SetWindowTextW(window->hwnd, title) ? 0 : -1;
+    const std::wstring wt = utf8_to_wide(title);
+    return SetWindowTextW(window->hwnd, wt.c_str()) ? 0 : -1;
 }
 
 int heliosview_window_center(heliosview_window_t* window)
@@ -1010,15 +1015,166 @@ int heliosview_window_set_opacity(heliosview_window_t* window, float opacity)
     return 0;
 }
 
+int heliosview_window_hide(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return ShowWindow(window->hwnd, SW_HIDE) ? 0 : -1;
+}
+
+int heliosview_window_set_topmost(heliosview_window_t* window, int on)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return SetWindowPos(window->hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST,
+                        0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE) ? 0 : -1;
+}
+
+int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_path)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    HICON new_icon = nullptr;
+    if (icon_path && *icon_path) {
+        const std::wstring wpath = utf8_to_wide(icon_path);
+        new_icon = static_cast<HICON>(LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, 0, 0,
+                                                 LR_LOADFROMFILE));
+        if (!new_icon)
+            return -1;
+    }
+    if (window->icon)
+        DestroyIcon(window->icon);
+    window->icon = new_icon;
+    SendMessageW(window->hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(new_icon));
+    SendMessageW(window->hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(new_icon));
+    return 0;
+}
+
+/* ================= Taskbar progress (ITaskbarList3) ================= */
+
+namespace {
+
+/* Lazily created once on the message-loop thread; kept for the process lifetime. */
+Microsoft::WRL::ComPtr<ITaskbarList3> hv_taskbar()
+{
+    static Microsoft::WRL::ComPtr<ITaskbarList3> taskbar;
+    if (!taskbar) {
+        /* the message-loop thread may already have COM initialized; ensure an
+         * apartment so the instance survives the call */
+        const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        (void)co;
+        CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&taskbar));
+    }
+    return taskbar;
+}
+
+} // namespace
+
+int heliosview_window_set_progress(heliosview_window_t* window, uint32_t value, uint32_t max)
+{
+    if (!window || !window->hwnd || max == 0)
+        return -1;
+    auto taskbar = hv_taskbar();
+    if (!taskbar)
+        return -1;
+    if (value > max)
+        value = max;
+    HRESULT hr = taskbar->SetProgressState(window->hwnd, TBPF_NORMAL);
+    if (SUCCEEDED(hr))
+        hr = taskbar->SetProgressValue(window->hwnd, value, max);
+    return SUCCEEDED(hr) ? 0 : -1;
+}
+
+int heliosview_window_set_progress_state(heliosview_window_t* window,
+                                         heliosview_progress_state_t state)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    auto taskbar = hv_taskbar();
+    if (!taskbar)
+        return -1;
+    TBPFLAG flag = TBPF_NOPROGRESS;
+    switch (state) {
+    case HELIOSVIEW_PROGRESS_NORMAL:       flag = TBPF_NORMAL; break;
+    case HELIOSVIEW_PROGRESS_INDETERMINATE: flag = TBPF_INDETERMINATE; break;
+    case HELIOSVIEW_PROGRESS_ERROR:         flag = TBPF_ERROR; break;
+    case HELIOSVIEW_PROGRESS_PAUSED:        flag = TBPF_PAUSED; break;
+    case HELIOSVIEW_PROGRESS_NONE:
+    default:                                flag = TBPF_NOPROGRESS; break;
+    }
+    return SUCCEEDED(taskbar->SetProgressState(window->hwnd, flag)) ? 0 : -1;
+}
+
+int heliosview_window_clear_progress(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    auto taskbar = hv_taskbar();
+    if (!taskbar)
+        return -1;
+    return SUCCEEDED(taskbar->SetProgressState(window->hwnd, TBPF_NOPROGRESS)) ? 0 : -1;
+}
+
+/* ================= Backdrop & dark mode (DWM) ================= */
+
+/* DWM window attributes: DWMWA_USE_IMMERSIVE_DARK_MODE (20) and
+ * DWMWA_SYSTEMBACKDROP_TYPE (38, Win11 22621+). Define fallbacks so the code
+ * compiles against older Windows SDKs. */
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+
+/* DWMSBT_* backdrop types (from the Win11 SDK) */
+#ifndef DWMSBT_NONE
+#define DWMSBT_NONE 0
+#endif
+#ifndef DWMSBT_MAINWINDOW
+#define DWMSBT_MAINWINDOW 2 /* Mica */
+#endif
+#ifndef DWMSBT_TRANSIENTWINDOW
+#define DWMSBT_TRANSIENTWINDOW 3 /* Acrylic */
+#endif
+
+int heliosview_window_set_backdrop(heliosview_window_t* window, heliosview_backdrop_t backdrop)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    int type = DWMSBT_NONE;
+    switch (backdrop) {
+    case HELIOSVIEW_BACKDROP_MICA:    type = DWMSBT_MAINWINDOW; break;
+    case HELIOSVIEW_BACKDROP_ACRYLIC: type = DWMSBT_TRANSIENTWINDOW; break;
+    case HELIOSVIEW_BACKDROP_NONE:
+    default:                          type = DWMSBT_NONE; break;
+    }
+    const HRESULT hr = DwmSetWindowAttribute(window->hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
+                                             &type, sizeof(type));
+    return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
+}
+
+int heliosview_window_set_dark_mode(heliosview_window_t* window, int on)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    const BOOL enable = on != 0;
+    const HRESULT hr = DwmSetWindowAttribute(window->hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                             &enable, sizeof(enable));
+    return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
+}
+
 /* ================= Tray icon (Shell_NotifyIcon) ================= */
 
 namespace {
 
-/* Load an icon from a file path, or the default application icon when NULL/empty */
-HICON load_tray_icon(const wchar_t* path)
+/* Load an icon from a file path (UTF-8), or the default application icon when NULL/empty */
+HICON load_tray_icon(const char* path)
 {
-    if (path && *path)
-        return static_cast<HICON>(LoadImageW(nullptr, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
+    if (path && *path) {
+        const std::wstring wpath = utf8_to_wide(path);
+        return static_cast<HICON>(LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
+    }
     return LoadIconW(nullptr, reinterpret_cast<LPCWSTR>(IDI_APPLICATION));
 }
 
@@ -1032,8 +1188,10 @@ NOTIFYICONDATAW tray_nid(const heliosview_tray_t* tray)
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = tray->callback_msg;
     nid.hIcon = tray->icon;
-    if (!tray->tooltip.empty())
-        wcsncpy_s(nid.szTip, tray->tooltip.c_str(), _TRUNCATE);
+    if (!tray->tooltip.empty()) {
+        const std::wstring wtip = utf8_to_wide(tray->tooltip);
+        wcsncpy_s(nid.szTip, wtip.c_str(), _TRUNCATE);
+    }
     return nid;
 }
 
@@ -1048,8 +1206,8 @@ int tray_apply(heliosview_tray_t* tray, DWORD msg)
 
 } // namespace
 
-heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const wchar_t* tooltip,
-                                          const wchar_t* icon_path, void* userdata)
+heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const char* tooltip,
+                                          const char* icon_path, void* userdata)
 {
     if (!window || !window->hwnd) /* the window must exist to receive callback messages */
         return nullptr;
@@ -1058,7 +1216,7 @@ heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const wch
     tray->hwnd = window->hwnd;
     tray->callback_msg = heliosview_window_add_item(window, userdata); /* register routing id */
     tray->uid = g_next_tray_uid.fetch_add(1);
-    tray->tooltip = tooltip ? tooltip : L"";
+    tray->tooltip = tooltip ? tooltip : "";
     tray->icon = load_tray_icon(icon_path);
     tray->userdata = userdata;
 
@@ -1073,15 +1231,15 @@ heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const wch
     return tray;
 }
 
-int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const wchar_t* tooltip)
+int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const char* tooltip)
 {
     if (!tray)
         return -1;
-    tray->tooltip = tooltip ? tooltip : L"";
+    tray->tooltip = tooltip ? tooltip : "";
     return tray->added ? tray_apply(tray, NIM_MODIFY) : 0;
 }
 
-int heliosview_tray_set_icon(heliosview_tray_t* tray, const wchar_t* icon_path)
+int heliosview_tray_set_icon(heliosview_tray_t* tray, const char* icon_path)
 {
     if (!tray)
         return -1;
@@ -1105,6 +1263,27 @@ void heliosview_tray_destroy(heliosview_tray_t* tray)
     if (tray->icon)
         DestroyIcon(tray->icon);
     hv::hv_dealloc(tray);
+}
+
+/* ================= Tray balloon notification (NIF_INFO) ================= */
+
+int heliosview_tray_notify(heliosview_tray_t* tray, const char* title, const char* message,
+                           heliosview_tray_notify_icon_t icon_type, uint32_t timeout_ms)
+{
+    if (!tray || !tray->added)
+        return -1;
+    NOTIFYICONDATAW nid = tray_nid(tray);
+    nid.uFlags |= NIF_INFO;
+    nid.uTimeout = timeout_ms ? timeout_ms : 5000;
+    nid.dwInfoFlags = (icon_type == HELIOSVIEW_TRAY_NOTIFY_INFO) ? NIIF_INFO
+                      : (icon_type == HELIOSVIEW_TRAY_NOTIFY_WARNING) ? NIIF_WARNING
+                      : (icon_type == HELIOSVIEW_TRAY_NOTIFY_ERROR) ? NIIF_ERROR
+                      : NIIF_NONE;
+    const std::wstring wt = utf8_to_wide(title ? title : "");
+    const std::wstring wm = utf8_to_wide(message ? message : "");
+    wcsncpy_s(nid.szInfoTitle, wt.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, wm.c_str(), _TRUNCATE);
+    return Shell_NotifyIconW(NIM_MODIFY, &nid) ? 0 : -1;
 }
 
 /* ================= Menu (CreatePopupMenu / TrackPopupMenu) ================= */
@@ -1144,14 +1323,15 @@ void heliosview_menu_destroy(heliosview_menu_t* menu)
     hv::hv_dealloc(menu);
 }
 
-int heliosview_menu_add_item(heliosview_menu_t* menu, const wchar_t* text, uint32_t* out_id)
+int heliosview_menu_add_item(heliosview_menu_t* menu, const char* text, uint32_t* out_id)
 {
     if (!menu || !menu->hmenu || !menu->window)
         return -1;
     const UINT id = heliosview_window_add_item(menu->window, menu->userdata);
     if (id == 0)
         return -1;
-    if (!AppendMenuW(menu->hmenu, MF_STRING, id, text ? text : L"")) {
+    const std::wstring wtext = utf8_to_wide(text ? text : "");
+    if (!AppendMenuW(menu->hmenu, MF_STRING, id, wtext.c_str())) {
         heliosview_window_remove_item(menu->window, id);
         return -1;
     }
@@ -1167,13 +1347,14 @@ int heliosview_menu_add_separator(heliosview_menu_t* menu)
     return AppendMenuW(menu->hmenu, MF_SEPARATOR, 0, nullptr) ? 0 : -1;
 }
 
-int heliosview_menu_add_submenu(heliosview_menu_t* menu, const wchar_t* text,
+int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
                                 heliosview_menu_t* submenu)
 {
     if (!menu || !menu->hmenu || !submenu || !submenu->hmenu)
         return -1;
+    const std::wstring wtext = utf8_to_wide(text ? text : "");
     if (!AppendMenuW(menu->hmenu, MF_POPUP,
-                     reinterpret_cast<UINT_PTR>(submenu->hmenu), text ? text : L""))
+                     reinterpret_cast<UINT_PTR>(submenu->hmenu), wtext.c_str()))
         return -1;
     menu->submenus.push_back(submenu); /* parent owns the submenu's lifetime */
     return 0;
@@ -1875,19 +2056,78 @@ int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
     return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
 }
 
+/* ================= Native dialogs & system helpers ================= */
+
+namespace {
+
+/* Allocate raw bytes through the library allocator (freed with heliosview_free). */
+char* hv_alloc_bytes(size_t n)
+{
+    if (hv::g_allocator.alloc)
+        return static_cast<char*>(hv::g_allocator.alloc(n, hv::g_allocator.context));
+    return static_cast<char*>(std::malloc(n));
+}
+
+/* Keep a CoInitialize'd apartment alive for the modal dialog (the message-loop
+ * thread may or may not already have COM). We intentionally do NOT uninitialize:
+ * the thread stays COM-enabled for the process lifetime, matching WebView2. */
+HRESULT hv_ensure_com()
+{
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(co) && co != RPC_E_CHANGED_MODE)
+        return co;
+    return S_OK;
+}
+
+/* Parse a "Name1 (*.ext)|*.ext|Name2|..." filter string into COMDLG_FILTERSPEC
+ * pairs. An empty/absent filter yields the "All files" default. */
+void build_filterspec(const char* filter, std::vector<std::wstring>& owned,
+                      std::vector<COMDLG_FILTERSPEC>& specs)
+{
+    std::vector<std::string> parts;
+    if (filter && *filter) {
+        std::string s(filter);
+        size_t start = 0;
+        for (size_t pos = 0; pos <= s.size(); ++pos) {
+            if (pos == s.size() || s[pos] == '|') {
+                parts.push_back(s.substr(start, pos - start));
+                start = pos + 1;
+            }
+        }
+    }
+    if (parts.empty() || (parts.size() & 1) != 0) {
+        parts = {"All files (*.*)", "*.*"};
+    }
+    specs.clear();
+    for (size_t i = 0; i + 1 < parts.size(); i += 2) {
+        owned.push_back(utf8_to_wide(parts[i]));
+        owned.push_back(utf8_to_wide(parts[i + 1]));
+        specs.push_back({owned[owned.size() - 2].c_str(), owned.back().c_str()});
+    }
+}
+
+/* Return a fresh library-allocated UTF-8 copy of a wide string. */
+char* hv_strdup_utf8(const std::wstring& w)
+{
+    const std::string s = wide_to_utf8(w);
+    if (s.empty())
+        return nullptr;
+    char* out = hv_alloc_bytes(s.size() + 1);
+    if (!out)
+        return nullptr;
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return out;
+}
+
+} // namespace
+
 int heliosview_select_folder(heliosview_window_t* window, const char* title, char** out_path)
 {
     if (out_path)
         *out_path = nullptr;
     if (!out_path)
         return -1;
-
-    /* IFileOpenDialog is an apartment-class object: make sure the calling thread
-     * has COM in the right mode (WebView2 init usually did, but a window-only app
-     * may not). Uninitialize only if this call performed the init. */
-    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool must_uninit = (co == S_OK);
-    if (FAILED(co) && co != RPC_E_CHANGED_MODE)
+    if (FAILED(hv_ensure_com()))
         return -1;
 
     int result = -1;
@@ -1913,20 +2153,275 @@ int heliosview_select_folder(heliosview_window_t* window, const char* title, cha
         LPWSTR path = nullptr;
         if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
             break;
-        const std::string utf8 = wide_to_utf8(path);
+        char* out = hv_strdup_utf8(path);
         CoTaskMemFree(path);
-        if (utf8.empty())
-            break;
-
-        char* out = static_cast<char*>(std::malloc(utf8.size() + 1));
         if (!out)
             break;
-        std::memcpy(out, utf8.c_str(), utf8.size() + 1);
         *out_path = out;
         result = 1;
     } while (false);
+    return result;
+}
 
-    if (must_uninit)
-        CoUninitialize();
+int heliosview_open_files(heliosview_window_t* window, const char* title, const char* filter,
+                          int multi, char*** out_paths)
+{
+    if (out_paths)
+        *out_paths = nullptr;
+    if (!out_paths)
+        return -1;
+    if (FAILED(hv_ensure_com()))
+        return -1;
+
+    int result = -1;
+    std::vector<std::wstring> filter_owned;
+    std::vector<COMDLG_FILTERSPEC> filter_specs;
+    build_filterspec(filter, filter_owned, filter_specs);
+
+    do {
+        Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&dialog))))
+            break;
+        DWORD options = FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST;
+        if (multi)
+            options |= FOS_ALLOWMULTISELECT;
+        if (FAILED(dialog->SetOptions(options)))
+            break;
+        if (title && *title)
+            dialog->SetTitle(utf8_to_wide(title).c_str());
+        if (!filter_specs.empty())
+            dialog->SetFileTypes(static_cast<UINT>(filter_specs.size()), filter_specs.data());
+
+        const HRESULT hr = dialog->Show(window && window->hwnd ? window->hwnd : nullptr);
+        if (FAILED(hr)) {
+            result = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? 0 : -static_cast<int>(hr);
+            break;
+        }
+
+        std::vector<char*> paths;
+        if (multi) {
+            Microsoft::WRL::ComPtr<IShellItemArray> items;
+            if (FAILED(dialog->GetResults(&items)))
+                break;
+            DWORD count = 0;
+            if (FAILED(items->GetCount(&count)))
+                break;
+            for (DWORD i = 0; i < count; ++i) {
+                Microsoft::WRL::ComPtr<IShellItem> item;
+                if (FAILED(items->GetItemAt(i, &item)))
+                    break;
+                LPWSTR path = nullptr;
+                if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+                    continue;
+                char* utf8 = hv_strdup_utf8(path);
+                CoTaskMemFree(path);
+                if (utf8)
+                    paths.push_back(utf8);
+            }
+        } else {
+            Microsoft::WRL::ComPtr<IShellItem> item;
+            if (FAILED(dialog->GetResult(&item)))
+                break;
+            LPWSTR path = nullptr;
+            if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+                break;
+            char* utf8 = hv_strdup_utf8(path);
+            CoTaskMemFree(path);
+            if (!utf8)
+                break;
+            paths.push_back(utf8);
+        }
+
+        if (paths.empty()) {
+            result = 0;
+            break;
+        }
+        char** arr = reinterpret_cast<char**>(hv_alloc_bytes((paths.size() + 1) * sizeof(char*)));
+        if (!arr) {
+            for (char* p : paths)
+                heliosview_free(p);
+            break;
+        }
+        std::memcpy(arr, paths.data(), paths.size() * sizeof(char*));
+        arr[paths.size()] = nullptr;
+        *out_paths = arr;
+        result = static_cast<int>(paths.size());
+    } while (false);
+    return result;
+}
+
+void heliosview_free_paths(char** paths)
+{
+    if (!paths)
+        return;
+    for (char** p = paths; *p; ++p)
+        heliosview_free(*p);
+    heliosview_free(paths);
+}
+
+int heliosview_save_file(heliosview_window_t* window, const char* title, const char* filter,
+                         const char* default_name, char** out_path)
+{
+    if (out_path)
+        *out_path = nullptr;
+    if (!out_path)
+        return -1;
+    if (FAILED(hv_ensure_com()))
+        return -1;
+
+    int result = -1;
+    std::vector<std::wstring> filter_owned;
+    std::vector<COMDLG_FILTERSPEC> filter_specs;
+    build_filterspec(filter, filter_owned, filter_specs);
+
+    do {
+        Microsoft::WRL::ComPtr<IFileSaveDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&dialog))))
+            break;
+        if (FAILED(dialog->SetOptions(FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT)))
+            break;
+        if (title && *title)
+            dialog->SetTitle(utf8_to_wide(title).c_str());
+        if (!filter_specs.empty())
+            dialog->SetFileTypes(static_cast<UINT>(filter_specs.size()), filter_specs.data());
+        if (default_name && *default_name)
+            dialog->SetFileName(utf8_to_wide(default_name).c_str());
+
+        const HRESULT hr = dialog->Show(window && window->hwnd ? window->hwnd : nullptr);
+        if (FAILED(hr)) {
+            result = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? 0 : -static_cast<int>(hr);
+            break;
+        }
+
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        if (FAILED(dialog->GetResult(&item)))
+            break;
+        LPWSTR path = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+            break;
+        char* out = hv_strdup_utf8(path);
+        CoTaskMemFree(path);
+        if (!out)
+            break;
+        *out_path = out;
+        result = 1;
+    } while (false);
+    return result;
+}
+
+/* ================= Message box ================= */
+
+int heliosview_message_box(heliosview_window_t* window, heliosview_message_type_t type,
+                           heliosview_message_buttons_t buttons,
+                           const char* title, const char* message)
+{
+    UINT flags = 0;
+    switch (type) {
+    case HELIOSVIEW_MESSAGE_INFO:     flags |= MB_ICONINFORMATION; break;
+    case HELIOSVIEW_MESSAGE_WARNING:  flags |= MB_ICONWARNING; break;
+    case HELIOSVIEW_MESSAGE_ERROR:    flags |= MB_ICONERROR; break;
+    case HELIOSVIEW_MESSAGE_QUESTION: flags |= MB_ICONQUESTION; break;
+    default: break;
+    }
+    switch (buttons) {
+    case HELIOSVIEW_MESSAGE_OK:          flags |= MB_OK; break;
+    case HELIOSVIEW_MESSAGE_OK_CANCEL:   flags |= MB_OKCANCEL; break;
+    case HELIOSVIEW_MESSAGE_YES_NO:      flags |= MB_YESNO; break;
+    case HELIOSVIEW_MESSAGE_YES_NO_CANCEL: flags |= MB_YESNOCANCEL; break;
+    case HELIOSVIEW_MESSAGE_RETRY_CANCEL: flags |= MB_RETRYCANCEL; break;
+    default:                             flags |= MB_OK; break;
+    }
+    const HWND hwnd = window && window->hwnd ? window->hwnd : nullptr;
+    const std::wstring wt = utf8_to_wide(title ? title : "");
+    const std::wstring wm = utf8_to_wide(message ? message : "");
+    const int r = MessageBoxW(hwnd, wm.c_str(), wt.c_str(), flags);
+    switch (r) {
+    case IDOK:    return HELIOSVIEW_MESSAGE_RESULT_OK;
+    case IDCANCEL: return HELIOSVIEW_MESSAGE_RESULT_CANCEL;
+    case IDYES:   return HELIOSVIEW_MESSAGE_RESULT_YES;
+    case IDNO:    return HELIOSVIEW_MESSAGE_RESULT_NO;
+    case IDRETRY: return HELIOSVIEW_MESSAGE_RESULT_RETRY;
+    default:      return HELIOSVIEW_MESSAGE_RESULT_NONE;
+    }
+}
+
+/* ================= System helpers ================= */
+
+int heliosview_open_url(const char* url)
+{
+    if (!url || !*url)
+        return -1;
+    const std::wstring wurl = utf8_to_wide(url);
+    const HINSTANCE r = ShellExecuteW(nullptr, L"open", wurl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(r) > 32 ? 0 : -1;
+}
+
+int heliosview_show_in_folder(const char* path)
+{
+    if (!path || !*path)
+        return -1;
+    const std::wstring wpath = utf8_to_wide(path);
+    /* /select,"<path>" (quoted: the path may contain spaces) */
+    const std::wstring args = L"/select,\"" + wpath + L"\"";
+    const HINSTANCE r = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(),
+                                      nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(r) > 32 ? 0 : -1;
+}
+
+int heliosview_clipboard_set_text(const char* text)
+{
+    if (!text)
+        return -1;
+    if (!OpenClipboard(nullptr))
+        return -1;
+    const std::wstring w = utf8_to_wide(text);
+    const SIZE_T bytes = (w.size() + 1) * sizeof(wchar_t);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    int result = -1;
+    if (h) {
+        if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, h) != nullptr) {
+            void* dst = GlobalLock(h);
+            if (dst) {
+                std::memcpy(dst, w.c_str(), bytes);
+                GlobalUnlock(h);
+                result = 0;
+            }
+        }
+        /* GlobalFree is not needed after a successful SetClipboardData (the
+         * clipboard owns the memory); free only on failure. */
+        if (result != 0)
+            GlobalFree(h);
+    }
+    CloseClipboard();
+    return result;
+}
+
+int heliosview_clipboard_get_text(char** out)
+{
+    if (out)
+        *out = nullptr;
+    if (!out)
+        return -1;
+    if (!OpenClipboard(nullptr))
+        return -1;
+    const HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    int result = -1;
+    if (h) {
+        const wchar_t* w = static_cast<const wchar_t*>(GlobalLock(h));
+        if (w) {
+            std::wstring ws(w);
+            GlobalUnlock(h);
+            char* utf8 = hv_strdup_utf8(ws);
+            if (utf8) {
+                *out = utf8;
+                result = 1;
+            } else if (ws.empty()) {
+                result = 0;
+            }
+        }
+    }
+    CloseClipboard();
     return result;
 }

@@ -9,8 +9,8 @@
 #   2. add an `elseif(...)` branch here with that OS's system libraries,
 #   3. that's it -- src/CMakeLists.txt stays untouched.
 #
-# Non-OS dependencies (WebView2, vendored http-parser / nlohmann / stdexec) are
-# linked separately and are NOT part of this macro.
+# Non-OS dependencies (WebView2, vendored nlohmann / stdexec) are linked
+# separately and are NOT part of this macro.
 
 # heliosview_link_platform_system_libs(<target>) --
 # Link the OS-specific system libraries the target's backend needs. PRIVATE,
@@ -19,28 +19,26 @@
 macro(heliosview_link_platform_system_libs target)
   if(WIN32)
     # Windows backend (src/win32/):
-    #   ws2_32   - Winsock async socket/file I/O (IOCP thread pool)
-    #   crypt32  - certificate chain building / verification (system stores)
-    #   secur32  - SChannel (SSPI) TLS for the HTTPS client
-    #   user32   - window/UI: message loop, tray, opacity, dialogs
-    #   shell32  - shell tray icon (Shell_NotifyIcon) + file picker
-    #   ole32    - COM (WebView2 integration, IFileOpenDialog)
+    #   user32       - window/UI: message loop, tray, message box, clipboard
+    #   shell32      - shell tray icon (Shell_NotifyIcon), file pickers, ShellExecute
+    #   ole32        - COM (WebView2, IFileDialog, taskbar ITaskbarList)
+    #   dwmapi       - DWM window backdrop / dark mode (DwmSetWindowAttribute)
+    #   runtimeobject- WinRT Ro* (toast notifications)
+    #   propsys      - IPropertyStore (toast AppUserModelID shortcut)
     target_link_libraries(${target} PRIVATE
-      ws2_32 crypt32 secur32 user32 shell32 ole32)
+      user32 shell32 ole32 dwmapi runtimeobject propsys)
 
   elseif(APPLE)
     # macOS backend (src/macos/), for example:
     #   Cocoa    - window/UI + native menu/tray
     #   WebKit   - embedded WebView
-    #   Security - TLS (Secure Transport / Security framework)
     target_link_libraries(${target} PRIVATE
       "-framework Cocoa"
-      "-framework WebKit"
-      "-framework Security")
+      "-framework WebKit")
 
   elseif(UNIX)
     # Linux/BSD backend (src/unix/), for example — GTK/Qt for windows plus the
-    # platform TLS and dynamic loader. Adjust to the actual backend.
+    # platform dynamic loader. Adjust to the actual backend.
     target_link_libraries(${target} PRIVATE
       dl m pthread)
 

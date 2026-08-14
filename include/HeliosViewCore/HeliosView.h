@@ -9,17 +9,22 @@
  *
  *   - Signal.h        signals/slots (std::function + C++23 std::flat_set)
  *   - Types.h         event types and structures (1:1 with the C interface)
- *   - String.h        UTF-8 <-> wchar_t conversion helpers
- *   - App.h           message loop + event queue
- *   - Window.h        top-level window + signals
- *   - Dialogs.h       native dialog helpers (folder picker, ...)
- *   - Tray.h          system notification-area (tray) icon + signals
+ *   - String.h        UTF-8 helpers (and UTF-8 <-> wchar_t conversion)
+ *   - App.h           message loop + UI-thread scheduler (std::execution)
+ *   - Window.h        top-level window + signals + taskbar/backdrop APIs
+ *   - Dialogs.h       native dialogs (folder/file pickers, message box)
+ *   - System.h        system helpers (open URL, show in folder, clipboard)
+ *   - Notification.h  OS toast notifications (thread-safe)
+ *   - Tray.h          system notification-area (tray) icon + signals + balloon
  *   - Menu.h          popup / context menu + signals
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
- *   - Async.h         background async I/O: thread pool + platform multiplexer (socket/file, sender-based)
- *   - Http.h          async HTTP client (GET/POST/..., https, sender-based + callback API)
  *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
  *   - WebViewJson.h   nlohmann auto-binding sugar for the WebView bridge (bindJson / subscribeJson)
+ *
+ * Threading: every Window / WebView / Tray / Menu / Dialog / event API must be
+ * called on the message-loop thread (the thread running App::exec). The
+ * exceptions -- safe from any thread -- are App::postTask, App::quit,
+ * WebView resolve/reject/broadcast, and the notification functions.
  *
  * Usage (signals/slots):
  *   helios::App app;
@@ -33,12 +38,13 @@
  */
 
 #include <HeliosViewCore/App.h>
-#include <HeliosViewCore/Async.h>
 #include <HeliosViewCore/Dialogs.h>
-#include <HeliosViewCore/Http.h>
+#include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Menu.h>
+#include <HeliosViewCore/Notification.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/String.h>
+#include <HeliosViewCore/System.h>
 #include <HeliosViewCore/Tray.h>
 #include <HeliosViewCore/Types.h>
 #include <HeliosViewCore/WebViewJson.h>
@@ -51,7 +57,7 @@ namespace helios {
 
 /* ---------- misc ---------- */
 
-// The library version as a string, e.g. "0.1.0"
+// The library version as a string, e.g. "1.0.0"
 inline std::string version()
 {
     return heliosview_version();

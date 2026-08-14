@@ -13,9 +13,9 @@
  *   tray.leftClicked, tray.leftDoubleClicked, tray.rightClicked, tray.middleClicked
  *
  * Usage (from the README):
- *   helios::Window window(800, 600, L"Tray Demo");
+ *   helios::Window window(800, 600, "Tray Demo");
  *   window.show();                        // window must exist first
- *   helios::Tray tray(window.nativeHandle(), L"Tray Demo");   // tooltip
+ *   helios::Tray tray(window.nativeHandle(), "Tray Demo");   // tooltip
  *   tray.leftClicked.connect([] { ... });
  *   tray.rightClicked.connect([&] { ... context menu ... });
  *
@@ -28,12 +28,20 @@
 
 namespace helios {
 
+/* Balloon notification icon type (mirrors heliosview_tray_notify_icon_t) */
+enum class NotifyIcon : int32_t {
+    None = HELIOSVIEW_TRAY_NOTIFY_NONE,
+    Info = HELIOSVIEW_TRAY_NOTIFY_INFO,
+    Warning = HELIOSVIEW_TRAY_NOTIFY_WARNING,
+    Error = HELIOSVIEW_TRAY_NOTIFY_ERROR,
+};
+
 class Tray {
 public:
     // Attach a tray icon to `window` (must already be created/shown) with the
-    // given tooltip. icon_path is an .ico/.cur path (UTF-16), or nullptr for
+    // given tooltip (UTF-8). icon_path is an .ico/.cur path, or nullptr for
     // the default application icon. Not copyable/movable: a Tray owns its icon.
-    Tray(heliosview_window_t* window, const wchar_t* tooltip, const wchar_t* icon_path = nullptr)
+    Tray(heliosview_window_t* window, const char* tooltip, const char* icon_path = nullptr)
         : m_tray(heliosview_tray_create(window, tooltip, icon_path, this))
     {
         if (m_tray)
@@ -54,8 +62,17 @@ public:
     bool valid() const { return m_tray != nullptr; }
 
     // Update the tooltip / replace the icon (nullptr = default icon)
-    void setTooltip(const wchar_t* tooltip) { heliosview_tray_set_tooltip(m_tray, tooltip); }
-    void setIcon(const wchar_t* icon_path) { heliosview_tray_set_icon(m_tray, icon_path); }
+    void setTooltip(const char* tooltip) { heliosview_tray_set_tooltip(m_tray, tooltip); }
+    void setIcon(const char* icon_path) { heliosview_tray_set_icon(m_tray, icon_path); }
+
+    // Show a balloon notification next to the icon (works with no setup,
+    // unlike OS toasts). Message-loop thread.
+    void notify(const char* title, const char* message,
+                NotifyIcon iconType = NotifyIcon::Info, uint32_t timeoutMs = 0)
+    {
+        heliosview_tray_notify(m_tray, title, message,
+                               static_cast<heliosview_tray_notify_icon_t>(iconType), timeoutMs);
+    }
 
     // ---- signals (UI thread) ----
     Signal<> leftClicked;         // tray icon left-click

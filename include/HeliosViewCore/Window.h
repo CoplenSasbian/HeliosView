@@ -16,12 +16,29 @@
 
 namespace helios {
 
+/* Window taskbar progress state (mirrors heliosview_progress_state_t) */
+enum class ProgressState : int32_t {
+    None = HELIOSVIEW_PROGRESS_NONE,
+    Normal = HELIOSVIEW_PROGRESS_NORMAL,
+    Indeterminate = HELIOSVIEW_PROGRESS_INDETERMINATE,
+    Error = HELIOSVIEW_PROGRESS_ERROR,
+    Paused = HELIOSVIEW_PROGRESS_PAUSED,
+};
+
+/* Window backdrop material (mirrors heliosview_backdrop_t; Win11) */
+enum class Backdrop : int32_t {
+    None = HELIOSVIEW_BACKDROP_NONE,
+    Mica = HELIOSVIEW_BACKDROP_MICA,
+    Acrylic = HELIOSVIEW_BACKDROP_ACRYLIC,
+};
+
 class Window {
 public:
-    // Construct a window with the given client size, title and preset style.
-    // The native window is created lazily on the first show(). This object is
-    // stored as userdata on the C-layer window, which dispatches events through it.
-    Window(int width, int height, const wchar_t* title,
+    // Construct a window with the given client size, title (UTF-8) and preset
+    // style. The native window is created lazily on the first show(). This
+    // object is stored as userdata on the C-layer window, which dispatches
+    // events through it.
+    Window(int width, int height, const char* title,
            WindowStyle style = WindowStyle::Normal)
         : m_window(heliosview_window_create_ex(width, height, title,
                                                static_cast<heliosview_window_style_t>(style),
@@ -59,6 +76,9 @@ public:
     // use heliosview_window_show directly if you need to inspect it.
     void show() { heliosview_window_show(m_window); }
 
+    // Hide the native window (keeps it alive; show()/showState() bring it back).
+    void hide() { heliosview_window_hide(m_window); }
+
     // ---- window operations ----
 
     // Show the window in the given state
@@ -83,6 +103,9 @@ public:
 
     // Give the window focus (foreground activation + keyboard focus)
     void focus() { heliosview_window_focus(m_window); }
+
+    // Keep the window always on top (or restore normal z-order)
+    void setTopmost(bool on) { heliosview_window_set_topmost(m_window, on ? 1 : 0); }
 
     // True if the window is currently visible (false when not shown / not created)
     bool isVisible() const { return heliosview_window_is_visible(m_window) != 0; }
@@ -123,15 +146,43 @@ public:
 
     // ---- other window operations ----
 
-    // Set the window title (wide chars, UTF-16 on Windows).
-    void setTitle(const wchar_t* title) { heliosview_window_set_title(m_window, title); }
-    void setTitle(const std::wstring& title) { heliosview_window_set_title(m_window, title.c_str()); }
+    // Set the window title (UTF-8).
+    void setTitle(const char* title) { heliosview_window_set_title(m_window, title); }
+    void setTitle(const std::string& title) { heliosview_window_set_title(m_window, title.c_str()); }
 
     // Center the window on the current monitor's work area
     void center() { heliosview_window_center(m_window); }
 
     // Set the window opacity (0.0 fully transparent to 1.0 opaque)
     void setOpacity(float opacity) { heliosview_window_set_opacity(m_window, opacity); }
+
+    // Replace the window icon (an .ico/.cur path, UTF-8; nullptr = default)
+    void setIcon(const char* icon_path) { heliosview_window_set_icon(m_window, icon_path); }
+
+    // ---- taskbar progress ----
+
+    // Show a determinate taskbar progress indicator (value of max; clamped)
+    void setProgress(uint32_t value, uint32_t max) { heliosview_window_set_progress(m_window, value, max); }
+
+    // Change only the progress visual state (indeterminate / paused / error / ...)
+    void setProgressState(ProgressState state)
+    {
+        heliosview_window_set_progress_state(m_window, static_cast<heliosview_progress_state_t>(state));
+    }
+
+    // Remove the taskbar progress indicator
+    void clearProgress() { heliosview_window_clear_progress(m_window); }
+
+    // ---- backdrop & dark mode (Win11 DWM; returns 0 on success) ----
+
+    // Apply a system backdrop (Mica / Acrylic); negative on unsupported systems.
+    int setBackdrop(Backdrop backdrop)
+    {
+        return heliosview_window_set_backdrop(m_window, static_cast<heliosview_backdrop_t>(backdrop));
+    }
+
+    // Toggle the immersive dark-mode title bar.
+    int setDarkMode(bool on) { return heliosview_window_set_dark_mode(m_window, on ? 1 : 0); }
 
     // Close and destroy the native window. If it was the last window, the message
     // loop exits (null check lives in the C layer). Idempotent (also called by the destructor).
