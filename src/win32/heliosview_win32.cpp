@@ -1180,6 +1180,72 @@ int heliosview_set_dpi_awareness(void)
     return (setAware && setAware()) ? 0 : -1;
 }
 
+/* ================= Screen / monitor geometry ================= */
+
+namespace {
+
+/* Fill a heliosview_rect_t from a MONITORINFO work area. Returns 0 on success. */
+int fill_rect_work(RECT rc, heliosview_rect_t* out)
+{
+    if (!out)
+        return -1;
+    out->x = rc.left;
+    out->y = rc.top;
+    out->width = rc.right - rc.left;
+    out->height = rc.bottom - rc.top;
+    return 0;
+}
+
+/* Work area of the monitor selected by `hmon`. Returns 0 on success. */
+int work_area_of(HMONITOR hmon, heliosview_rect_t* out_rect)
+{
+    if (!hmon)
+        return -1;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hmon, &mi))
+        return -1;
+    return fill_rect_work(mi.rcWork, out_rect);
+}
+
+} // namespace
+
+int heliosview_screen_work_area(int32_t x, int32_t y, heliosview_rect_t* out_rect)
+{
+    if (!out_rect)
+        return -1;
+    POINT pt{x, y};
+    HMONITOR hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    return work_area_of(hmon, out_rect);
+}
+
+int heliosview_window_work_area(const heliosview_window_t* window, heliosview_rect_t* out_rect)
+{
+    if (!window || !window->hwnd || !out_rect)
+        return -1;
+    HMONITOR hmon = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTONEAREST);
+    return work_area_of(hmon, out_rect);
+}
+
+int heliosview_primary_work_area(heliosview_rect_t* out_rect)
+{
+    if (!out_rect)
+        return -1;
+    return work_area_of(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), out_rect);
+}
+
+int heliosview_cursor_position(int32_t* out_x, int32_t* out_y)
+{
+    if (!out_x || !out_y)
+        return -1;
+    POINT pt{};
+    if (!GetCursorPos(&pt))
+        return -1;
+    *out_x = pt.x;
+    *out_y = pt.y;
+    return 0;
+}
+
 /* ================= Taskbar progress (ITaskbarList3) ================= */
 
 namespace {

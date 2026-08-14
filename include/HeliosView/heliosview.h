@@ -408,6 +408,36 @@ HELIOSVIEW_API int heliosview_set_dpi_awareness(void);
 /* Window id (source of window_id in events) */
 HELIOSVIEW_API int32_t heliosview_window_id(const heliosview_window_t* window);
 
+/* ================= Screen / monitor geometry =================
+ *
+ * Work-area queries help position windows correctly on the current monitor
+ * (multi-monitor + DPI aware). A "work area" is the monitor's usable area
+ * (excluding taskbar/anchored bars), in physical screen coordinates.
+ * The primary monitor is the one at the origin (index 0). */
+
+typedef struct heliosview_rect {
+    int32_t x;      /* left (screen coordinates) */
+    int32_t y;      /* top */
+    int32_t width;  /* positive */
+    int32_t height; /* positive */
+} heliosview_rect_t;
+
+/* Work area of the monitor that contains the given screen point (falls back to
+ * the primary monitor if the point is off-screen). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_screen_work_area(int32_t x, int32_t y,
+                                               heliosview_rect_t* out_rect);
+
+/* Work area of the monitor the window is on (nearest if it spans several).
+ * 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_work_area(const heliosview_window_t* window,
+                                               heliosview_rect_t* out_rect);
+
+/* Work area of the primary monitor. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_primary_work_area(heliosview_rect_t* out_rect);
+
+/* The cursor's screen position. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_cursor_position(int32_t* out_x, int32_t* out_y);
+
 /* ================= Taskbar progress =================
  *
  * A taskbar progress indicator attached to a window (Win32: ITaskbarList3).

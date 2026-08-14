@@ -9,6 +9,7 @@
 
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Signal.h>
+#include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
@@ -124,6 +125,17 @@ public:
 
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
+
+    // Work area (excluding taskbar) of the monitor the window is on.
+    // Returns false if the window is not created.
+    bool workArea(Rect& out) const
+    {
+        heliosview_rect_t r{};
+        if (heliosview_window_work_area(m_window, &r) != 0)
+            return false;
+        out = {r.x, r.y, r.width, r.height};
+        return true;
+    }
 
     // Request to close the window; goes through the event pipeline
     // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
