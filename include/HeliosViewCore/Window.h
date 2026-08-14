@@ -123,6 +123,23 @@ public:
     // Remove all registered drag regions
     void clearDragRegions() { heliosview_window_clear_drag_regions(m_window); }
 
+    // ---- custom title-bar control buttons ----
+
+    // Register a client-area rectangle for a window control (minimize / maximize
+    // / close). The library wires it to the OS title-bar button behavior: a click
+    // performs the action (maximize auto-toggles with the window state) and never
+    // starts a drag. The button's *look* is yours to draw; this only handles the
+    // hit-testing + behavior.
+    void addControlButton(ControlButton button, int32_t x, int32_t y,
+                          int32_t width, int32_t height)
+    {
+        heliosview_window_add_control_button(
+            m_window, static_cast<heliosview_control_button_t>(button), x, y, width, height);
+    }
+
+    // Remove all registered control buttons
+    void clearControlButtons() { heliosview_window_clear_control_buttons(m_window); }
+
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
 

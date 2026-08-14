@@ -136,6 +136,13 @@ enum class ShowState : int32_t {
     Maximized = HELIOSVIEW_SHOW_MAXIMIZED,
 };
 
+/* custom title-bar window control button (mirrors heliosview_control_button_t) */
+enum class ControlButton : int32_t {
+    Minimize = HELIOSVIEW_CONTROL_MINIMIZE, /* minimize the window */
+    Maximize = HELIOSVIEW_CONTROL_MAXIMIZE, /* maximize / restore (auto-toggles) */
+    Close = HELIOSVIEW_CONTROL_CLOSE,       /* request close (WINDOW_CLOSE event) */
+};
+
 /* ---------- events ---------- */
 
 // A queued event, mirroring heliosview_event_t with type-safe C++ enums.

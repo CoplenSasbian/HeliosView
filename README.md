@@ -243,6 +243,17 @@ win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
 win.show();
 ```
 
+**Custom control buttons.** Draw your own minimize / maximize / close buttons in
+the client area and register their rectangles — the library wires them to the
+real title-bar behavior (a click performs the action and never drags;
+maximize/restore auto-toggles). The button look is entirely yours:
+
+```cpp
+win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
+```
+
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
 to make the process per-monitor DPI aware (v2); `window.dpi()` reports a
 window's current DPI.

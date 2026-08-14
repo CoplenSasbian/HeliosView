@@ -193,6 +193,14 @@ win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
 win.show();
 ```
 
+**自定义控制按钮。** 在客户区自行绘制最小化 / 最大化 / 关闭按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。按钮外观完全由你绘制：
+
+```cpp
+win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
+```
+
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
 
 **屏幕几何。** `System::screenWorkArea`、`Window::workArea` 与 `System::primaryWorkArea` 返回显示器可用区域（不含任务栏）的屏幕坐标 —— 便于在多显示器环境下居中 / 定位窗口。`System::cursorPosition` 返回鼠标位置。

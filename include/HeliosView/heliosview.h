@@ -403,6 +403,36 @@ HELIOSVIEW_API int heliosview_window_add_drag_region(heliosview_window_t* window
 /* Remove all registered drag regions. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_clear_drag_regions(heliosview_window_t* window);
 
+/* ================= Window control buttons (custom title bar) =================
+ *
+ * Frameless / borderless windows have no OS title bar, so the app draws its own
+ * minimize / maximize / close buttons (e.g. in the WebView). The library makes
+ * them *work like native* title-bar buttons: each registered button rectangle
+ * is reported to the OS as a hit-test code (HTMINBUTTON / HTMAXBUTTON /
+ * HTCLOSE), so clicking it performs the action (DefWindowProc handles it) and
+ * never starts a window drag. The button *looks* are entirely the app's job
+ * (the library does not paint); it only wires up the hit-testing + behavior.
+ *
+ * Buttons take priority over drag regions (a button inside a drag strip still
+ * clicks instead of dragging). A maximize/restore button switches its action
+ * automatically with the window state. Rectangles are in client coordinates
+ * and accumulate; all are cleared when the window is destroyed. */
+
+typedef enum heliosview_control_button {
+    HELIOSVIEW_CONTROL_MINIMIZE = 1, /* minimize the window */
+    HELIOSVIEW_CONTROL_MAXIMIZE,     /* maximize / restore (auto-toggles) */
+    HELIOSVIEW_CONTROL_CLOSE,        /* request close (WINDOW_CLOSE event) */
+} heliosview_control_button_t;
+
+/* Register a control-button rectangle (client coords). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_add_control_button(heliosview_window_t* window,
+                                                        heliosview_control_button_t button,
+                                                        int32_t x, int32_t y,
+                                                        int32_t width, int32_t height);
+
+/* Remove all registered control buttons. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_clear_control_buttons(heliosview_window_t* window);
+
 /* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
 HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
 

@@ -19,10 +19,15 @@ int main()
     window.setMaximumSize(1200, 900);
 
     // Frameless window with a custom title bar: register a drag region so the
-    // top strip moves the window (like a native title bar). Keys toggle the
-    // remaining window state.
+    // top strip moves the window (like a native title bar), and three window
+    // control buttons (minimize / maximize / close) at the top-right corner.
+    // The buttons look like whatever you draw in the client area; the library
+    // wires them to the real title-bar behavior (click = action, no drag).
     helios::Window frameless(480, 320, "Frameless", helios::WindowStyle::Frameless);
     frameless.addDragRegion(0, 0, 480, 40); // the custom title-bar strip
+    frameless.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
+    frameless.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
+    frameless.addControlButton(helios::ControlButton::Close, 480 - 1 * 46, 0, 46, 40);
     frameless.resized.connect([](int32_t w, int32_t) {
         // keep the drag strip spanning the (new) window width
         std::printf("[frameless] resize %d\n", w);

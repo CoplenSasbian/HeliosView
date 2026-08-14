@@ -55,6 +55,15 @@ struct heliosview_window {
     DWORD fs_restore_exstyle = 0;  /* pre-fullscreen extended style */
     std::vector<RECT> drag_regions; /* client-area move regions (WM_NCHITTEST -> HTCAPTION) */
 
+    /* Custom title-bar control buttons: each maps to an OS hit-test code
+     * (HTMINBUTTON / HTMAXBUTTON / HTCLOSE) so DefWindowProc performs the action
+     * and clicks never drag the window. Checked before drag regions. */
+    struct control_button {
+        heliosview_control_button_t button = HELIOSVIEW_CONTROL_MINIMIZE;
+        RECT rect{};
+    };
+    std::vector<control_button> control_buttons;
+
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
      * the item id) and caller-registered ids all share one id space allocated from
@@ -741,16 +750,37 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    /* WM_NCHITTEST: registered drag regions act as a title bar (move the window
-     * on drag) for frameless/borderless windows. Any other point falls through to
-     * DefWindowProc (borders keep resize handles). */
+    /* WM_NCHITTEST: registered control buttons report as real title-bar buttons
+     * (HTMINBUTTON/HTMAXBUTTON/HTCLOSE -> DefWindowProc performs the action and
+     * clicks never drag the window); registered drag regions act as a title bar
+     * (move the window on drag). Any other point falls through to DefWindowProc
+     * (borders keep resize handles). */
     if (message == WM_NCHITTEST) {
         auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (win && !win->drag_regions.empty()) {
+        if (win && (!win->control_buttons.empty() || !win->drag_regions.empty())) {
             const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
                                static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
             POINT client = screen;
             if (ScreenToClient(hwnd, &client)) {
+                /* Control buttons win over drag regions: a button inside a drag
+                 * strip must click, not drag. Only report a button the window can
+                 * actually perform (e.g. no maximize box -> HTCLIENT). */
+                for (const auto& cb : win->control_buttons) {
+                    const RECT& r = cb.rect;
+                    if (client.x >= r.left && client.x < r.right
+                        && client.y >= r.top && client.y < r.bottom) {
+                        const LONG style = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+                        switch (cb.button) {
+                        case HELIOSVIEW_CONTROL_MINIMIZE:
+                            return (style & WS_MINIMIZEBOX) ? HTMINBUTTON : HTCLIENT;
+                        case HELIOSVIEW_CONTROL_MAXIMIZE:
+                            return (style & WS_MAXIMIZEBOX) ? HTMAXBUTTON : HTCLIENT;
+                        case HELIOSVIEW_CONTROL_CLOSE:
+                        default:
+                            return HTCLOSE;
+                        }
+                    }
+                }
                 for (const RECT& r : win->drag_regions) {
                     if (client.x >= r.left && client.x < r.right
                         && client.y >= r.top && client.y < r.bottom)
@@ -1232,6 +1262,28 @@ int heliosview_window_clear_drag_regions(heliosview_window_t* window)
     if (!window)
         return -1;
     window->drag_regions.clear();
+    return 0;
+}
+
+int heliosview_window_add_control_button(heliosview_window_t* window,
+                                         heliosview_control_button_t button,
+                                         int32_t x, int32_t y,
+                                         int32_t width, int32_t height)
+{
+    if (!window || width <= 0 || height <= 0)
+        return -1;
+    heliosview_window::control_button cb;
+    cb.button = button;
+    cb.rect = RECT{x, y, x + width, y + height};
+    window->control_buttons.push_back(cb);
+    return 0;
+}
+
+int heliosview_window_clear_control_buttons(heliosview_window_t* window)
+{
+    if (!window)
+        return -1;
+    window->control_buttons.clear();
     return 0;
 }
 
