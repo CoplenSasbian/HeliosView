@@ -140,12 +140,11 @@ public:
     // Remove all registered control buttons
     void clearControlButtons() { heliosview_window_clear_control_buttons(m_window); }
 
-    // FRAMELESS windows show the native system minimize / maximize / close
-    // buttons (drawn by the OS, Electron "hidden title bar" style) in the
-    // top-right corner of the top strip; the strip itself drags the window.
-    // This call is kept for API compatibility (it re-frames the window). The
-    // buttons are always native for FRAMELESS windows — there is nothing to
-    // enable or draw.
+    // Draw the registered control buttons with the system title-bar button theme
+    // (DrawThemeBackground — the same theme parts as the OS's own min/max/close,
+    // the approach Chromium's Window Controls Overlay uses), as child windows
+    // layered above the WebView. The alternative is drawing them yourself in the
+    // client area. Call after show(). Pass false to return to app-drawn buttons.
     void enableNativeButtons(bool on) { heliosview_window_enable_native_buttons(m_window, on ? 1 : 0); }
 
     // The window's DPI (per-monitor; 0 if not created)

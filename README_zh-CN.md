@@ -193,11 +193,19 @@ win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
 win.show();
 ```
 
-**原生控制按钮（隐藏标题栏）。** `Frameless` 窗口在顶部条带的右上角显示**真正的系统**最小化 / 最大化 / 关闭按钮（由 DWM 绘制，即 Electron 的 "hidden title bar" 风格），条带本身可拖动窗口。无需绘制或注册 —— 直接用 `Frameless` 即可：
+**自定义控制按钮。** 在客户区自行绘制最小化 / 最大化 / 关闭按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。按钮外观完全由你绘制：
 
 ```cpp
-helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
-win.show();   // 右上角出现系统按钮；条带可拖动
+win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
+```
+
+或者让库用**系统标题栏按钮主题**绘制（`DrawThemeBackground` —— 与 Chromium 的 Window Controls Overlay 相同的做法，即 OS 自带的按钮外观，含悬停 / 按下反馈与深浅色模式），作为子窗口层叠在 WebView 之上：
+
+```cpp
+win.show();
+win.enableNativeButtons(true);   // 系统主题绘制的控制按钮
 ```
 
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。

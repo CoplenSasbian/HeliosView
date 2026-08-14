@@ -243,15 +243,25 @@ win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
 win.show();
 ```
 
-**Native control buttons (hidden title bar).** A `Frameless` window shows the
-**real** OS minimize / maximize / close buttons (drawn by DWM, Electron
-"hidden title bar" style) in the top-right corner of the top strip, and the
-strip itself drags the window. Nothing to draw or register — just use
-`Frameless`:
+**Custom control buttons.** Draw your own minimize / maximize / close buttons in
+the client area and register their rectangles — the library wires them to the
+real title-bar behavior (a click performs the action and never drags;
+maximize/restore auto-toggles). The button look is entirely yours:
 
 ```cpp
-helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
-win.show();   // native system buttons appear at the top-right; the strip drags
+win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
+win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
+```
+
+Or let the library draw them with the **system title-bar button theme**
+(`DrawThemeBackground`, the same approach Chromium's Window Controls Overlay
+uses) — the OS's own button look, hover/pressed feedback, light/dark theme —
+as child windows layered above the WebView:
+
+```cpp
+win.show();
+win.enableNativeButtons(true);   // system-theme-drawn control buttons
 ```
 
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
