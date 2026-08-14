@@ -9,6 +9,7 @@
  *
  *   - Signal.h        signals/slots (std::function + C++23 std::flat_set)
  *   - Types.h         event types and structures (1:1 with the C interface)
+ *   - String.h        UTF-8 <-> wchar_t conversion helpers
  *   - App.h           message loop + event queue
  *   - Window.h        top-level window + signals
  *   - Dialogs.h       native dialog helpers (folder picker, ...)
@@ -37,6 +38,7 @@
 #include <HeliosViewCore/Http.h>
 #include <HeliosViewCore/Menu.h>
 #include <HeliosViewCore/Signal.h>
+#include <HeliosViewCore/String.h>
 #include <HeliosViewCore/Tray.h>
 #include <HeliosViewCore/Types.h>
 #include <HeliosViewCore/WebViewJson.h>

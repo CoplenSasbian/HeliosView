@@ -51,8 +51,9 @@ int main()
     });
 
     // titleChanged: the page's <title> changed.
-    window->titleChanged.connect([](std::string title) {
+    window->titleChanged.connect([&](std::string title) {
         std::println("[title] '{}'", title);
+        window->setTitle(helios::utf8ToWide(title));
     });
 
     // navigationCompleted: know when the page is ready (and when it failed).
@@ -77,7 +78,6 @@ int main()
     std::println("[map] {} mapped to https://assets.local/", assetsDir.string());
 
     /* ---- native folder dialog exposed to the page through the bridge ---- */
-
     window->bindJson<BrowseReq>("browseFolder",
                                 [win = window.get()](BrowseReq req) -> std::execution::task<helios::JsonResp<std::string>> {
                                     std::string path;

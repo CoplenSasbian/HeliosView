@@ -62,6 +62,33 @@ typedef struct heliosview_allocator {
 /* Set the default allocator (NULL restores malloc/free). Not thread-safe while allocations are live. */
 HELIOSVIEW_API void heliosview_set_allocator(const heliosview_allocator_t* allocator);
 
+/* ================= String conversion (UTF-8 <-> UTF-16) =================
+ *
+ * Two-phase codecs for the library's wchar_t-based string APIs (window titles,
+ * tray tooltips, folder paths, ...). On Windows wchar_t is UTF-16; on platforms
+ * where wchar_t is 32-bit (Linux) the conversion is UTF-8 <-> wchar_t's native
+ * encoding (UTF-32).
+ *
+ * Call each function twice to convert without an intermediate buffer:
+ *   size_t n = heliosview_utf8_to_wide(utf8, utf8_len, nullptr);  // required wchar_t count (incl. NUL), 0 = failure
+ *   wchar_t buf[n];
+ *   heliosview_utf8_to_wide(utf8, utf8_len, buf);                 // fills buf, NUL-terminated
+ *
+ * Input lengths are explicit; pass (size_t)-1 to read a NUL-terminated input.
+ * Return value: with a NULL output, the required element count INCLUDING the
+ * terminating NUL (0 = failure); with a non-NULL output, the element count
+ * written EXCLUDING the NUL (the buffer must hold at least the previously
+ * returned count). Invalid input sequences are replaced with U+FFFD.
+ */
+
+/* Convert UTF-8 bytes to wchar_t (see the two-phase contract above). */
+HELIOSVIEW_API size_t heliosview_utf8_to_wide(const char* utf8, size_t utf8_len,
+                                              wchar_t* out_wide);
+
+/* Convert wchar_t to UTF-8 bytes (see the two-phase contract above). */
+HELIOSVIEW_API size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_len,
+                                              char* out_utf8);
+
 /* ================= Events ================= */
 
 typedef enum heliosview_event_type {
