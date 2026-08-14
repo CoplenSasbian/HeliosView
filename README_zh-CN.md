@@ -50,6 +50,7 @@ std::thread worker([app] {
 | 领域 | API（C / C++） |
 | --- | --- |
 | 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏、最小化/最大化/还原、可调整大小、拖拽区域、DPI、焦点变化） |
+| 屏幕几何 | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea`（多显示器） |
 | 任务栏进度 | `heliosview_window_set_progress` / `Window::setProgress`（含状态、角标） |
 | 背景材质与深色模式（Win11） | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS 桥 | `heliosview_webview_*` / `WebViewWindow` + `bindJson` 自动绑定 |
@@ -192,6 +193,8 @@ win.show();
 ```
 
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
+
+**屏幕几何。** `System::screenWorkArea`、`Window::workArea` 与 `System::primaryWorkArea` 返回显示器可用区域（不含任务栏）的屏幕坐标 —— 便于在多显示器环境下居中 / 定位窗口。`System::cursorPosition` 返回鼠标位置。
 
 ### 4. WebView —— 核心：JS ↔ 原生桥接
 

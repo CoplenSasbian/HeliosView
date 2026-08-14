@@ -65,6 +65,7 @@ std::thread worker([app] {
 | area | API (C / C++) |
 | --- | --- |
 | windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, drag regions, DPI, focus/blur) |
+| screen geometry | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea` (multi-monitor) |
 | taskbar progress | `heliosview_window_set_progress` / `Window::setProgress` (+ state, overlay-capable) |
 | backdrop & dark mode (Win11) | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS bridge | `heliosview_webview_*` / `WebViewWindow` + `bindJson` auto-binding |
@@ -244,6 +245,11 @@ win.show();
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
 to make the process per-monitor DPI aware (v2); `window.dpi()` reports a
 window's current DPI.
+
+**Screen geometry.** `System::screenWorkArea`, `Window::workArea`, and
+`System::primaryWorkArea` return the monitor's usable area (excluding the
+taskbar) in screen coordinates — handy for centering/positioning windows on
+multi-monitor setups. `System::cursorPosition` reports the mouse location.
 
 ### 4. WebView — the core: JS ↔ native bridge
 
