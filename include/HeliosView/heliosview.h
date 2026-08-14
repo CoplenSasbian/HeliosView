@@ -120,6 +120,8 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_QUIT = 1,          /* Quit request (posted via heliosview_post_event) */
     HELIOSVIEW_EVENT_WINDOW_CLOSE,      /* Window close request (user clicked X) */
     HELIOSVIEW_EVENT_WINDOW_RESIZE,
+    HELIOSVIEW_EVENT_WINDOW_FOCUS,      /* Window gained focus (activated) */
+    HELIOSVIEW_EVENT_WINDOW_BLUR,       /* Window lost focus (deactivated) */
     HELIOSVIEW_EVENT_KEY_DOWN,
     HELIOSVIEW_EVENT_KEY_UP,
     HELIOSVIEW_EVENT_MOUSE_MOVE,
@@ -367,6 +369,41 @@ HELIOSVIEW_API int heliosview_window_set_opacity(heliosview_window_t* window, fl
 /* Replace the window's icon (loaded from an .ico/.cur file path, UTF-8);
  * NULL restores the default application icon. 0 = success. */
 HELIOSVIEW_API int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_path);
+
+/* Minimize the window (equivalent to show_state with SHOW_MINIMIZED). 0 = success. */
+HELIOSVIEW_API int heliosview_window_minimize(heliosview_window_t* window);
+
+/* Maximize the window. 0 = success. */
+HELIOSVIEW_API int heliosview_window_maximize(heliosview_window_t* window);
+
+/* Restore a minimized or maximized window to normal. 0 = success. */
+HELIOSVIEW_API int heliosview_window_restore(heliosview_window_t* window);
+
+/* Toggle between the normal and maximized show states. 0 = success. */
+HELIOSVIEW_API int heliosview_window_toggle_maximize(heliosview_window_t* window);
+
+/* Enable (resizable != 0) or disable (resizable == 0) resizing and the maximize
+ * box. Only affects windows created with a resizable style (NORMAL / FRAMELESS);
+ * NORMAL windows can still be minimized. 0 = success. */
+HELIOSVIEW_API int heliosview_window_set_resizable(heliosview_window_t* window, int resizable);
+
+/* Register a client-area drag region: a mouse-down + drag inside any registered
+ * region moves the window (like a title bar; WM_NCHITTEST -> HTCAPTION). This is
+ * how frameless/borderless windows get an OS move gesture. Regions accumulate;
+ * all are cleared when the window is destroyed. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_add_drag_region(heliosview_window_t* window,
+                                                     int32_t x, int32_t y,
+                                                     int32_t width, int32_t height);
+
+/* Remove all registered drag regions. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_clear_drag_regions(heliosview_window_t* window);
+
+/* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
+HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
+
+/* Make the process per-monitor DPI aware (v2). Call once, before any window is
+ * created. Returns 0 on success, negative if already set or unsupported. */
+HELIOSVIEW_API int heliosview_set_dpi_awareness(void);
 
 /* Window id (source of window_id in events) */
 HELIOSVIEW_API int32_t heliosview_window_id(const heliosview_window_t* window);

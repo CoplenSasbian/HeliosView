@@ -49,7 +49,7 @@ std::thread worker([app] {
 
 | 领域 | API（C / C++） |
 | --- | --- |
-| 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏） |
+| 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏、最小化/最大化/还原、可调整大小、拖拽区域、DPI、焦点变化） |
 | 任务栏进度 | `heliosview_window_set_progress` / `Window::setProgress`（含状态、角标） |
 | 背景材质与深色模式（Win11） | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS 桥 | `heliosview_webview_*` / `WebViewWindow` + `bindJson` 自动绑定 |
@@ -181,7 +181,17 @@ int main()
 }
 ```
 
-`Window` 还提供 `showMinimized/Maximized/Normal`、`move/resize`、`position/size/geometry`、`setTitle`、`center`、`setOpacity`、`focus`、`hide`、`setTopmost`、`setIcon`、`requestClose`、`setProgress`（任务栏）、`setBackdrop(Mica/Acrylic)` + `setDarkMode`（Win11），以及 `WindowStyle::{Normal, Borderless, Frameless}`。标题与字符串均为 UTF-8。
+`Window` 还提供 `showMinimized/Maximized/Normal`（以及便捷的 `minimize`/`maximize`/`restore`/`toggleMaximize`）、`move/resize`、`position/size/geometry`、`setTitle`、`center`、`setOpacity`、`focus`、`hide`、`setTopmost`、`setIcon`、`requestClose`、`setResizable`、`setProgress`（任务栏）、`setBackdrop(Mica/Acrylic)` + `setDarkMode`（Win11）、`dpi`，以及 `WindowStyle::{Normal, Borderless, Frameless}`。`focused`/`blurred` 信号上报窗口激活状态变化。标题与字符串均为 UTF-8。
+
+**无边框窗口拖拽。** 无边框 / 无标题栏窗口没有系统标题栏，因此把自定义标题栏条带注册为拖拽区域即可 —— 在区域内按下并拖动会像原生标题栏一样移动窗口（`WM_NCHITTEST → HTCAPTION`）：
+
+```cpp
+helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
+win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
+win.show();
+```
+
+**DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
 
 ### 4. WebView —— 核心：JS ↔ 原生桥接
 
@@ -365,7 +375,7 @@ include/HeliosViewCore/               纯头文件 C++ 封装
   Signal.h                            信号/槽（同步 + 异步槽）
   Types.h                             事件类型（与 C API 一一对应）
   App.h                               消息循环 + UI 线程 scheduler
-  Window.h                            顶层窗口 + 任务栏/背景材质 API
+  Window.h                            顶层窗口 + 状态/拖拽/DPI/任务栏/背景材质 API
   Dialogs.h                           原生对话框 + 消息框
   System.h                            剪贴板 / 打开 URL / 资源管理器定位
   Notification.h                      OS toast 通知（线程安全）

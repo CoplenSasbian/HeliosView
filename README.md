@@ -64,7 +64,7 @@ std::thread worker([app] {
 
 | area | API (C / C++) |
 | --- | --- |
-| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide) |
+| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, drag regions, DPI, focus/blur) |
 | taskbar progress | `heliosview_window_set_progress` / `Window::setProgress` (+ state, overlay-capable) |
 | backdrop & dark mode (Win11) | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS bridge | `heliosview_webview_*` / `WebViewWindow` + `bindJson` auto-binding |
@@ -222,11 +222,28 @@ int main()
 }
 ```
 
-`Window` also offers `showMinimized/Maximized/Normal`, `move/resize`,
+`Window` also offers `showMinimized/Maximized/Normal` (and the convenience
+`minimize`/`maximize`/`restore`/`toggleMaximize`), `move/resize`,
 `position/size/geometry`, `setTitle`, `center`, `setOpacity`, `focus`, `hide`,
-`setTopmost`, `setIcon`, `requestClose`, `setProgress` (taskbar),
-`setBackdrop(Mica/Acrylic)` + `setDarkMode` (Win11), and
-`WindowStyle::{Normal, Borderless, Frameless}`. Titles and strings are UTF-8.
+`setTopmost`, `setIcon`, `requestClose`, `setResizable`, `setProgress`
+(taskbar), `setBackdrop(Mica/Acrylic)` + `setDarkMode` (Win11), `dpi`, and
+`WindowStyle::{Normal, Borderless, Frameless}`. `focused`/`blurred` signals
+report activation changes. Titles and strings are UTF-8.
+
+**Frameless dragging.** A frameless/borderless window has no OS title bar, so
+register the custom title-bar strips as drag regions — a mouse-down + drag
+inside them moves the window like a native title bar (`WM_NCHITTEST →
+HTCAPTION`):
+
+```cpp
+helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
+win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
+win.show();
+```
+
+**DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
+to make the process per-monitor DPI aware (v2); `window.dpi()` reports a
+window's current DPI.
 
 ### 4. WebView — the core: JS ↔ native bridge
 
@@ -441,7 +458,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Signal.h                            signals/slots (sync + async slots)
   Types.h                             event types (1:1 with the C API)
   App.h                               message loop + UI-thread scheduler
-  Window.h                            top-level window + taskbar/backdrop APIs
+  Window.h                            top-level window + state/drag/DPI/taskbar/backdrop APIs
   Dialogs.h                           native dialogs + message box
   System.h                            clipboard / open-URL / show-in-folder
   Notification.h                      OS toast notifications (thread-safe)

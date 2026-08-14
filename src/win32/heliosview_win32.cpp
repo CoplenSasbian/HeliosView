@@ -46,6 +46,8 @@ struct heliosview_window {
     HWND hwnd = nullptr;
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
+    bool resizable = true;    /* whether the user can resize / maximize the window */
+    std::vector<RECT> drag_regions; /* client-area move regions (WM_NCHITTEST -> HTCAPTION) */
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
@@ -501,20 +503,28 @@ struct execute_script_completed_handler : com_callback_base<ICoreWebView2Execute
     Fn m_fn;
 };
 
-/* Preset style → Win32 window style */
-DWORD map_win32_style(heliosview_window_style_t style)
+/* Preset style → Win32 window style (honors the window's resizable flag) */
+DWORD map_win32_style(const heliosview_window_t* window)
 {
-    switch (style) {
+    DWORD style = 0;
+    switch (window->style) {
     case HELIOSVIEW_WINDOW_NORMAL:
-        return WS_OVERLAPPEDWINDOW;
+        style = WS_OVERLAPPEDWINDOW;
+        break;
     case HELIOSVIEW_WINDOW_BORDERLESS:
-        return WS_POPUP; /* borderless and titleless; fully custom */
+        style = WS_POPUP; /* borderless and titleless; fully custom */
+        break;
     case HELIOSVIEW_WINDOW_FRAMELESS:
         /* resizable border, no title bar: the classic combo for custom-title-bar windows */
-        return WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        break;
     default:
-        return WS_OVERLAPPEDWINDOW;
+        style = WS_OVERLAPPEDWINDOW;
+        break;
     }
+    if (!window->resizable)
+        style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    return style;
 }
 
 namespace {
@@ -630,6 +640,14 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         out->timestamp_ms = ts;
         return 1;
     }
+    case WM_ACTIVATE: {
+        /* WA_INACTIVE (0) = lost focus, everything else = gained focus */
+        out->type = LOWORD(msg->wParam) == WA_INACTIVE
+                        ? HELIOSVIEW_EVENT_WINDOW_BLUR
+                        : HELIOSVIEW_EVENT_WINDOW_FOCUS;
+        out->timestamp_ms = ts;
+        return 1;
+    }
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
@@ -671,6 +689,26 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         if (win) {
             win->hwnd = hwnd;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(win));
+        }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    /* WM_NCHITTEST: registered drag regions act as a title bar (move the window
+     * on drag) for frameless/borderless windows. Any other point falls through to
+     * DefWindowProc (borders keep resize handles). */
+    if (message == WM_NCHITTEST) {
+        auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (win && !win->drag_regions.empty()) {
+            const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
+                               static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
+            POINT client = screen;
+            if (ScreenToClient(hwnd, &client)) {
+                for (const RECT& r : win->drag_regions) {
+                    if (client.x >= r.left && client.x < r.right
+                        && client.y >= r.top && client.y < r.bottom)
+                        return HTCAPTION;
+                }
+            }
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
@@ -832,7 +870,7 @@ int heliosview_window_show(heliosview_window_t* window)
     const std::wstring title = utf8_to_wide(window->title);
 
     /* compute the window size for the preset style (AdjustWindowRect is the identity for borderless styles) */
-    const DWORD style = map_win32_style(window->style);
+    const DWORD style = map_win32_style(window);
     RECT rect{0, 0, window->width, window->height};
     AdjustWindowRect(&rect, style, FALSE);
 
@@ -952,7 +990,7 @@ int heliosview_window_set_size(heliosview_window_t* window, int32_t width, int32
     if (!window || !window->hwnd)
         return -1;
     RECT rc{0, 0, width, height};
-    AdjustWindowRect(&rc, map_win32_style(window->style), FALSE);
+    AdjustWindowRect(&rc, map_win32_style(window), FALSE);
     window->width = width;
     window->height = height;
     return SetWindowPos(window->hwnd, nullptr, 0, 0,
@@ -1048,6 +1086,98 @@ int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_pat
     SendMessageW(window->hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(new_icon));
     SendMessageW(window->hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(new_icon));
     return 0;
+}
+
+int heliosview_window_minimize(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return ShowWindow(window->hwnd, SW_MINIMIZE) ? 0 : -1;
+}
+
+int heliosview_window_maximize(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return ShowWindow(window->hwnd, SW_MAXIMIZE) ? 0 : -1;
+}
+
+int heliosview_window_restore(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return ShowWindow(window->hwnd, SW_RESTORE) ? 0 : -1;
+}
+
+int heliosview_window_toggle_maximize(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    return ShowWindow(window->hwnd, IsZoomed(window->hwnd) ? SW_RESTORE : SW_MAXIMIZE) ? 0 : -1;
+}
+
+int heliosview_window_set_resizable(heliosview_window_t* window, int resizable)
+{
+    if (!window)
+        return -1;
+    window->resizable = resizable != 0;
+    if (!window->hwnd)
+        return 0; /* applied at creation (map_win32_style reads the flag) */
+    const DWORD style = map_win32_style(window);
+    SetWindowLongPtrW(window->hwnd, GWL_STYLE, style);
+    /* Re-frame the window so the (possibly removed) thick frame is applied. */
+    SetWindowPos(window->hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    return 0;
+}
+
+int heliosview_window_add_drag_region(heliosview_window_t* window, int32_t x, int32_t y,
+                                      int32_t width, int32_t height)
+{
+    if (!window || width <= 0 || height <= 0)
+        return -1;
+    RECT r{x, y, x + width, y + height};
+    window->drag_regions.push_back(r);
+    return 0;
+}
+
+int heliosview_window_clear_drag_regions(heliosview_window_t* window)
+{
+    if (!window)
+        return -1;
+    window->drag_regions.clear();
+    return 0;
+}
+
+uint32_t heliosview_window_dpi(const heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return 0;
+    return static_cast<uint32_t>(GetDpiForWindow(window->hwnd));
+}
+
+int heliosview_set_dpi_awareness(void)
+{
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32)
+        return -1;
+    /* SetProcessDpiAwarenessContext (Win10 1607+): per-monitor v2 is best.
+     * The DPI_AWARENESS_CONTEXT handles are documented negative values; define
+     * them explicitly so we don't depend on the SDK's _WIN32_WINNT gate. */
+    using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(void*);
+    const auto setCtx = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+        GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+    if (setCtx) {
+        const auto perMonitorV2 = reinterpret_cast<void*>((long long)-4);  /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */
+        const auto systemAware = reinterpret_cast<void*>((long long)-2);   /* DPI_AWARENESS_CONTEXT_SYSTEM_AWARE */
+        if (setCtx(perMonitorV2) || setCtx(systemAware))
+            return 0;
+        return -1;
+    }
+    /* Older fallback: SetProcessDPIAware (Win Vista+) */
+    using SetProcessDPIAwareFn = BOOL(WINAPI*)(void);
+    const auto setAware = reinterpret_cast<SetProcessDPIAwareFn>(GetProcAddress(user32, "SetProcessDPIAware"));
+    return (setAware && setAware()) ? 0 : -1;
 }
 
 /* ================= Taskbar progress (ITaskbarList3) ================= */
