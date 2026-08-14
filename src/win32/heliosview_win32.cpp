@@ -9,6 +9,7 @@
 #include <objbase.h>  /* CoCreateInstance */
 #include <shobjidl.h> /* IFileOpenDialog / IShellItem (file pickers) / ITaskbarList3 */
 #include <dwmapi.h>   /* DwmSetWindowAttribute (backdrop / dark mode) */
+#include <uxtheme.h>  /* DrawThemeBackground (native title-bar control buttons) */
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
@@ -63,6 +64,9 @@ struct heliosview_window {
         RECT rect{};
     };
     std::vector<control_button> control_buttons;
+    /* Native-drawn (uxtheme) child windows for the control buttons, created by
+     * heliosview_window_enable_native_buttons(1). Indexed 1:1 with control_buttons. */
+    std::vector<HWND> native_buttons;
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
@@ -736,6 +740,209 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     return 1;
 }
 
+/* ================= Native (uxtheme) title-bar control buttons =================
+ *
+ * Each registered control-button rectangle can be backed by a real child window
+ * painted with DrawThemeBackground (the same theme parts the OS uses for its own
+ * title-bar buttons), so the buttons look exactly like the system's. The child
+ * window sits above the WebView, tracks hover/pressed states, and performs the
+ * action on click (minimize / maximize-toggle / close). */
+
+/* WP_*BUTTON / *BS_* constants are gated behind _WIN32_WINNT >= 0x0A00 in the
+ * SDK; define the ones we use so the code compiles without setting it. */
+#ifndef WP_MINBUTTON
+#define WP_MINBUTTON 15
+#define MBS_NORMAL 1
+#define MBS_HOT 2
+#define MBS_PUSHED 3
+#define WP_MAXBUTTON 16
+#define MAXBS_NORMAL 1
+#define MAXBS_HOT 2
+#define MAXBS_PUSHED 3
+#define WP_RESTOREBUTTON 17
+#define RBS_NORMAL 1
+#define RBS_HOT 2
+#define RBS_PUSHED 3
+#define WP_CLOSEBUTTON 18
+#define CBS_NORMAL 1
+#define CBS_HOT 2
+#define CBS_PUSHED 3
+#endif
+
+namespace {
+
+constexpr wchar_t kNativeButtonClass[] = L"HeliosViewTitleButton";
+
+/* Per-child state: which action, and the owning window (to act on it). */
+struct native_button_state {
+    heliosview_control_button_t button = HELIOSVIEW_CONTROL_MINIMIZE;
+    HWND owner = nullptr;
+    bool hover = false;
+    bool pressed = false;
+};
+
+heliosview_control_button_t native_button_at(heliosview_window_t* win, HWND child)
+{
+    for (size_t i = 0; i < win->native_buttons.size(); ++i)
+        if (win->native_buttons[i] == child && i < win->control_buttons.size())
+            return win->control_buttons[i].button;
+    return HELIOSVIEW_CONTROL_MINIMIZE;
+}
+
+/* Theme part + state for a button given the current show state. */
+void theme_button_part(heliosview_control_button_t btn, bool maximized,
+                       bool hover, bool pressed, int* part, int* state)
+{
+    if (pressed) {
+        *part = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? WP_MINBUTTON
+                : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? WP_RESTOREBUTTON : WP_MAXBUTTON)
+                : WP_CLOSEBUTTON;
+        *state = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_PUSHED
+                 : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_PUSHED : MAXBS_PUSHED)
+                 : CBS_PUSHED;
+    } else if (hover) {
+        *part = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? WP_MINBUTTON
+                : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? WP_RESTOREBUTTON : WP_MAXBUTTON)
+                : WP_CLOSEBUTTON;
+        *state = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_HOT
+                 : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_HOT : MAXBS_HOT)
+                 : CBS_HOT;
+    } else {
+        *part = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? WP_MINBUTTON
+                : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? WP_RESTOREBUTTON : WP_MAXBUTTON)
+                : WP_CLOSEBUTTON;
+        *state = (btn == HELIOSVIEW_CONTROL_MINIMIZE) ? MBS_NORMAL
+                 : (btn == HELIOSVIEW_CONTROL_MAXIMIZE) ? (maximized ? RBS_NORMAL : MAXBS_NORMAL)
+                 : CBS_NORMAL;
+    }
+}
+
+LRESULT CALLBACK native_button_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    auto* st = reinterpret_cast<native_button_state*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!st)
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+
+    switch (message) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        /* The maximize button shows restore while maximized (like the OS). */
+        const bool maximized = IsZoomed(st->owner) != FALSE;
+        int part = WP_CLOSEBUTTON, state = CBS_NORMAL;
+        theme_button_part(st->button, maximized, st->hover, st->pressed, &part, &state);
+        HTHEME theme = OpenThemeData(hwnd, L"WINDOW");
+        if (theme) {
+            DrawThemeBackground(theme, dc, part, state, &rc, nullptr);
+            CloseThemeData(theme);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1; /* the theme paints everything */
+    case WM_MOUSEMOVE: {
+        if (!st->hover) {
+            st->hover = true;
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        st->hover = false;
+        st->pressed = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN:
+        SetCapture(hwnd);
+        st->pressed = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_LBUTTONUP: {
+        st->pressed = false;
+        ReleaseCapture();
+        POINT pt{};
+        GetCursorPos(&pt);
+        RECT rc{};
+        GetWindowRect(hwnd, &rc);
+        const bool inside = PtInRect(&rc, pt) != FALSE;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        if (inside) {
+            switch (st->button) {
+            case HELIOSVIEW_CONTROL_MINIMIZE:
+                ShowWindow(st->owner, SW_MINIMIZE);
+                break;
+            case HELIOSVIEW_CONTROL_MAXIMIZE:
+                ShowWindow(st->owner, IsZoomed(st->owner) ? SW_RESTORE : SW_MAXIMIZE);
+                break;
+            case HELIOSVIEW_CONTROL_CLOSE:
+            default:
+                PostMessageW(st->owner, WM_CLOSE, 0, 0);
+                break;
+            }
+        }
+        return 0;
+    }
+    default:
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+}
+
+/* Create the child windows for every registered control button. Returns 0 on success. */
+int create_native_buttons(heliosview_window_t* win)
+{
+    if (!win->hwnd)
+        return -1;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = native_button_wndproc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    wc.lpszClassName = kNativeButtonClass;
+    RegisterClassExW(&wc); /* re-registering is harmless */
+
+    win->native_buttons.clear();
+    for (const auto& cb : win->control_buttons) {
+        auto* st = hv::hv_alloc<native_button_state>();
+        st->button = cb.button;
+        st->owner = win->hwnd;
+        HWND child = CreateWindowExW(0, kNativeButtonClass, L"",
+                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                     cb.rect.left, cb.rect.top,
+                                     cb.rect.right - cb.rect.left,
+                                     cb.rect.bottom - cb.rect.top,
+                                     win->hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!child) {
+            hv::hv_dealloc(st);
+            /* roll back what we created so far */
+            for (HWND h : win->native_buttons)
+                DestroyWindow(h);
+            win->native_buttons.clear();
+            return -1;
+        }
+        SetWindowLongPtrW(child, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+        win->native_buttons.push_back(child);
+    }
+    return 0;
+}
+
+void destroy_native_buttons(heliosview_window_t* win)
+{
+    for (HWND h : win->native_buttons) {
+        auto* st = reinterpret_cast<native_button_state*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+        if (st)
+            hv::hv_dealloc(st);
+        DestroyWindow(h);
+    }
+    win->native_buttons.clear();
+}
+
+} // namespace
+
 LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     /* WM_NCCREATE is sent synchronously during CreateWindowExW: register here so
@@ -947,6 +1154,7 @@ void heliosview_window_destroy(heliosview_window_t* window)
     if (!window)
         return;
     g_windows_by_id.erase(window->id);
+    destroy_native_buttons(window);
     if (window->hwnd) {
         /* The window is a passive registry only: it does not own trays/menus.
          * Their C++ wrappers (Tray/Menu) must be destroyed before the window. */
@@ -1283,7 +1491,21 @@ int heliosview_window_clear_control_buttons(heliosview_window_t* window)
 {
     if (!window)
         return -1;
+    destroy_native_buttons(window);
     window->control_buttons.clear();
+    return 0;
+}
+
+int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on)
+{
+    if (!window)
+        return -1;
+    if (on) {
+        if (!window->hwnd)
+            return -1; /* the child windows need the parent HWND: call after show() */
+        return create_native_buttons(window);
+    }
+    destroy_native_buttons(window);
     return 0;
 }
 

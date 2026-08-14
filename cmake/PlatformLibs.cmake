@@ -23,10 +23,11 @@ macro(heliosview_link_platform_system_libs target)
     #   shell32      - shell tray icon (Shell_NotifyIcon), file pickers, ShellExecute
     #   ole32        - COM (WebView2, IFileDialog, taskbar ITaskbarList)
     #   dwmapi       - DWM window backdrop / dark mode (DwmSetWindowAttribute)
+    #   uxtheme      - DrawThemeBackground for the native title-bar buttons
     #   runtimeobject- WinRT Ro* (toast notifications)
     #   propsys      - IPropertyStore (toast AppUserModelID shortcut)
     target_link_libraries(${target} PRIVATE
-      user32 shell32 ole32 dwmapi runtimeobject propsys)
+      user32 shell32 ole32 dwmapi uxtheme runtimeobject propsys)
 
   elseif(APPLE)
     # macOS backend (src/macos/), for example:

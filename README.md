@@ -254,6 +254,15 @@ win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
 win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
 ```
 
+Or let the library draw them with the **native** title-bar button theme
+(`DrawThemeBackground` — the exact look of the OS's own buttons, including
+hover/pressed feedback and light/dark mode), layered above the WebView:
+
+```cpp
+win.show();
+win.enableNativeButtons(true);   // native-drawn control buttons
+```
+
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
 to make the process per-monitor DPI aware (v2); `window.dpi()` reports a
 window's current DPI.

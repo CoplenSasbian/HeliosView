@@ -433,6 +433,16 @@ HELIOSVIEW_API int heliosview_window_add_control_button(heliosview_window_t* win
 /* Remove all registered control buttons. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_clear_control_buttons(heliosview_window_t* window);
 
+/* Draw the control buttons natively (on != 0) or leave them to the app
+ * (on == 0, the default). When enabled, each registered control-button
+ * rectangle becomes a real child window painted with the OS title-bar button
+ * theme (DrawThemeBackground: same look as the system's own minimize/maximize/
+ * close buttons, including hover/pressed feedback and light/dark theme), layered
+ * above the WebView. Clicks perform the action; the maximize button shows the
+ * restore glyph while maximized. Call after show() (the child windows need the
+ * parent HWND). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on);
+
 /* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
 HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
 

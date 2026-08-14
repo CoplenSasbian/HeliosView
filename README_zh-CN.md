@@ -201,6 +201,13 @@ win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
 win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
 ```
 
+或者让库用**系统原生**标题栏按钮主题绘制（`DrawThemeBackground` —— 与 OS 自带按钮完全一致的外观，含悬停 / 按下反馈与深浅色模式），层叠在 WebView 之上：
+
+```cpp
+win.show();
+win.enableNativeButtons(true);   // 原生绘制的控制按钮
+```
+
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
 
 **屏幕几何。** `System::screenWorkArea`、`Window::workArea` 与 `System::primaryWorkArea` 返回显示器可用区域（不含任务栏）的屏幕坐标 —— 便于在多显示器环境下居中 / 定位窗口。`System::cursorPosition` 返回鼠标位置。

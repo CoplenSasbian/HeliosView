@@ -140,6 +140,13 @@ public:
     // Remove all registered control buttons
     void clearControlButtons() { heliosview_window_clear_control_buttons(m_window); }
 
+    // Draw the registered control buttons natively (OS title-bar button theme,
+    // same look as the system's own min/max/close, hover/pressed feedback and
+    // light/dark theme), layered above the WebView. The alternative is drawing
+    // them yourself in the client area and letting the library only wire the
+    // behavior. Call after show(). Pass false to return to app-drawn buttons.
+    void enableNativeButtons(bool on) { heliosview_window_enable_native_buttons(m_window, on ? 1 : 0); }
+
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
 
