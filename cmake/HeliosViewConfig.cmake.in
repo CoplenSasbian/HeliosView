@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+# Imported targets from the export set (HeliosView::HeliosView, and for C++
+# consumers HeliosView::HeliosView.Core + the vendored header-only deps).
+include("${CMAKE_CURRENT_LIST_DIR}/HeliosViewTargets.cmake")
+
+# The C++ umbrella target: HeliosView::Core (as documented in the README) is an
+# alias of the exported HeliosView::HeliosView.Core INTERFACE target.
+if(NOT TARGET HeliosView::Core AND TARGET HeliosView::HeliosView.Core)
+  add_library(HeliosView::Core INTERFACE IMPORTED)
+  set_target_properties(HeliosView::Core PROPERTIES
+    INTERFACE_LINK_LIBRARIES HeliosView::HeliosView.Core)
+endif()
+
+check_required_components(HeliosView)
