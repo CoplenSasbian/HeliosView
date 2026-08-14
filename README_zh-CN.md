@@ -49,9 +49,10 @@ std::thread worker([app] {
 
 | 领域 | API（C / C++） |
 | --- | --- |
-| 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏、最小化/最大化/还原、可调整大小、拖拽区域、DPI、焦点变化） |
+| 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏、最小化/最大化/还原、可调整大小、最小/最大尺寸、拖拽区域、全屏、闪烁、禁用、DPI、焦点/移动/尺寸事件） |
 | 屏幕几何 | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea`（多显示器） |
 | 任务栏进度 | `heliosview_window_set_progress` / `Window::setProgress`（含状态、角标） |
+| 会话结束 | `heliosview_set_session_end_callback` / `System::setSessionEndCallback`（关机保存） |
 | 背景材质与深色模式（Win11） | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS 桥 | `heliosview_webview_*` / `WebViewWindow` + `bindJson` 自动绑定 |
 | 托盘 + 菜单 | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
@@ -195,6 +196,10 @@ win.show();
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
 
 **屏幕几何。** `System::screenWorkArea`、`Window::workArea` 与 `System::primaryWorkArea` 返回显示器可用区域（不含任务栏）的屏幕坐标 —— 便于在多显示器环境下居中 / 定位窗口。`System::cursorPosition` 返回鼠标位置。
+
+**尺寸限制、全屏、闪烁与模态锁。** `setMinimumSize` / `setMaximumSize` 限制客户端尺寸（`WM_GETMINMAXINFO`）；`setFullscreen` 铺满整个显示器，退出时恢复之前的几何与样式；`flash` / `flashUntilFocus` 闪烁任务栏按钮（后台任务完成或紧急通知）；`setEnabled(false)` 锁定窗口输入以模拟模态。`moved` / `moving` / `sizing` / `enabledChanged` 信号上报窗口状态变化。
+
+**会话结束。** `System::setSessionEndCallback` 在 OS 会话结束前（关机 / 重启 / 注销）于消息循环线程同步调用，供应用保存状态；返回非零可否决关机。
 
 ### 4. WebView —— 核心：JS ↔ 原生桥接
 

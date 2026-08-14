@@ -64,9 +64,10 @@ std::thread worker([app] {
 
 | area | API (C / C++) |
 | --- | --- |
-| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, drag regions, DPI, focus/blur) |
+| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, min/max size, drag regions, fullscreen, flash, enabled, DPI, focus/move/size events) |
 | screen geometry | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea` (multi-monitor) |
 | taskbar progress | `heliosview_window_set_progress` / `Window::setProgress` (+ state, overlay-capable) |
+| session end | `heliosview_set_session_end_callback` / `System::setSessionEndCallback` (save-on-shutdown) |
 | backdrop & dark mode (Win11) | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS bridge | `heliosview_webview_*` / `WebViewWindow` + `bindJson` auto-binding |
 | tray icon + menu | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
@@ -250,6 +251,18 @@ window's current DPI.
 `System::primaryWorkArea` return the monitor's usable area (excluding the
 taskbar) in screen coordinates — handy for centering/positioning windows on
 multi-monitor setups. `System::cursorPosition` reports the mouse location.
+
+**Size limits, fullscreen, flash, and modal lock.** `setMinimumSize` /
+`setMaximumSize` clamp the client size (`WM_GETMINMAXINFO`);
+`setFullscreen` covers the whole monitor and restores the previous geometry on
+exit; `flash` / `flashUntilFocus` flash the taskbar button (a finished
+background task or an urgent notification); `setEnabled(false)` locks a window
+against input for modal states. `moved` / `moving` / `sizing` /
+`enabledChanged` signals report window state changes.
+
+**Session end.** `System::setSessionEndCallback` runs synchronously on the
+message-loop thread before the OS session ends (shutdown / restart / logoff) so
+the app can save state; returning non-zero vetoes the shutdown.
 
 ### 4. WebView — the core: JS ↔ native bridge
 

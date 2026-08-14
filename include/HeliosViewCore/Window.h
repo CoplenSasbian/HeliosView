@@ -137,6 +137,43 @@ public:
         return true;
     }
 
+    // ---- size constraints ----
+
+    // Enforce a minimum client size (so the UI is not crushed). 0 = unconstrained.
+    void setMinimumSize(int32_t w, int32_t h) { heliosview_window_set_min_size(m_window, w, h); }
+
+    // Enforce a maximum client size. (0, 0) = no maximum.
+    void setMaximumSize(int32_t w, int32_t h) { heliosview_window_set_max_size(m_window, w, h); }
+
+    // ---- taskbar flash ----
+
+    // Flash the taskbar button a few times (background task finished).
+    void flash() { heliosview_window_flash(m_window); }
+
+    // Flash the taskbar button until the window is focused (urgent notification).
+    void flashUntilFocus() { heliosview_window_flash_until_focus(m_window); }
+
+    // ---- fullscreen ----
+
+    // Enter (true) or leave (false) fullscreen. The previous geometry/style are
+    // restored on exit. A fullscreen window covers the whole monitor.
+    void setFullscreen(bool on) { heliosview_window_set_fullscreen(m_window, on ? 1 : 0); }
+
+    // Whether the window is currently fullscreen.
+    bool isFullscreen() const { return heliosview_window_is_fullscreen(m_window) != 0; }
+
+    // ---- enabled / modal ----
+
+    // Enable or disable the window (a disabled window is locked against input;
+    // used for modal states). Fires enabledChanged.
+    void setEnabled(bool on) { heliosview_window_set_enabled(m_window, on ? 1 : 0); }
+
+    // Whether the window is enabled.
+    bool isEnabled() const
+    {
+        return heliosview_window_is_enabled(m_window) != 0;
+    }
+
     // Request to close the window; goes through the event pipeline
     // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
     void requestClose() { heliosview_window_close(m_window); }
@@ -243,8 +280,12 @@ public:
 
     Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
+    Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
+    Signal<int32_t, int32_t> moving;                       // move drag in progress (x, y)
+    Signal<int32_t, int32_t> sizing;                       // resize drag in progress (w, h)
     Signal<> focused;                                      // window gained focus (activated)
     Signal<> blurred;                                      // window lost focus (deactivated)
+    Signal<bool> enabledChanged;                           // enabled (true) / disabled (false)
     Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered)
     Signal<KeyCode> keyReleased;                           // key released
     Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
@@ -260,11 +301,26 @@ public:
         case EventType::WindowResize:
             resized(e.width, e.height);
             return true;
+        case EventType::WindowMoved:
+            moved(e.x, e.y);
+            return true;
+        case EventType::WindowMoving:
+            moving(e.x, e.y);
+            return true;
+        case EventType::WindowSizing:
+            sizing(e.width, e.height);
+            return true;
         case EventType::WindowFocus:
             focused();
             return true;
         case EventType::WindowBlur:
             blurred();
+            return true;
+        case EventType::WindowEnabled:
+            enabledChanged(true);
+            return true;
+        case EventType::WindowDisabled:
+            enabledChanged(false);
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

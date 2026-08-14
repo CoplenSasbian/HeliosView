@@ -47,6 +47,12 @@ struct heliosview_window {
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
     bool resizable = true;    /* whether the user can resize / maximize the window */
+    int32_t min_w = 0, min_h = 0; /* minimum client size (0 = unconstrained) */
+    int32_t max_w = 0, max_h = 0; /* maximum client size (0 = unconstrained) */
+    bool fullscreen = false;       /* whether the window covers the whole monitor */
+    RECT fs_restore_rect{};        /* pre-fullscreen window rect (restored on exit) */
+    DWORD fs_restore_style = 0;    /* pre-fullscreen window style */
+    DWORD fs_restore_exstyle = 0;  /* pre-fullscreen extended style */
     std::vector<RECT> drag_regions; /* client-area move regions (WM_NCHITTEST -> HTCAPTION) */
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
@@ -539,6 +545,11 @@ std::atomic<int32_t> g_next_window_id{1};
 std::flat_map<int32_t, heliosview_window_t*> g_windows_by_id; /* event dispatch: id → window */
 std::flat_map<HWND, heliosview_webview_t*> g_webviews_by_hwnd; /* resize WebViews together with their window */
 
+/* Session-end (WM_QUERYENDSESSION) callback: runs synchronously on the message-loop
+ * thread before shutdown/logoff; return non-zero to veto. */
+heliosview_session_end_cb g_session_end_cb = nullptr;
+void* g_session_end_userdata = nullptr;
+
 /* Routing ids (tray callback messages, menu item ids, caller ids) are allocated
  * from each window's own id space (window->next_route_id); the tray uid is the
  * only remaining process-wide counter (unique per process for Shell_NotifyIcon). */
@@ -648,6 +659,43 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         out->timestamp_ms = ts;
         return 1;
     }
+    case WM_MOVE:
+        /* final position (screen coords of the top-left corner) */
+        out->type = HELIOSVIEW_EVENT_WINDOW_MOVED;
+        out->x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
+        out->y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
+        out->timestamp_ms = ts;
+        return 1;
+    case WM_MOVING: {
+        /* drag in progress: lParam points at the current window rect */
+        const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
+        if (rc) {
+            out->type = HELIOSVIEW_EVENT_WINDOW_MOVING;
+            out->x = rc->left;
+            out->y = rc->top;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+        return 0;
+    }
+    case WM_SIZING: {
+        /* resize drag in progress: lParam points at the proposed window rect */
+        const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
+        if (rc) {
+            out->type = HELIOSVIEW_EVENT_WINDOW_SIZING;
+            out->width = rc->right - rc->left;
+            out->height = rc->bottom - rc->top;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+        return 0;
+    }
+    case WM_ENABLE:
+        /* wParam: TRUE = being enabled, FALSE = being disabled */
+        out->type = msg->wParam ? HELIOSVIEW_EVENT_WINDOW_ENABLED
+                                : HELIOSVIEW_EVENT_WINDOW_DISABLED;
+        out->timestamp_ms = ts;
+        return 1;
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
@@ -711,6 +759,37 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             }
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    /* WM_GETMINMAXINFO: clamp the tracking size (min/max client size -> window
+     * size incl. frame). Must return 0 (handled). */
+    if (message == WM_GETMINMAXINFO) {
+        auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (win && (win->min_w || win->min_h || win->max_w || win->max_h)) {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lparam);
+            const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+            if (win->min_w || win->min_h) {
+                RECT rc{0, 0, win->min_w, win->min_h};
+                AdjustWindowRect(&rc, style, FALSE);
+                mmi->ptMinTrackSize.x = rc.right - rc.left;
+                mmi->ptMinTrackSize.y = rc.bottom - rc.top;
+            }
+            if (win->max_w || win->max_h) {
+                RECT rc{0, 0, win->max_w, win->max_h};
+                AdjustWindowRect(&rc, style, FALSE);
+                mmi->ptMaxTrackSize.x = rc.right - rc.left;
+                mmi->ptMaxTrackSize.y = rc.bottom - rc.top;
+            }
+        }
+        return 0;
+    }
+
+    /* WM_QUERYENDSESSION: run the session-end callback synchronously (save state,
+     * veto via non-zero return). */
+    if (message == WM_QUERYENDSESSION) {
+        if (g_session_end_cb)
+            return g_session_end_cb(g_session_end_userdata) ? FALSE : TRUE;
+        return TRUE; /* allow the session to end */
     }
 
     const auto window_id_of = [hwnd] {
@@ -1123,7 +1202,14 @@ int heliosview_window_set_resizable(heliosview_window_t* window, int resizable)
     window->resizable = resizable != 0;
     if (!window->hwnd)
         return 0; /* applied at creation (map_win32_style reads the flag) */
-    const DWORD style = map_win32_style(window);
+    /* Toggle only the resize-related bits: preserve the current style as-is
+     * (WS_VISIBLE, the caption, WS_VSYNC, ...). Rebuilding the full style from
+     * map_win32_style would drop WS_VISIBLE and hide a shown window. */
+    LONG_PTR style = GetWindowLongPtrW(window->hwnd, GWL_STYLE);
+    if (window->resizable)
+        style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+    else
+        style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     SetWindowLongPtrW(window->hwnd, GWL_STYLE, style);
     /* Re-frame the window so the (possibly removed) thick frame is applied. */
     SetWindowPos(window->hwnd, nullptr, 0, 0, 0, 0,
@@ -1154,6 +1240,119 @@ uint32_t heliosview_window_dpi(const heliosview_window_t* window)
     if (!window || !window->hwnd)
         return 0;
     return static_cast<uint32_t>(GetDpiForWindow(window->hwnd));
+}
+
+int heliosview_window_set_min_size(heliosview_window_t* window, int32_t min_width, int32_t min_height)
+{
+    if (!window)
+        return -1;
+    window->min_w = min_width < 0 ? 0 : min_width;
+    window->min_h = min_height < 0 ? 0 : min_height;
+    return 0; /* WM_GETMINMAXINFO reads the fields on the next resize */
+}
+
+int heliosview_window_set_max_size(heliosview_window_t* window, int32_t max_width, int32_t max_height)
+{
+    if (!window)
+        return -1;
+    window->max_w = max_width < 0 ? 0 : max_width;
+    window->max_h = max_height < 0 ? 0 : max_height;
+    return 0;
+}
+
+int heliosview_window_flash(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    FLASHWINFO fi{};
+    fi.cbSize = sizeof(fi);
+    fi.hwnd = window->hwnd;
+    fi.dwFlags = FLASHW_ALL;
+    fi.uCount = 3; /* flash 3 times, then stop */
+    fi.dwTimeout = 0; /* system default caret blink rate */
+    FlashWindowEx(&fi);
+    return 0;
+}
+
+int heliosview_window_flash_until_focus(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    FLASHWINFO fi{};
+    fi.cbSize = sizeof(fi);
+    fi.hwnd = window->hwnd;
+    fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG; /* flash until the window is focused */
+    fi.uCount = 0;
+    fi.dwTimeout = 0;
+    FlashWindowEx(&fi);
+    return 0;
+}
+
+int heliosview_window_set_fullscreen(heliosview_window_t* window, int on)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    if ((on != 0) == window->fullscreen)
+        return 0; /* already in the requested state */
+
+    if (on) {
+        /* Save the current geometry + style so exiting fullscreen can restore them. */
+        GetWindowRect(window->hwnd, &window->fs_restore_rect);
+        window->fs_restore_style = static_cast<DWORD>(GetWindowLongPtrW(window->hwnd, GWL_STYLE));
+        window->fs_restore_exstyle = static_cast<DWORD>(GetWindowLongPtrW(window->hwnd, GWL_EXSTYLE));
+
+        /* Cover the whole monitor (the work area would leave the taskbar visible;
+         * true fullscreen hides it). Drop the frame/caption so nothing is drawn. */
+        HMONITOR hmon = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(hmon, &mi);
+
+        SetWindowLongPtrW(window->hwnd, GWL_STYLE,
+                          window->fs_restore_style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+        SetWindowPos(window->hwnd, HWND_TOP,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+        window->fullscreen = true;
+    } else {
+        /* Restore the saved geometry and window style. */
+        SetWindowLongPtrW(window->hwnd, GWL_STYLE, window->fs_restore_style);
+        SetWindowLongPtrW(window->hwnd, GWL_EXSTYLE, window->fs_restore_exstyle);
+        SetWindowPos(window->hwnd, nullptr,
+                     window->fs_restore_rect.left, window->fs_restore_rect.top,
+                     window->fs_restore_rect.right - window->fs_restore_rect.left,
+                     window->fs_restore_rect.bottom - window->fs_restore_rect.top,
+                     SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+        window->fullscreen = false;
+    }
+    return 0;
+}
+
+int heliosview_window_is_fullscreen(const heliosview_window_t* window)
+{
+    return window && window->fullscreen ? 1 : 0;
+}
+
+int heliosview_window_set_enabled(heliosview_window_t* window, int enabled)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    EnableWindow(window->hwnd, enabled != 0);
+    return 0;
+}
+
+int heliosview_window_is_enabled(const heliosview_window_t* window)
+{
+    return window && window->hwnd && IsWindowEnabled(window->hwnd) ? 1 : 0;
+}
+
+int heliosview_set_session_end_callback(heliosview_session_end_cb callback, void* userdata)
+{
+    g_session_end_cb = callback;
+    g_session_end_userdata = userdata;
+    return 0;
 }
 
 int heliosview_set_dpi_awareness(void)

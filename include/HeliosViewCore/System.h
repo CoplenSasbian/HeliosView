@@ -66,6 +66,16 @@ inline bool enableDpiAwareness()
     return heliosview_set_dpi_awareness() == 0;
 }
 
+/* ---------- session end (shutdown / logoff) ---------- */
+
+// Register a callback invoked synchronously on the message-loop thread when the
+// OS session is ending (shutdown / restart / logoff), before it actually ends.
+// Return non-zero to veto the shutdown (0 = allow). Pass nullptr to unregister.
+inline void setSessionEndCallback(heliosview_session_end_cb callback, void* userdata = nullptr)
+{
+    heliosview_set_session_end_callback(callback, userdata);
+}
+
 /* ---------- screen / monitor geometry ---------- */
 
 // A rectangle in screen coordinates (mirrors heliosview_rect_t).

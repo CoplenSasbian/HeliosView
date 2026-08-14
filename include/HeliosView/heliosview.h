@@ -120,8 +120,13 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_QUIT = 1,          /* Quit request (posted via heliosview_post_event) */
     HELIOSVIEW_EVENT_WINDOW_CLOSE,      /* Window close request (user clicked X) */
     HELIOSVIEW_EVENT_WINDOW_RESIZE,
+    HELIOSVIEW_EVENT_WINDOW_MOVED,      /* Window moved (x/y = new top-left position) */
+    HELIOSVIEW_EVENT_WINDOW_MOVING,     /* Drag in progress (x/y = current position) */
+    HELIOSVIEW_EVENT_WINDOW_SIZING,     /* Resize drag in progress (width/height) */
     HELIOSVIEW_EVENT_WINDOW_FOCUS,      /* Window gained focus (activated) */
     HELIOSVIEW_EVENT_WINDOW_BLUR,       /* Window lost focus (deactivated) */
+    HELIOSVIEW_EVENT_WINDOW_ENABLED,    /* Window was enabled */
+    HELIOSVIEW_EVENT_WINDOW_DISABLED,   /* Window was disabled (modal lock) */
     HELIOSVIEW_EVENT_KEY_DOWN,
     HELIOSVIEW_EVENT_KEY_UP,
     HELIOSVIEW_EVENT_MOUSE_MOVE,
@@ -400,6 +405,56 @@ HELIOSVIEW_API int heliosview_window_clear_drag_regions(heliosview_window_t* win
 
 /* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
 HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
+
+/* Enforce a minimum client size (prevents the window from being resized below
+ * it, e.g. so the UI is not crushed). Pass 0 for either dimension to leave it
+ * unconstrained. Works for NORMAL / FRAMELESS; borderless is fully custom.
+ * 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_set_min_size(heliosview_window_t* window,
+                                                  int32_t min_width, int32_t min_height);
+
+/* Enforce a maximum client size. Pass 0 for either dimension to leave it
+ * unconstrained (0,0 = no maximum). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_set_max_size(heliosview_window_t* window,
+                                                  int32_t max_width, int32_t max_height);
+
+/* Flash the taskbar button a few times (background-task finished hint).
+ * 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_flash(heliosview_window_t* window);
+
+/* Flash the taskbar button until the window is focused (e.g. an urgent
+ * notification). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_flash_until_focus(heliosview_window_t* window);
+
+/* Enter (on != 0) or leave (on == 0) fullscreen: the window covers the whole
+ * monitor (no frame, no taskbar), and the previous geometry is restored on exit.
+ * 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_set_fullscreen(heliosview_window_t* window, int on);
+
+/* Whether the window is currently fullscreen. 1/0. */
+HELIOSVIEW_API int heliosview_window_is_fullscreen(const heliosview_window_t* window);
+
+/* Enable (enabled != 0) or disable (enabled == 0) the window. A disabled window
+ * does not receive keyboard/mouse input and its children are locked — used for
+ * modal states. Disabling fires a WINDOW_DISABLED event, enabling a
+ * WINDOW_ENABLED one. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_set_enabled(heliosview_window_t* window, int enabled);
+
+/* Whether the window is enabled. 1 = enabled, 0 = disabled / not created. */
+HELIOSVIEW_API int heliosview_window_is_enabled(const heliosview_window_t* window);
+
+/* ================= Session end (shutdown / logoff) =================
+ *
+ * OS session-end (WM_QUERYENDSESSION: system shutdown, restart, or logoff).
+ * The registered callback runs synchronously on the message-loop thread before
+ * the session ends, giving the app a chance to save state; return non-zero to
+ * veto the shutdown (zero = allow). At most one callback: setting a new one
+ * replaces the previous. */
+typedef int (*heliosview_session_end_cb)(void* userdata);
+
+/* Register the session-end callback (NULL = unregister). Returns 0. */
+HELIOSVIEW_API int heliosview_set_session_end_callback(heliosview_session_end_cb callback,
+                                                       void* userdata);
 
 /* Make the process per-monitor DPI aware (v2). Call once, before any window is
  * created. Returns 0 on success, negative if already set or unsupported. */

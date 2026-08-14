@@ -14,6 +14,10 @@ int main()
     helios::Window window(800, 600, "HeliosView Demo");
     window.show();
 
+    // Size constraints: keep the window between 400x300 and 1200x900 (client).
+    window.setMinimumSize(400, 300);
+    window.setMaximumSize(1200, 900);
+
     // Frameless window with a custom title bar: register a drag region so the
     // top strip moves the window (like a native title bar). Keys toggle the
     // remaining window state.
@@ -90,6 +94,15 @@ int main()
         case helios::KeyCode::F4:
             window.setResizable(window.state() != helios::ShowState::Maximized);
             break;
+        case helios::KeyCode::F5:
+            window.setFullscreen(!window.isFullscreen());
+            break;
+        case helios::KeyCode::F6:
+            window.flash(); /* background-task-finished hint */
+            break;
+        case helios::KeyCode::F7:
+            window.setEnabled(!window.isEnabled()); /* modal lock */
+            break;
         default:
             break;
         }
@@ -97,6 +110,15 @@ int main()
 
     window.focused.connect([] { std::printf("[win] focus gained\n"); });
     window.blurred.connect([] { std::printf("[win] focus lost\n"); });
+    window.moved.connect([](int32_t x, int32_t y) {
+        std::printf("[win] moved to %d, %d\n", x, y);
+    });
+    window.sizing.connect([](int32_t w, int32_t h) {
+        std::printf("[win] sizing %d x %d\n", w, h);
+    });
+    window.enabledChanged.connect([](bool on) {
+        std::printf("[win] enabled = %d\n", on);
+    });
     std::printf("[win] dpi = %u\n", window.dpi());
 
     window.mouseMoved.connect([](int32_t x, int32_t y) {
