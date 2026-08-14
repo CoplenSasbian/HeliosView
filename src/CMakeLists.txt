@@ -1,32 +1,19 @@
 add_library(HeliosView SHARED
-    heliosview.cpp
-    heliosview_http.cpp   # async HTTP client core (platform-neutral: URL/wire/parser/state machine)
+    heliosview.cpp   # platform-independent core: version, allocator, events, string codecs
 )
 
 # Platform backends: each platform adds its implementation files under
 # src/<platform>/. The cross-platform API lives in include/HeliosView/heliosview.h;
-# porting to another platform only requires rewriting these files (plus the
-# TLS backend the HTTP core drives through hv_tls_ops).
+# porting to another platform only requires rewriting these files.
 if(WIN32)
     target_sources(HeliosView PRIVATE
-        win32/heliosview_win32.cpp        # windows / message loop / native message translation / WebView2
-        win32/heliosview_io_win32.cpp     # IOCP thread pool + async TCP/file I/O
-        win32/heliosview_tls_win32.cpp    # SChannel (SSPI) TLS backend for the async HTTP client
+        win32/heliosview_win32.cpp      # windows / message loop / native message translation / WebView2 / dialogs
+        win32/heliosview_notify_win32.cpp # OS toast notifications (WinRT via the Windows SDK)
     )
-    # This backend's OS system libraries (Winsock, SChannel/SSPI, CertStore,
-    # user32/shell/COM) come through the platform macro so the "which libraries a
-    # platform needs" lives in one place (cmake/PlatformLibs.cmake). It links:
-    #   ws2_32 crypt32 secur32 user32 shell32 ole32
+    # This backend's OS system libraries (user32, shell32, ole32, dwmapi,
+    # runtimeobject, propsys) come through the platform macro so the "which
+    # libraries a platform needs" lives in one place (cmake/PlatformLibs.cmake).
     heliosview_link_platform_system_libs(HeliosView)
-
-    # Third-party, non-OS deps: http-parser (vendored) is the only compiled
-    # dependency the DLL needs. The WebView2 bridge envelope parsing is a
-    # hand-rolled lightweight scanner (see heliosview_win32.cpp), so the C
-    # library has no nlohmann dependency -- nlohmann is only needed by the C++
-    # Core headers (HeliosView::Core, for Http.h / WebViewJson.h).
-    target_link_libraries(HeliosView PRIVATE
-        http_parser
-    )
 
     # WebView2 SDK: header-only interface target populated at configure time
     # (see the top-level CMakeLists.txt), linking the WebView2Loader import lib.
@@ -61,6 +48,6 @@ set_target_properties(HeliosView PROPERTIES
 )
 
 target_compile_options(HeliosView PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
 )

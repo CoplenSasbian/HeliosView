@@ -10,8 +10,8 @@
  *
  * Usage (from the README):
  *   helios::Menu menu(window.nativeHandle());
- *   helios::Menu::Item* show = menu.addItem(L"Show / Restore");
- *   helios::Menu::Item* quit = menu.addItem(L"Quit");
+ *   helios::Menu::Item* show = menu.addItem("Show / Restore");
+ *   helios::Menu::Item* quit = menu.addItem("Quit");
  *   menu.addSeparator();
  *   show->triggered.connect([&] { window.showNormal(); });
  *   quit->triggered.connect([&] { app.quit(); });
@@ -63,8 +63,8 @@ public:
     // True when the menu was created successfully
     bool valid() const { return m_menu != nullptr; }
 
-    // Add a text item; returns its Item (owned by this menu). nullptr on failure.
-    Item* addItem(const wchar_t* text)
+    // Add a text item (UTF-8); returns its Item (owned by this menu). nullptr on failure.
+    Item* addItem(const char* text)
     {
         uint32_t id = 0;
         if (heliosview_menu_add_item(m_menu, text, &id) != 0)
@@ -81,7 +81,7 @@ public:
     // The submenu stays alive (and its sink keeps routing MENU_SELECT events)
     // while this menu lives; only the C-layer handle is handed to the parent
     // (destroying the parent destroys the submenu's handle).
-    Menu* addSubmenu(const wchar_t* text)
+    Menu* addSubmenu(const char* text)
     {
         auto submenu = std::make_unique<Menu>(m_window);
         if (!submenu->valid() ||

@@ -27,7 +27,7 @@ class WebViewWindow : public Window {
 public:
     // Construct a window (see Window's constructor); the WebView is created
     // separately via createWebView().
-    WebViewWindow(int width, int height, const wchar_t* title,
+    WebViewWindow(int width, int height, const char* title,
                   WindowStyle style = WindowStyle::Normal)
         : Window(width, height, title, style)
     {

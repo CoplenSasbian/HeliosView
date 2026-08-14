@@ -15,11 +15,30 @@
  *   - Windows are opaque handles of type heliosview_window_t*
  *   - Keycodes and mouse buttons are uniformly mapped to platform-independent enums
  *
+ * Strings: every string parameter and result is UTF-8 (const char*). The two-phase
+ * codecs below (heliosview_utf8_to_wide / wide_to_utf8) convert between UTF-8 and
+ * wchar_t for consumers that must interop with a platform's wide-char APIs.
+ *
  * Event model:
  *   - heliosview_run runs the message loop, converting native messages via a
  *     (registerable) conversion delegate into queued heliosview_event_t events
  *   - heliosview_poll / heliosview_wait dequeue events from the queue
  *   - heliosview_post_event posts events from any thread
+ *
+ * Threading model:
+ *   All window / WebView / tray / menu / dialog / event-queue APIs must be called
+ *   on the message-loop thread -- the thread running heliosview_run (in C++, the
+ *   App::exec thread). Calling them from another thread is undefined behavior.
+ *
+ *   The exceptions (safe from any thread):
+ *     - heliosview_post_event / heliosview_wake_loop / heliosview_quit
+ *     - heliosview_webview_resolve / _reject / _broadcast (marshalled internally)
+ *     - heliosview_notification_init / _show (OS toasts are thread-agnostic)
+ *     - heliosview_free (and the allocator, set before any other call)
+ *
+ *   To return to the message-loop thread from a worker thread, post an event
+ *   (heliosview_post_event) or wake the loop (heliosview_wake_loop); the C++
+ *   wrapper provides App::postTask for this.
  *
  * C++ users should include <HeliosViewCore/HeliosView.h> (the HeliosView.Core wrapper).
  */
@@ -41,7 +60,7 @@ HELIOSVIEW_API const char* heliosview_version(void);
 /* ================= Memory allocation =================
  *
  * The library allocates its internal objects (windows, webviews, WebView2
- * callback stubs, I/O operations, ...) through a configurable allocator, so a
+ * callback stubs, dialog results, ...) through a configurable allocator, so a
  * C app can supply its own memory management (e.g. a pool or arena) instead of
  * the process heap. Defaults to the standard allocator (malloc / free).
  *
@@ -62,12 +81,18 @@ typedef struct heliosview_allocator {
 /* Set the default allocator (NULL restores malloc/free). Not thread-safe while allocations are live. */
 HELIOSVIEW_API void heliosview_set_allocator(const heliosview_allocator_t* allocator);
 
+/* Free memory the library allocated (paths from the dialog APIs, clipboard text,
+ * ...). Always pair a library-returned pointer with this, never the platform's
+ * free(): the library may allocate through its configured allocator, and freeing
+ * across CRT boundaries on Windows is undefined. NULL is ignored. Thread-safe. */
+HELIOSVIEW_API void heliosview_free(void* ptr);
+
 /* ================= String conversion (UTF-8 <-> UTF-16) =================
  *
- * Two-phase codecs for the library's wchar_t-based string APIs (window titles,
- * tray tooltips, folder paths, ...). On Windows wchar_t is UTF-16; on platforms
- * where wchar_t is 32-bit (Linux) the conversion is UTF-8 <-> wchar_t's native
- * encoding (UTF-32).
+ * Two-phase codecs for consumers that need to convert the library's UTF-8
+ * strings to/from wchar_t (on Windows wchar_t is UTF-16; on platforms where
+ * wchar_t is 32-bit the conversion is UTF-8 <-> wchar_t's native encoding).
+ * The library itself stores UTF-8 and converts internally at platform boundaries.
  *
  * Call each function twice to convert without an intermediate buffer:
  *   size_t n = heliosview_utf8_to_wide(utf8, utf8_len, nullptr);  // required wchar_t count (incl. NUL), 0 = failure
@@ -94,7 +119,7 @@ HELIOSVIEW_API size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_l
 typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_QUIT = 1,          /* Quit request (posted via heliosview_post_event) */
     HELIOSVIEW_EVENT_WINDOW_CLOSE,      /* Window close request (user clicked X) */
-    HELIOSVIEW_EVENT_WINDOW_RESIZE,     
+    HELIOSVIEW_EVENT_WINDOW_RESIZE,
     HELIOSVIEW_EVENT_KEY_DOWN,
     HELIOSVIEW_EVENT_KEY_UP,
     HELIOSVIEW_EVENT_MOUSE_MOVE,
@@ -173,9 +198,10 @@ typedef enum heliosview_mouse_button {
     HELIOSVIEW_MOUSE_MIDDLE
 } heliosview_mouse_button_t;
 
-/* Event: flat POD, safe to pass across the DLL boundary */
+/* Event: flat POD, safe to pass across the DLL boundary. The struct layout is
+ * fixed for the 1.x series: new event data is added only at a major version. */
 typedef struct heliosview_event {
-    heliosview_event_type_t type;            
+    heliosview_event_type_t type;
     int32_t window_id;                       /* window id of the event's origin (0 = not window-related) */
     int64_t timestamp_ms;                    /* milliseconds since library initialization */
     int32_t x;                               /* mouse X (window client area) */
@@ -263,12 +289,12 @@ typedef enum heliosview_window_style {
  * caller (the C++ wrapper stores an object pointer) and retrieved via
  * heliosview_window_userdata. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_window_t* heliosview_window_create_ex(int width, int height,
-                                                                const wchar_t* title,
+                                                                const char* title, /* UTF-8 */
                                                                 heliosview_window_style_t style,
                                                                 void* userdata);
 
 /* Create a standard window (no user data) */
-HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int height, const wchar_t* title);
+HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int height, const char* title);
 
 /* Window user data (object pointer used for event dispatch) */
 HELIOSVIEW_API void* heliosview_window_userdata(const heliosview_window_t* window);
@@ -285,10 +311,13 @@ HELIOSVIEW_API void heliosview_window_destroy(heliosview_window_t* window);
 /* Create and show the native window: 0 = success, negative = error code */
 HELIOSVIEW_API int heliosview_window_show(heliosview_window_t* window);
 
+/* Hide the native window (keeps it alive; show()/show_state bring it back). 0 = success. */
+HELIOSVIEW_API int heliosview_window_hide(heliosview_window_t* window);
+
 typedef enum heliosview_show_state {
     HELIOSVIEW_SHOW_NORMAL = 0,     /* Normal (restore minimized/maximized) */
-    HELIOSVIEW_SHOW_MINIMIZED,      
-    HELIOSVIEW_SHOW_MAXIMIZED,      
+    HELIOSVIEW_SHOW_MINIMIZED,
+    HELIOSVIEW_SHOW_MAXIMIZED,
 } heliosview_show_state_t;
 
 /* Show the window in the given state: 0 = success, negative = error code */
@@ -308,6 +337,9 @@ HELIOSVIEW_API int heliosview_window_focus(heliosview_window_t* window);
 /* Whether the window is visible: 1 = visible, 0 = not visible / not created */
 HELIOSVIEW_API int heliosview_window_is_visible(const heliosview_window_t* window);
 
+/* Keep the window always on top (on != 0) or restore normal z-order (on == 0). 0 = success */
+HELIOSVIEW_API int heliosview_window_set_topmost(heliosview_window_t* window, int on);
+
 /* Set the window position (screen coordinates, top-left corner). 0 = success */
 HELIOSVIEW_API int heliosview_window_set_position(heliosview_window_t* window, int32_t x, int32_t y);
 
@@ -323,8 +355,8 @@ HELIOSVIEW_API int heliosview_window_set_size(heliosview_window_t* window,
 HELIOSVIEW_API int heliosview_window_size(const heliosview_window_t* window,
                                           int32_t* out_width, int32_t* out_height);
 
-/* Set the window title (wide chars; UTF-16 on Windows). 0 = success */
-HELIOSVIEW_API int heliosview_window_set_title(heliosview_window_t* window, const wchar_t* title);
+/* Set the window title (UTF-8). 0 = success */
+HELIOSVIEW_API int heliosview_window_set_title(heliosview_window_t* window, const char* title);
 
 /* Center the window on screen (current monitor's work area). 0 = success */
 HELIOSVIEW_API int heliosview_window_center(heliosview_window_t* window);
@@ -332,8 +364,58 @@ HELIOSVIEW_API int heliosview_window_center(heliosview_window_t* window);
 /* Set the window opacity (0.0 fully transparent to 1.0 opaque). 0 = success */
 HELIOSVIEW_API int heliosview_window_set_opacity(heliosview_window_t* window, float opacity);
 
+/* Replace the window's icon (loaded from an .ico/.cur file path, UTF-8);
+ * NULL restores the default application icon. 0 = success. */
+HELIOSVIEW_API int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_path);
+
 /* Window id (source of window_id in events) */
 HELIOSVIEW_API int32_t heliosview_window_id(const heliosview_window_t* window);
+
+/* ================= Taskbar progress =================
+ *
+ * A taskbar progress indicator attached to a window (Win32: ITaskbarList3).
+ * Set a determinate value with heliosview_window_set_progress, change its
+ * visual state (indeterminate / paused / error) with
+ * heliosview_window_set_progress_state, and remove it with
+ * heliosview_window_clear_progress. Message-loop thread. */
+
+typedef enum heliosview_progress_state {
+    HELIOSVIEW_PROGRESS_NONE = 0,        /* no progress indicator (== clear) */
+    HELIOSVIEW_PROGRESS_NORMAL,          /* determinate, value/max */
+    HELIOSVIEW_PROGRESS_INDETERMINATE,   /* animated, no value */
+    HELIOSVIEW_PROGRESS_ERROR,           /* determinate, red */
+    HELIOSVIEW_PROGRESS_PAUSED,          /* determinate, yellow */
+} heliosview_progress_state_t;
+
+/* Show a determinate progress (value of max; clamped). 0 = success, negative = error */
+HELIOSVIEW_API int heliosview_window_set_progress(heliosview_window_t* window,
+                                                  uint32_t value, uint32_t max);
+
+/* Set only the progress visual state. 0 = success */
+HELIOSVIEW_API int heliosview_window_set_progress_state(heliosview_window_t* window,
+                                                        heliosview_progress_state_t state);
+
+/* Remove the progress indicator. 0 = success */
+HELIOSVIEW_API int heliosview_window_clear_progress(heliosview_window_t* window);
+
+/* ================= Window backdrop & dark mode (Win11 DWM) =================
+ *
+ * Applies a system backdrop to the window (Mica / Acrylic) and toggles the
+ * immersive dark-mode title bar. Available on Win11; on unsupported systems the
+ * functions return a negative error code (the window is left unchanged). */
+
+typedef enum heliosview_backdrop {
+    HELIOSVIEW_BACKDROP_NONE = 0,  /* default (opaque) background */
+    HELIOSVIEW_BACKDROP_MICA,      /* Mica material */
+    HELIOSVIEW_BACKDROP_ACRYLIC,   /* Acrylic material */
+} heliosview_backdrop_t;
+
+/* Apply a system backdrop. 0 = success, negative = unsupported/failure */
+HELIOSVIEW_API int heliosview_window_set_backdrop(heliosview_window_t* window,
+                                                  heliosview_backdrop_t backdrop);
+
+/* Toggle the immersive dark-mode title bar (on != 0 = dark). 0 = success */
+HELIOSVIEW_API int heliosview_window_set_dark_mode(heliosview_window_t* window, int on);
 
 /* ================= Window routing registry =================
  *
@@ -365,32 +447,52 @@ HELIOSVIEW_API int heliosview_window_remove_item(heliosview_window_t* window, ui
  * Note: the target window must already be created (shown) before creating a tray
  * on it, because the tray posts its callback messages to the window's HWND.
  *
- * The icon is loaded from a .ico/.cur/etc. file path (UTF-16 on Windows); pass
- * NULL to use the default application icon. Destroy the tray before destroying
- * its window (destroying the window destroys any trays attached to it).
+ * The icon is loaded from a .ico/.cur/etc. file path (UTF-8); pass NULL to use
+ * the default application icon. Destroy the tray before destroying its window
+ * (destroying the window destroys any trays attached to it).
  */
 
 typedef struct heliosview_tray heliosview_tray_t;
 
 /* Create and show a tray icon attached to `window` with the given tooltip
- * (UTF-16) and icon file path (NULL = default icon). `userdata` is caller data
+ * (UTF-8) and icon file path (NULL = default icon). `userdata` is caller data
  * (e.g. a C++ Tray object) copied verbatim into the TRAY_* events this tray
  * produces. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window,
-                                                         const wchar_t* tooltip,
-                                                         const wchar_t* icon_path,
+                                                         const char* tooltip,
+                                                         const char* icon_path,
                                                          void* userdata);
 
 /* Update the tray tooltip. 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const wchar_t* tooltip);
+HELIOSVIEW_API int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const char* tooltip);
 
 /* Replace the tray icon, loaded from an icon file path (NULL = default icon).
  * 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_tray_set_icon(heliosview_tray_t* tray, const wchar_t* icon_path);
+HELIOSVIEW_API int heliosview_tray_set_icon(heliosview_tray_t* tray, const char* icon_path);
 
 /* Remove the tray icon and free the tray handle. Also called automatically when
  * the owning window is destroyed. */
 HELIOSVIEW_API void heliosview_tray_destroy(heliosview_tray_t* tray);
+
+/* ================= Tray balloon notification =================
+ *
+ * A classic balloon popup next to the tray icon. Unlike the toast API (which
+ * requires an AppUserModelID + Start Menu shortcut, see Notification below),
+ * a balloon always works, needs no setup, and is tied to this tray. Message-loop
+ * thread. */
+
+typedef enum heliosview_tray_notify_icon {
+    HELIOSVIEW_TRAY_NOTIFY_NONE = 0,
+    HELIOSVIEW_TRAY_NOTIFY_INFO,
+    HELIOSVIEW_TRAY_NOTIFY_WARNING,
+    HELIOSVIEW_TRAY_NOTIFY_ERROR,
+} heliosview_tray_notify_icon_t;
+
+/* Show a balloon (title/message are UTF-8; timeout_ms in milliseconds, 0 = default). 0 = success */
+HELIOSVIEW_API int heliosview_tray_notify(heliosview_tray_t* tray, const char* title,
+                                          const char* message,
+                                          heliosview_tray_notify_icon_t icon_type,
+                                          uint32_t timeout_ms);
 
 /* ================= Menu (popup / context menu) =================
  *
@@ -421,7 +523,7 @@ HELIOSVIEW_API void heliosview_menu_destroy(heliosview_menu_t* menu);
 
 /* Add a text item; its unique id is written to out_id (NULL = ignore).
  * 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_menu_add_item(heliosview_menu_t* menu, const wchar_t* text,
+HELIOSVIEW_API int heliosview_menu_add_item(heliosview_menu_t* menu, const char* text,
                                             uint32_t* out_id);
 
 /* Add a separator. 0 = success, negative = error code. */
@@ -429,7 +531,7 @@ HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);
 
 /* Add `submenu` as a submenu under `text`. The parent takes ownership of the
  * submenu. 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const wchar_t* text,
+HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
                                                heliosview_menu_t* submenu);
 
 /* Show the menu at the current cursor position, owned by `window` (its HWND
@@ -632,294 +734,101 @@ HELIOSVIEW_API int heliosview_webview_map_local_folder(heliosview_webview_t* web
                                                        const char* host_name,
                                                        const char* folder_path);
 
-/* ================= Folder selection dialog ================= */
+/* ================= Native dialogs =================
+ *
+ * All dialogs are modal and must be called on the message-loop thread. They take
+ * an optional parent window (NULL = unparented). A selected path is returned as
+ * a UTF-8 string allocated by the library; free it with heliosview_free. Return
+ * values: 1 = a result was produced, 0 = cancelled, negative = error. */
 
-/* Open a native folder-picker dialog (modal, parented to `window`, which may be
- * NULL for an unparented dialog). On success returns 1 and writes the selected
- * folder's absolute path (UTF-8) into out_path (caller-freed via free()); 0 =
- * cancelled; negative = error. Must be called on the message-loop thread. */
+/* Folder picker. On success (1) out_path receives the selected folder (heliosview_free). */
 HELIOSVIEW_API int heliosview_select_folder(heliosview_window_t* window,
                                             const char* title,
                                             char** out_path);
 
-/* ================= Async I/O (background thread pool + platform multiplexer) =================
+/* Open-file dialog. `filter` uses the "Name1 (*.ext)|*.ext|Name2|..." format
+ * (NULL = "All files (*.*)|*.*"); `multi` != 0 enables multi-selection. On
+ * success (n > 0) out_paths receives a NULL-terminated array of n UTF-8 paths
+ * (each string and the array itself are freed with heliosview_free, or in one
+ * call with heliosview_free_paths). 0 = cancelled, negative = error. */
+HELIOSVIEW_API int heliosview_open_files(heliosview_window_t* window, const char* title,
+                                         const char* filter, int multi, char*** out_paths);
+
+/* Free a path array returned by heliosview_open_files (each string and the array). NULL is ignored. */
+HELIOSVIEW_API void heliosview_free_paths(char** paths);
+
+/* Save-file dialog. On success (1) out_path receives the chosen path (heliosview_free). */
+HELIOSVIEW_API int heliosview_save_file(heliosview_window_t* window, const char* title,
+                                        const char* filter, const char* default_name,
+                                        char** out_path);
+
+/* ================= Message box ================= */
+
+typedef enum heliosview_message_type {
+    HELIOSVIEW_MESSAGE_INFO = 1,
+    HELIOSVIEW_MESSAGE_WARNING,
+    HELIOSVIEW_MESSAGE_ERROR,
+    HELIOSVIEW_MESSAGE_QUESTION,
+} heliosview_message_type_t;
+
+typedef enum heliosview_message_buttons {
+    HELIOSVIEW_MESSAGE_OK = 1,
+    HELIOSVIEW_MESSAGE_OK_CANCEL,
+    HELIOSVIEW_MESSAGE_YES_NO,
+    HELIOSVIEW_MESSAGE_YES_NO_CANCEL,
+    HELIOSVIEW_MESSAGE_RETRY_CANCEL,
+} heliosview_message_buttons_t;
+
+typedef enum heliosview_message_result {
+    HELIOSVIEW_MESSAGE_RESULT_NONE = 0,
+    HELIOSVIEW_MESSAGE_RESULT_OK,
+    HELIOSVIEW_MESSAGE_RESULT_CANCEL,
+    HELIOSVIEW_MESSAGE_RESULT_YES,
+    HELIOSVIEW_MESSAGE_RESULT_NO,
+    HELIOSVIEW_MESSAGE_RESULT_RETRY,
+} heliosview_message_result_t;
+
+/* Show a modal message box. Returns the button the user pressed
+ * (HELIOSVIEW_MESSAGE_RESULT_NONE = failure). Message-loop thread. */
+HELIOSVIEW_API int heliosview_message_box(heliosview_window_t* window,
+                                          heliosview_message_type_t type,
+                                          heliosview_message_buttons_t buttons,
+                                          const char* title, const char* message);
+
+/* ================= System helpers ================= */
+
+/* Open a URL in the default browser. 0 = success, negative = error. Message-loop thread. */
+HELIOSVIEW_API int heliosview_open_url(const char* url);
+
+/* Reveal a file/folder in Explorer, selecting it. 0 = success. Message-loop thread. */
+HELIOSVIEW_API int heliosview_show_in_folder(const char* path);
+
+/* Copy UTF-8 text to the clipboard. 0 = success. Message-loop thread. */
+HELIOSVIEW_API int heliosview_clipboard_set_text(const char* text);
+
+/* Read UTF-8 clipboard text: 1 = text written to out (heliosview_free), 0 = no
+ * text, negative = error. Message-loop thread. */
+HELIOSVIEW_API int heliosview_clipboard_get_text(char** out);
+
+/* ================= Notifications (OS toast) =================
  *
- * Cross-platform design: these APIs are platform-neutral; each platform just
- * implements the corresponding .cpp (the Windows implementation is based on
- * IOCP, see src/win32/heliosview_io_win32.cpp).
+ * Modern OS notifications (Win32: Windows toast). Unlike every other API in this
+ * header, these functions are thread-agnostic: they may be called from any
+ * thread (e.g. a worker reporting that a background task finished).
  *
- * Thread model: all callbacks run on background worker threads (may run
- * concurrently); shared state must be synchronized by the caller.
- * Error codes: 0 = success; negative = failure (negated platform error code).
- * Buffer lifetime:
- *   - tcp_write / file_write data must stay valid until the callback fires (the C++ layer copies it)
- *   - file_read buf must stay valid until the callback fires
- *   - once the callback fires, the operation is complete; no further callbacks
+ * Setup: heliosview_notification_init registers an AppUserModelID and installs a
+ * Start Menu shortcut carrying it (unpackaged Win32 apps need both for toasts).
+ * app_user_model_id may be NULL, in which case it is derived from the exe file
+ * name. Call it once, typically at startup. It is safe to call again later.
  */
 
-typedef struct heliosview_loop heliosview_loop_t;
-typedef struct heliosview_socket heliosview_socket_t;
-typedef struct heliosview_file heliosview_file_t;
-typedef struct heliosview_timer heliosview_timer_t;
+/* Initialize the notification backend. Returns 0 on success, negative on failure
+ * (e.g. no Windows). Thread-safe (first call initializes). */
+HELIOSVIEW_API int heliosview_notification_init(const char* app_user_model_id);
 
-/* Callback with no result (thread-pool tasks, etc.) */
-typedef void (*heliosview_completion_cb)(int error, void* userdata);
-/* Transfer callback (with byte count) */
-typedef void (*heliosview_transfer_cb)(int error, uint32_t bytes, void* userdata);
-/* Streaming read callback: data is valid only during the callback; error=0 with
- * len=0 means the peer closed; error=HELIOSVIEW_IO_CANCELLED means the read was
- * stopped/cancelled. Exactly one terminal callback (EOF / error / cancelled) fires
- * per streaming read. */
-typedef void (*heliosview_read_cb)(int error, const char* data, uint32_t len, void* userdata);
-/* Connect callback: tcp is valid when error=0 (the caller closes it after success) */
-typedef void (*heliosview_socket_connect_cb)(int error, heliosview_socket_t* tcp, void* userdata);
-/* Open callback: file is valid when error=0 */
-typedef void (*heliosview_file_open_cb)(int error, heliosview_file_t* file, void* userdata);
-
-/* Error code delivered by a read callback when the streaming read was cancelled
- * (heliosview_socket_read_stop / heliosview_socket_close). It is the read's terminal
- * callback: error = HELIOSVIEW_IO_CANCELLED, data = NULL, len = 0. */
-#define HELIOSVIEW_IO_CANCELLED (-995) /* ERROR_OPERATION_ABORTED */
-
-/* ---- Thread pool + multiplexer ---- */
-
-/* Create: start background worker threads (0 = hardware concurrency). Returns NULL on failure. */
-HELIOSVIEW_API heliosview_loop_t* heliosview_loop_create(unsigned thread_count);
-
-/* Destroy: stop and wait for the worker threads to exit. Ensure no operations are pending before calling. */
-HELIOSVIEW_API void heliosview_loop_destroy(heliosview_loop_t* loop);
-
-/* Block the calling thread until heliosview_loop_stop. 0 = normal. */
-HELIOSVIEW_API int heliosview_loop_run(heliosview_loop_t* loop);
-
-/* Request stop (worker threads exit after finishing posted tasks) */
-HELIOSVIEW_API void heliosview_loop_stop(heliosview_loop_t* loop);
-
-/* Post a task to the thread pool: fn runs on a worker thread (error is always 0) */
-HELIOSVIEW_API int heliosview_loop_post(heliosview_loop_t* loop, heliosview_completion_cb fn, void* userdata);
-
-/* ---- One-shot timers ----
- *
- * A timer fires its callback exactly once, delay_ms after creation, on a loop
- * worker thread (the same thread model as heliosview_loop_post). All timers of
- * a loop are tracked by a single internal timer thread (a min-heap of
- * deadlines), so pending timers occupy no worker thread and creating one never
- * blocks the caller.
- *
- * Ownership: the returned handle is caller-owned; destroy it exactly once with
- * heliosview_timer_destroy — either while the timer is still pending (the
- * callback then never fires) or after it fired. Destroying is safe from any
- * thread and never blocks. When the loop is stopped (heliosview_loop_stop), all
- * still-pending timers are cancelled and destroyed automatically: their
- * callbacks never fire and the handles become invalid (do not use them).
- */
-
-/* Create a one-shot timer: cb(userdata) runs on a worker thread after delay_ms
- * (0 = as soon as the timer thread can fire it). Returns NULL on failure
- * (invalid arguments / OOM). */
-HELIOSVIEW_API heliosview_timer_t* heliosview_timer_create(heliosview_loop_t* loop,
-                                                           uint32_t delay_ms,
-                                                           heliosview_completion_cb cb,
-                                                           void* userdata);
-
-/* Destroy a timer handle (exactly once). Returns:
- *   0  -> destroyed while still pending; the callback will NOT fire
- *   1  -> it had already fired; the callback fires (or is firing) on a worker
- *         thread, and the caller must not rely on it being skipped
- *  -1  -> NULL handle. */
-HELIOSVIEW_API int heliosview_timer_destroy(heliosview_timer_t* timer);
-
-/* ---- Async TCP client ---- */
-
-HELIOSVIEW_API int heliosview_socket_connect(heliosview_loop_t* loop, const char* host, uint16_t port,
-                                          heliosview_socket_connect_cb on_connect, void* userdata);
-HELIOSVIEW_API int heliosview_socket_write(heliosview_socket_t* tcp, const void* data, uint32_t len,
-                                        heliosview_transfer_cb on_write, void* userdata);
-/* Start streaming read: callback once per chunk and auto-resume until EOF/error/read_stop */
-HELIOSVIEW_API int heliosview_socket_read_start(heliosview_socket_t* tcp, heliosview_read_cb on_read, void* userdata);
-/* Stop reading: cancels the pending read; the read callback then fires exactly
- * once with error = HELIOSVIEW_IO_CANCELLED (its terminal callback). Reading may
- * be restarted afterwards with heliosview_socket_read_start. */
-HELIOSVIEW_API void heliosview_socket_read_stop(heliosview_socket_t* tcp);
-/* Close the connection (pending writes complete with an error callback; a pending
- * read completes with HELIOSVIEW_IO_CANCELLED). Do not use the handle after closing. */
-HELIOSVIEW_API void heliosview_socket_close(heliosview_socket_t* tcp);
-
-/* ---- Async file ---- */
-
-/* write_mode != 0: create/truncate for writing; otherwise open an existing file read-only */
-HELIOSVIEW_API int heliosview_file_open(heliosview_loop_t* loop, const char* path, int write_mode,
-                                        heliosview_file_open_cb on_open, void* userdata);
-HELIOSVIEW_API int heliosview_file_read(heliosview_file_t* file, void* buf, uint32_t len, int64_t offset,
-                                        heliosview_transfer_cb on_read, void* userdata);
-HELIOSVIEW_API int heliosview_file_write(heliosview_file_t* file, const void* buf, uint32_t len, int64_t offset,
-                                         heliosview_transfer_cb on_write, void* userdata);
-HELIOSVIEW_API void heliosview_file_close(heliosview_file_t* file);
-
-/* ================= Async HTTP client =================
- *
- * A client-style async HTTP/1.1 client (GET/POST/...). A heliosview_http_client_t
- * is bound to a loop and owns a TLS credential; requests are issued from
- * the client and share its resources. Each request uses its own connection
- * (sent with "Connection: close"): there is no keep-alive or connection
- * pooling, so every exchange pays DNS + TCP (+ TLS) setup in full.
- *
- * Transport: plain http:// and https:// are both supported. HTTPS is implemented
- * with the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on Linux);
- * server certificates are validated against the platform's trust store with a
- * hostname check. DNS resolution + TCP connect + reads/writes go through
- * the loop's async socket layer (heliosview_socket_*); the response is parsed
- * with http-parser. Nothing blocks a caller thread: the exchange is a
- * callback-driven state machine running on the loop's worker threads, and
- * request timeouts are tracked by the loop's timer service
- * (heliosview_timer_create) instead of a polling thread.
- *
- * Headers: request and response headers use a heliosview_http_headers_t collection
- * (create / add / set / remove / clear, see below). Response headers are
- * de-duplicated by name (the last value wins) -- note this collapses legitimate
- * duplicates such as multiple Set-Cookie headers into a single value. Request
- * headers are emitted as given (the caller controls order and duplicates); do not
- * set Host or Content-Length yourself (the client generates them).
- *
- * URL: scheme must be http:// or https:// (default ports 80 / 443); the URL may
- * include a path and query string. Host + optional non-default port are parsed
- * from the authority. Not supported: IPv6 literal hosts ([::1]), userinfo
- * (user:pass@host), and URL fragments (#... is not stripped). Redirects (3xx)
- * are delivered as responses; the client does not follow them.
- *
- * Response delivery (callback contract):
- *   error == 0 -> transport + HTTP exchange succeeded; response.status_code is the
- *                 HTTP status; response.headers / response.body are populated.
- *   error != 0 -> transport / protocol / TLS failure; response is unspecified.
- *   The callback fires exactly once, from a loop worker thread (may run
- *   concurrently with other callbacks). The response body is buffered in full
- *   before the callback; there is no size cap. Exceptions must not escape the
- *   callback (it crosses the DLL boundary). All pointers inside response are owned
- *   by the request and valid only during the callback.
- *
- * Lifetime: the returned request handle is caller-owned; destroy it with
- * heliosview_http_request_destroy() after the callback fires.
- * heliosview_http_request_cancel() may be called before the callback (the
- * callback then fires promptly with HELIOSVIEW_HTTP_CANCELLED). The client must
- * outlive every in-flight request; destroy it only when none are pending.
- */
-
-typedef struct heliosview_http_client  heliosview_http_client_t;
-typedef struct heliosview_http_request heliosview_http_request_t;
-typedef struct heliosview_http_headers heliosview_http_headers_t;
-
-/* A header collection (opaque handle). The caller owns it and mutates it with the
- * heliosview_http_headers_* functions; pass it to heliosview_http_client_request.
- * The request copies the headers at submission time, so the handle may be reused
- * for more requests or destroyed right after the call. */
-
-/* Create an empty header collection. Returns NULL on failure. */
-HELIOSVIEW_API heliosview_http_headers_t* heliosview_http_headers_create(void);
-
-/* Destroy a header collection (NULL is ignored). */
-HELIOSVIEW_API void heliosview_http_headers_destroy(heliosview_http_headers_t* headers);
-
-/* Append a header (order preserved; duplicates kept as given). 0 = success. */
-HELIOSVIEW_API int heliosview_http_headers_add(heliosview_http_headers_t* headers,
-                                               const char* name, const char* value);
-
-/* Set a header: replace the value of the first header named `name`
- * (case-insensitive), or append it when absent. 0 = success. */
-HELIOSVIEW_API int heliosview_http_headers_set(heliosview_http_headers_t* headers,
-                                               const char* name, const char* value);
-
-/* Remove every header named `name` (case-insensitive). Returns the number
- * removed, or negative on error. */
-HELIOSVIEW_API int heliosview_http_headers_remove(heliosview_http_headers_t* headers,
-                                                  const char* name);
-
-/* Remove all headers. */
-HELIOSVIEW_API void heliosview_http_headers_clear(heliosview_http_headers_t* headers);
-
-/* Number of headers in the collection. */
-HELIOSVIEW_API size_t heliosview_http_headers_count(const heliosview_http_headers_t* headers);
-
-/* Header at `index` (0 <= index < count): writes its name/value (borrowed, into
- * the collection) to out_name/out_value. 0 = success, negative = out of range. */
-HELIOSVIEW_API int heliosview_http_headers_get(const heliosview_http_headers_t* headers,
-                                               size_t index,
-                                               const char** out_name, const char** out_value);
-
-/* Value of the first header named `name` (case-insensitive), or NULL when absent. */
-HELIOSVIEW_API const char* heliosview_http_headers_find(const heliosview_http_headers_t* headers,
-                                                        const char* name);
-
-/* Response: filled by the callback. All pointers are owned by the request and
- * valid only during the callback (headers is a borrowed collection: read it with
- * heliosview_http_headers_count / get / find). */
-typedef struct heliosview_http_response {
-    int status_code;                          /* HTTP status (e.g. 200); 0 on failure */
-    const heliosview_http_headers_t* headers; /* response headers (de-dup, last wins) */
-    const char* body;                         /* response body bytes (may be empty) */
-    size_t body_len;
-} heliosview_http_response_t;
-
-/* Response callback: fires exactly once, on a loop worker thread.
- * request: the handle returned by heliosview_http_client_request.
- * error: 0 on success, else a negative error code (see the section intro).
- * response: valid only during the callback; unspecified when error != 0.
- * userdata: the value passed to heliosview_http_client_request, unchanged. */
-typedef void (*heliosview_http_response_cb)(heliosview_http_request_t* request,
-                                            int error,
-                                            const heliosview_http_response_t* response,
-                                            void* userdata);
-
-/* Timeout error code delivered to the response callback (error == HELIOSVIEW_HTTP_TIMEOUT)
- * when a request does not complete within the client's timeout. */
-#define HELIOSVIEW_HTTP_TIMEOUT (-1002)
-
-/* Error code delivered to the response callback when the request was cancelled
- * with heliosview_http_request_cancel (error == HELIOSVIEW_HTTP_CANCELLED). */
-#define HELIOSVIEW_HTTP_CANCELLED (-1000)
-
-/* Create an HTTP client bound to `loop`. The client acquires a TLS credential
- * through the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on
- * Linux); it must be destroyed only after all its requests complete. Server
- * certificate validation happens per request, at handshake time, against the
- * platform's trust store. Returns NULL on failure (e.g. credential acquisition
- * failure). */
-HELIOSVIEW_API heliosview_http_client_t* heliosview_http_client_create(heliosview_loop_t* loop);
-
-/* Destroy the client and free its resources. Precondition: no request issued from
- * this client is still in flight (the last request's callback has fired). */
-HELIOSVIEW_API void heliosview_http_client_destroy(heliosview_http_client_t* client);
-
-/* Set the timeout for requests issued from this client (covers connect + the whole
- * request/response exchange). 0 (the default) = no timeout. The value in effect
- * at request submission time applies to that request (thread-safe, but set it
- * before issuing requests for predictable results); a request that exceeds it
- * completes with error == HELIOSVIEW_HTTP_TIMEOUT. */
-HELIOSVIEW_API void heliosview_http_client_set_timeout(heliosview_http_client_t* client,
-                                                       uint32_t timeout_ms);
-
-/* Start an async HTTP request on the client. Returns the request handle
- * (caller-owned; destroy with heliosview_http_request_destroy after the callback)
- * or NULL on immediate failure (invalid arguments / submission error).
- *
- * headers (may be NULL for none) is copied at submission time, so the caller may
- * destroy it as soon as this returns. body (may be NULL / length 0) is likewise
- * copied. */
-HELIOSVIEW_API heliosview_http_request_t* heliosview_http_client_request(
-    heliosview_http_client_t* client, const char* method, const char* url,
-    const heliosview_http_headers_t* headers,
-    const void* body, size_t body_len,
-    heliosview_http_response_cb on_response, void* userdata);
-
-/* Cancel a request: completes it immediately with error == HELIOSVIEW_HTTP_CANCELLED
- * (the underlying connection is closed, so the callback still fires exactly once).
- * The callback runs inline on the cancelling thread, before this returns.
- * 0 = accepted, negative = invalid handle or the request already completed.
- * Do not call from inside the response callback (it would deadlock). */
-HELIOSVIEW_API int heliosview_http_request_cancel(heliosview_http_request_t* request);
-
-/* Destroy the request handle. Call only after the callback fired (or after a
- * cancel returned 0 and no callback is in flight). */
-HELIOSVIEW_API void heliosview_http_request_destroy(heliosview_http_request_t* request);
+/* Show a toast with a title and body. Returns 0 on success, negative on failure
+ * (e.g. not initialized, or toasts unavailable). Thread-safe. */
+HELIOSVIEW_API int heliosview_notification_show(const char* title, const char* body);
 
 #ifdef __cplusplus
 }
