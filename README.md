@@ -341,20 +341,44 @@ functions are named and what keeps the internal envelope framing parseable. An
 invalid name is rejected at registration (C API returns `-2`; the C++ layer on
 top also refuses it).
 
-**Events, local resources, and native dialogs** — three additions for building
-real UI on top of the bridge:
+**Events, local resources, and native dialogs** — additions for building real UI
+on top of the bridge:
 
-- **`navigationCompleted`** — a signal on `WebViewWindow` that fires on the UI
-  thread when a page load completes (`error == 0`) or fails (negated platform
-  error code). The app can start initializing after the first successful load
-  and show an error state on failure:
+- **Navigation events** — four signals on `WebViewWindow`, all fired on the UI
+  thread:
 
-  ```cpp
-  window->navigationCompleted.connect([](int error) {
-      if (error == 0)
-          window->eval("app.bootstrap();");   // page ready for JS
-  });
-  ```
+  - **`navigationStarting`** — fires before a navigation begins (initial load,
+    links, `navigate()`, browser back/forward, redirects), carrying
+    `(uri, isRedirected, isUserInitiated)`. To **cancel** a navigation, set the
+    `navigationStartingGate` std::function, which returns `true` to veto (a
+    `Signal` cannot return a value):
+
+    ```cpp
+    window->navigationStarting.connect([](std::string uri, bool isRedirected, bool isUserInitiated) {
+        // spy without cancelling
+    });
+    // or connect a member function as a slot:
+    window->connectStarting(nav_info, this);
+
+    window->navigationStartingGate = [](const std::string& uri, bool isRedirected, bool) {
+        return uri.starts_with("https://external.example/");  // block external links
+    };
+    ```
+
+  - **`urlChanged`** — fires when the WebView's current URL changes
+    `(uri, isNewDocument)`. `isNewDocument` is true when the change comes from a
+    new document load vs an in-document change (`pushState`/fragment).
+  - **`titleChanged`** — fires when the page's `<title>` changes (`title`).
+  - **`navigationCompleted`** — fires when a page load completes (`error == 0`)
+    or fails (negated platform error code). Use it to know when the page is ready
+    for `eval()` or to show an error state:
+
+    ```cpp
+    window->navigationCompleted.connect([](int error) {
+        if (error == 0)
+            window->eval("app.bootstrap();");   // page ready for JS
+    });
+    ```
 
 - **`mapLocalFolder(host, folder)`** — serves a local folder over a virtual
   `https://<host>/` host so the page can load files that are not part of the
@@ -380,8 +404,11 @@ real UI on top of the bridge:
   });
   ```
 
-The underlying C API for all three is `heliosview_webview_set_navigation_callback`,
-`heliosview_webview_map_local_folder`, and `heliosview_select_folder`.
+The underlying C API for all of these is `heliosview_webview_set_navigation_callback`,
+`heliosview_webview_set_navigation_starting_callback`,
+`heliosview_webview_set_source_changed_callback`,
+`heliosview_webview_set_title_changed_callback`, `heliosview_webview_map_local_folder`,
+and `heliosview_select_folder`.
 
 > **Lifetime:** destroy the `WebViewWindow` only when no `bindJson` task or
 > `evalAsync` call is still in flight. The WebView must be destroyed before its
@@ -912,5 +939,6 @@ examples/                             the demo programs
 
 - More platforms behind the C ABI (Linux/macOS backends).
 - HTTP connection pooling / keep-alive, response size caps, redirect following.
-- More WebView events (`WebViewWindow` signals for URL changes / history).
+- More WebView events (history (back/forward) or page-load-initiated dialogs /
+  printing / context-menu events).
 - Install/package rules (`cmake --install`, CMake config files).

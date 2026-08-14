@@ -62,6 +62,33 @@ typedef struct heliosview_allocator {
 /* Set the default allocator (NULL restores malloc/free). Not thread-safe while allocations are live. */
 HELIOSVIEW_API void heliosview_set_allocator(const heliosview_allocator_t* allocator);
 
+/* ================= String conversion (UTF-8 <-> UTF-16) =================
+ *
+ * Two-phase codecs for the library's wchar_t-based string APIs (window titles,
+ * tray tooltips, folder paths, ...). On Windows wchar_t is UTF-16; on platforms
+ * where wchar_t is 32-bit (Linux) the conversion is UTF-8 <-> wchar_t's native
+ * encoding (UTF-32).
+ *
+ * Call each function twice to convert without an intermediate buffer:
+ *   size_t n = heliosview_utf8_to_wide(utf8, utf8_len, nullptr);  // required wchar_t count (incl. NUL), 0 = failure
+ *   wchar_t buf[n];
+ *   heliosview_utf8_to_wide(utf8, utf8_len, buf);                 // fills buf, NUL-terminated
+ *
+ * Input lengths are explicit; pass (size_t)-1 to read a NUL-terminated input.
+ * Return value: with a NULL output, the required element count INCLUDING the
+ * terminating NUL (0 = failure); with a non-NULL output, the element count
+ * written EXCLUDING the NUL (the buffer must hold at least the previously
+ * returned count). Invalid input sequences are replaced with U+FFFD.
+ */
+
+/* Convert UTF-8 bytes to wchar_t (see the two-phase contract above). */
+HELIOSVIEW_API size_t heliosview_utf8_to_wide(const char* utf8, size_t utf8_len,
+                                              wchar_t* out_wide);
+
+/* Convert wchar_t to UTF-8 bytes (see the two-phase contract above). */
+HELIOSVIEW_API size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_len,
+                                              char* out_utf8);
+
 /* ================= Events ================= */
 
 typedef enum heliosview_event_type {
@@ -530,6 +557,34 @@ HELIOSVIEW_API int heliosview_webview_unsubscribe(heliosview_webview_t* webview,
 
 /* ================= WebView events & local resources ================= */
 
+/* Callback for navigation-start events: fires on the UI thread when a new
+ * navigation begins (the initial load, links, programmatic navigate, browser
+ * back/forward, and redirects). uri is the target URI (UTF-8, valid for the
+ * duration of the call). is_redirected / is_user_initiated follow WebView2's
+ * NavigationStarting semantics (1/0). The callback's return value cancels the
+ * navigation when non-zero (0 = let it proceed). */
+typedef int (*heliosview_webview_navigation_starting_cb)(heliosview_webview_t* webview,
+                                                         const char* uri,
+                                                         int is_redirected,
+                                                         int is_user_initiated,
+                                                         void* userdata);
+
+/* Callback for source-changed (URL-changed) events: fires on the UI thread when
+ * the WebView's Source (current URL) property changes. uri is the new source URI
+ * (UTF-8, valid for the duration of the call); is_new_document is 1 when the
+ * source change is due to a new document load, 0 for an in-document change. */
+typedef void (*heliosview_webview_source_changed_cb)(heliosview_webview_t* webview,
+                                                     const char* uri,
+                                                     int is_new_document,
+                                                     void* userdata);
+
+/* Callback for document-title events: fires on the UI thread when the page's
+ * title changes. title is the new document title (UTF-8, valid for the duration
+ * of the call). */
+typedef void (*heliosview_webview_title_changed_cb)(heliosview_webview_t* webview,
+                                                    const char* title,
+                                                    void* userdata);
+
 /* Register a navigation-completed callback (replacing any previous one and
  * running its dtor). The callback fires on the UI thread when a navigation
  * completes or fails; it is not called for navigations that never finish
@@ -538,6 +593,34 @@ HELIOSVIEW_API int heliosview_webview_set_navigation_callback(heliosview_webview
                                                               heliosview_webview_navigation_cb callback,
                                                               void* userdata,
                                                               heliosview_webview_userdata_dtor dtor);
+
+/* Register a navigation-starting callback (replacing any previous one and
+ * running its dtor). Fires on the UI thread just before a navigation begins;
+ * returning non-zero cancels it (e.g. to block cross-origin or external links).
+ * UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_navigation_starting_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_navigation_starting_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
+
+/* Register a source-changed (URL-changed) callback (replacing any previous one
+ * and running its dtor). Fires on the UI thread whenever the WebView's current
+ * URL changes. UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_source_changed_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_source_changed_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
+
+/* Register a document-title-changed callback (replacing any previous one and
+ * running its dtor). Fires on the UI thread when the page title changes.
+ * UI-thread call (thread-safe: other threads are marshalled). */
+HELIOSVIEW_API int heliosview_webview_set_title_changed_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_title_changed_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
 
 /* Map a local folder to a virtual host name so the page can load files from it
  * via https://<host>/<relative-path>. Used to serve images or other local assets
@@ -676,15 +759,15 @@ HELIOSVIEW_API void heliosview_file_close(heliosview_file_t* file);
 /* ================= Async HTTP client =================
  *
  * A client-style async HTTP/1.1 client (GET/POST/...). A heliosview_http_client_t
- * is bound to a loop and owns an SChannel credential; requests are issued from
+ * is bound to a loop and owns a TLS credential; requests are issued from
  * the client and share its resources. Each request uses its own connection
  * (sent with "Connection: close"): there is no keep-alive or connection
  * pooling, so every exchange pays DNS + TCP (+ TLS) setup in full.
  *
  * Transport: plain http:// and https:// are both supported. HTTPS is implemented
- * with Windows SChannel (SSPI) -- no third-party TLS library, no vcpkg, no
- * OpenSSL; server certificates are validated against the Windows system store
- * with a hostname check. DNS resolution + TCP connect + reads/writes go through
+ * with the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on Linux);
+ * server certificates are validated against the platform's trust store with a
+ * hostname check. DNS resolution + TCP connect + reads/writes go through
  * the loop's async socket layer (heliosview_socket_*); the response is parsed
  * with http-parser. Nothing blocks a caller thread: the exchange is a
  * callback-driven state machine running on the loop's worker threads, and
@@ -794,11 +877,12 @@ typedef void (*heliosview_http_response_cb)(heliosview_http_request_t* request,
  * with heliosview_http_request_cancel (error == HELIOSVIEW_HTTP_CANCELLED). */
 #define HELIOSVIEW_HTTP_CANCELLED (-1000)
 
-/* Create an HTTP client bound to `loop`. The client acquires an SChannel
- * credential (Windows SSPI; no third-party TLS dependency); it must be destroyed
- * only after all its requests complete. Server certificate validation happens
- * per request, at handshake time, against the Windows system store. Returns
- * NULL on failure (e.g. credential acquisition failure). */
+/* Create an HTTP client bound to `loop`. The client acquires a TLS credential
+ * through the platform's TLS backend (SChannel/SSPI on Windows, OpenSSL on
+ * Linux); it must be destroyed only after all its requests complete. Server
+ * certificate validation happens per request, at handshake time, against the
+ * platform's trust store. Returns NULL on failure (e.g. credential acquisition
+ * failure). */
 HELIOSVIEW_API heliosview_http_client_t* heliosview_http_client_create(heliosview_loop_t* loop);
 
 /* Destroy the client and free its resources. Precondition: no request issued from

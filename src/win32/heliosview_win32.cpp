@@ -124,6 +124,24 @@ struct heliosview_webview {
     heliosview_webview_userdata_dtor nav_dtor = nullptr;
     EventRegistrationToken nav_token{};                /* NavigationCompleted handler */
 
+    /* navigation-starting callback (may veto); UI thread only */
+    heliosview_webview_navigation_starting_cb nav_start_cb = nullptr;
+    void* nav_start_userdata = nullptr;
+    heliosview_webview_userdata_dtor nav_start_dtor = nullptr;
+    EventRegistrationToken nav_start_token{};          /* NavigationStarting handler */
+
+    /* source-changed (URL-changed) callback; UI thread only */
+    heliosview_webview_source_changed_cb source_cb = nullptr;
+    void* source_userdata = nullptr;
+    heliosview_webview_userdata_dtor source_dtor = nullptr;
+    EventRegistrationToken source_token{};             /* SourceChanged handler */
+
+    /* document-title-changed callback; UI thread only */
+    heliosview_webview_title_changed_cb title_cb = nullptr;
+    void* title_userdata = nullptr;
+    heliosview_webview_userdata_dtor title_dtor = nullptr;
+    EventRegistrationToken title_token{};              /* DocumentTitleChanged handler (ICoreWebView2_2) */
+
     /* eval / eval_async queued while the WebView was still initializing */
     struct pending_op {
         std::string script;
@@ -418,6 +436,43 @@ struct navigation_completed_handler : com_callback_base<ICoreWebView2NavigationC
     STDMETHODIMP Invoke(ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) noexcept override
     {
         return m_fn(sender, args);
+    }
+    Fn m_fn;
+};
+
+/* Navigation starting: fires before a navigation begins; may cancel it (return
+ * nonzero from the registered callback) */
+struct navigation_starting_handler : com_callback_base<ICoreWebView2NavigationStartingEventHandler> {
+    using Fn = std::function<HRESULT(ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*)>;
+    explicit navigation_starting_handler(Fn fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP Invoke(ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* args) noexcept override
+    {
+        return m_fn(sender, args);
+    }
+    Fn m_fn;
+};
+
+/* Source changed (webview URL changed) */
+struct source_changed_handler : com_callback_base<ICoreWebView2SourceChangedEventHandler> {
+    using Fn = std::function<HRESULT(ICoreWebView2*, ICoreWebView2SourceChangedEventArgs*)>;
+    explicit source_changed_handler(Fn fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP Invoke(ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) noexcept override
+    {
+        return m_fn(sender, args);
+    }
+    Fn m_fn;
+};
+
+/* Document title changed (requires ICoreWebView2_2). The event args are passed as
+ * IUnknown* with no typed args interface; the title is read from the sender
+ * (ICoreWebView2::get_DocumentTitle) when the event fires. */
+struct title_changed_handler : com_callback_base<ICoreWebView2DocumentTitleChangedEventHandler> {
+    using Fn = std::function<HRESULT(ICoreWebView2*)>;
+    explicit title_changed_handler(Fn fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP Invoke(ICoreWebView2* sender, IUnknown* args) noexcept override
+    {
+        (void)args;
+        return m_fn(sender);
     }
     Fn m_fn;
 };
@@ -1377,6 +1432,80 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                     webview->webview->add_NavigationCompleted(nav_handler, &webview->nav_token);
                     nav_handler->Release();
 
+                    /* navigation starting: expose the target URI (and veto via the
+                     * callback's return value) before the navigation proceeds */
+                    auto* nav_start_handler = hv::hv_alloc<navigation_starting_handler>(
+                        [webview](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                            LPWSTR raw = nullptr;
+                            if (FAILED(args->get_Uri(&raw)) || !raw)
+                                return S_OK; /* no URI: let it proceed */
+                            const std::string uri = wide_to_utf8(raw);
+                            CoTaskMemFree(raw);
+                            /* IsUserInitiated lives on the args2 interface */
+                            BOOL user_initiated = FALSE;
+                            Microsoft::WRL::ComPtr<ICoreWebView2NavigationStartingEventArgs2> args2;
+                            BOOL is_redirected = FALSE;
+                            args->get_IsRedirected(&is_redirected);
+                            if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args2))))
+                                args2->get_IsUserInitiated(&user_initiated);
+                            const int veto = (webview->nav_start_cb)
+                                ? webview->nav_start_cb(webview, uri.c_str(),
+                                                        is_redirected ? 1 : 0,
+                                                        user_initiated ? 1 : 0,
+                                                        webview->nav_start_userdata)
+                                : 0;
+                            args->put_Cancel(veto != 0);
+                            return S_OK;
+                        });
+                    webview->webview->add_NavigationStarting(nav_start_handler, &webview->nav_start_token);
+                    nav_start_handler->Release();
+
+                    /* source changed: report the new current URL */
+                    auto* source_handler = hv::hv_alloc<source_changed_handler>(
+                        [webview](ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
+                            BOOL is_new_document = FALSE;
+                            args->get_IsNewDocument(&is_new_document);
+                            if (webview->source_cb) {
+                                LPWSTR raw = nullptr;
+                                if (sender && SUCCEEDED(sender->get_Source(&raw)) && raw) {
+                                    const std::string uri = wide_to_utf8(raw);
+                                    CoTaskMemFree(raw);
+                                    webview->source_cb(webview, uri.c_str(),
+                                                       is_new_document ? 1 : 0,
+                                                       webview->source_userdata);
+                                } else {
+                                    webview->source_cb(webview, "", is_new_document ? 1 : 0,
+                                                       webview->source_userdata);
+                                }
+                            }
+                            return S_OK;
+                        });
+                    webview->webview->add_SourceChanged(source_handler, &webview->source_token);
+                    source_handler->Release();
+
+                    /* document title: needs ICoreWebView2_2 (DocumentTitleChanged);
+                     * its args expose get_DocumentTitle */
+                    Microsoft::WRL::ComPtr<ICoreWebView2_2> webview2;
+                    if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview2)))) {
+                        auto* title_handler = hv::hv_alloc<title_changed_handler>(
+                            [webview](ICoreWebView2* sender) -> HRESULT {
+                                if (webview->title_cb) {
+                                    LPWSTR raw = nullptr;
+                                    if (sender && SUCCEEDED(sender->get_DocumentTitle(&raw)) && raw) {
+                                        const std::string title = wide_to_utf8(raw);
+                                        CoTaskMemFree(raw);
+                                        webview->title_cb(webview, title.c_str(),
+                                                          webview->title_userdata);
+                                    } else {
+                                        webview->title_cb(webview, "", webview->title_userdata);
+                                    }
+                                }
+                                return S_OK;
+                            });
+                        webview2->add_DocumentTitleChanged(title_handler, &webview->title_token);
+                        title_handler->Release();
+                    }
+
                     /* run the navigation queued during initialization */
                     if (webview->has_pending) {
                         const std::wstring text = utf8_to_wide(webview->pending_text);
@@ -1417,6 +1546,24 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
     if (webview->nav_dtor)
         webview->nav_dtor(webview->nav_userdata);
     webview->nav_dtor = nullptr;
+    if (webview->webview && webview->nav_start_token.value != 0)
+        webview->webview->remove_NavigationStarting(webview->nav_start_token);
+    if (webview->nav_start_dtor)
+        webview->nav_start_dtor(webview->nav_start_userdata);
+    webview->nav_start_dtor = nullptr;
+    if (webview->webview && webview->source_token.value != 0)
+        webview->webview->remove_SourceChanged(webview->source_token);
+    if (webview->source_dtor)
+        webview->source_dtor(webview->source_userdata);
+    webview->source_dtor = nullptr;
+    if (webview->webview && webview->title_token.value != 0) {
+        Microsoft::WRL::ComPtr<ICoreWebView2_2> webview2;
+        if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview2))))
+            webview2->remove_DocumentTitleChanged(webview->title_token);
+    }
+    if (webview->title_dtor)
+        webview->title_dtor(webview->title_userdata);
+    webview->title_dtor = nullptr;
     for (const auto& [name, binding] : webview->bindings)
         if (binding.dtor)
             binding.dtor(binding.userdata);
@@ -1632,6 +1779,73 @@ int heliosview_webview_set_navigation_callback(heliosview_webview_t* webview,
     webview->nav_cb = callback;
     webview->nav_userdata = userdata;
     webview->nav_dtor = dtor;
+    return 0;
+}
+
+int heliosview_webview_set_navigation_starting_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_navigation_starting_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview)
+        return -1;
+    /* the callback table is owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, callback, userdata, dtor] {
+            heliosview_webview_set_navigation_starting_callback(wv, callback, userdata, dtor);
+        });
+        return 0;
+    }
+    if (webview->nav_start_dtor)
+        webview->nav_start_dtor(webview->nav_start_userdata); /* replacing an existing callback */
+    webview->nav_start_cb = callback;
+    webview->nav_start_userdata = userdata;
+    webview->nav_start_dtor = dtor;
+    return 0;
+}
+
+int heliosview_webview_set_source_changed_callback(heliosview_webview_t* webview,
+                                                   heliosview_webview_source_changed_cb callback,
+                                                   void* userdata,
+                                                   heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview)
+        return -1;
+    /* the callback table is owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, callback, userdata, dtor] {
+            heliosview_webview_set_source_changed_callback(wv, callback, userdata, dtor);
+        });
+        return 0;
+    }
+    if (webview->source_dtor)
+        webview->source_dtor(webview->source_userdata); /* replacing an existing callback */
+    webview->source_cb = callback;
+    webview->source_userdata = userdata;
+    webview->source_dtor = dtor;
+    return 0;
+}
+
+int heliosview_webview_set_title_changed_callback(heliosview_webview_t* webview,
+                                                  heliosview_webview_title_changed_cb callback,
+                                                  void* userdata,
+                                                  heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview)
+        return -1;
+    /* the callback table is owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, callback, userdata, dtor] {
+            heliosview_webview_set_title_changed_callback(wv, callback, userdata, dtor);
+        });
+        return 0;
+    }
+    if (webview->title_dtor)
+        webview->title_dtor(webview->title_userdata); /* replacing an existing callback */
+    webview->title_cb = callback;
+    webview->title_userdata = userdata;
+    webview->title_dtor = dtor;
     return 0;
 }
 

@@ -6,7 +6,8 @@
  * Inherits Window; on win32 it is built on WebView2 (Edge Chromium, SDK pulled in via FetchContent).
  * The WebView is a standalone handle (heliosview_webview_t) attached to its parent window
  * at creation; afterwards, operations involve only the WebView itself.
- * Currently offers navigation (URL / HTML string); events are planned for later.
+ * Offers navigation (URL / HTML string) and navigation events (navigationStarting
+ * with a veto gate, urlChanged, titleChanged, navigationCompleted).
  *
  * Usage:
  *   helios::WebViewWindow win(900, 640, "title");
@@ -18,6 +19,7 @@
 #include <HeliosViewCore/Window.h>
 
 #include <cstdint>
+#include <functional>
 
 namespace helios {
 
@@ -46,7 +48,7 @@ public:
         , m_webview(other.m_webview)
     {
         other.m_webview = nullptr;
-        wireNavigationCallback(); /* the C userdata must point at this new object */
+        wireWebViewEvents(); /* the C userdata must point at this new object */
     }
 
     WebViewWindow& operator=(WebViewWindow&& other) noexcept
@@ -57,7 +59,7 @@ public:
                 heliosview_webview_destroy(m_webview);
             m_webview = other.m_webview;
             other.m_webview = nullptr;
-            wireNavigationCallback();
+            wireWebViewEvents();
         }
         return *this;
     }
@@ -74,7 +76,7 @@ public:
     {
         if (!m_webview) {
             m_webview = heliosview_webview_create(nativeHandle());
-            wireNavigationCallback();
+            wireWebViewEvents();
         }
     }
 
@@ -93,12 +95,34 @@ public:
 
     // ---- navigation events ----
 
+    // Fired on the UI thread when a new navigation begins (initial load, links,
+    // navigate(), browser back/forward, redirects). uri is the target URI;
+    // isRedirected / isUserInitiated follow WebView2's NavigationStarting
+    // semantics. To cancel a navigation, register a gate via
+    // setNavigationStartingGate() (a Signal cannot veto). 
+    Signal<std::string, bool, bool> navigationStarting;
+
+    // Fired on the UI thread whenever the WebView's current URL changes. uri is
+    // the new source URI; isNewDocument is true when the change comes from a new
+    // document load (vs an in-document change such as a fragment/history.pushState).
+    Signal<std::string, bool> urlChanged;
+
+    // Fired on the UI thread when the page's <title> changes.
+    Signal<std::string> titleChanged;
+
     // Fired on the UI thread when a page load completes: error == 0 on success,
     // otherwise a negated platform error code (on WebView2: -HRESULT, e.g.
     // -COREWEBVIEW2_WEB_ERROR_STATUS_*). Not fired for navigations that never
     // finish (e.g. aborted). Use it to know when the page is ready for eval()
     // or to show an error state when loading fails.
     Signal<int> navigationCompleted;
+
+    // Register a veto callback for navigations. It runs on the UI thread just
+    // before a navigation starts and returns true to cancel it (e.g. to block
+    // external links or cross-origin navigations inside the WebView). The gate,
+    // if set, receives (uri, isRedirected, isUserInitiated). Only one gate may be
+    // registered; calling again replaces the previous one.
+    std::function<bool(const std::string&, bool, bool)> navigationStartingGate;
 
     // ---- local resources ----
 
@@ -220,17 +244,57 @@ public:
         navigationCompleted.connect(member, obj);
     }
 
+    // Convenience connector for the navigationStarting signal: connect a member
+    // function (sync or async) of `obj`. Signature: void/async (Obj::*)(std::string,
+    // bool, bool). The object must outlive the connection.
+    template <class Obj, class Ret>
+    void connectStarting(Ret Obj::* member, Obj* obj)
+    {
+        navigationStarting.connect(member, obj);
+    }
+
 private:
-    // Bridge the C navigation callback to the C++ signal. The C layer stores the
-    // userdata (this WebViewWindow) and runs the callback on the UI thread; the
-    // registration also happens here so that after a move (new object address)
-    // the C userdata is re-pointed at the new object.
-    void wireNavigationCallback()
+    // Bridge the C webview event callbacks to the C++ signals. The C layer stores
+    // the userdata (this WebViewWindow) and runs the callbacks on the UI thread;
+    // the registrations happen here so that after a move (new object address) the
+    // C userdata is re-pointed at the new object.
+    void wireWebViewEvents()
     {
         heliosview_webview_set_navigation_callback(
             m_webview,
             [](heliosview_webview_t* wv, int error, void* userdata) {
                 static_cast<WebViewWindow*>(userdata)->navigationCompleted(error);
+            },
+            this, nullptr);
+
+        /* navigation starting: consult the veto gate (if any), then observe. */
+        heliosview_webview_set_navigation_starting_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* uri, int is_redirected,
+               int is_user_initiated, void* userdata) -> int {
+                auto* self = static_cast<WebViewWindow*>(userdata);
+                std::string u = uri ? uri : "";
+                const bool redirect = is_redirected != 0;
+                const bool user_init = is_user_initiated != 0;
+                self->navigationStarting(u, redirect, user_init);
+                if (self->navigationStartingGate)
+                    return self->navigationStartingGate(u, redirect, user_init) ? 1 : 0;
+                return 0;
+            },
+            this, nullptr);
+
+        heliosview_webview_set_source_changed_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* uri, int is_new_document, void* userdata) {
+                auto* self = static_cast<WebViewWindow*>(userdata);
+                self->urlChanged(uri ? uri : "", is_new_document != 0);
+            },
+            this, nullptr);
+
+        heliosview_webview_set_title_changed_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* title, void* userdata) {
+                static_cast<WebViewWindow*>(userdata)->titleChanged(title ? title : "");
             },
             this, nullptr);
     }
