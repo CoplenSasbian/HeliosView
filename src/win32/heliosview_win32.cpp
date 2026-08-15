@@ -548,11 +548,12 @@ DWORD map_win32_style(const heliosview_window_t* window)
         break;
     case HELIOSVIEW_WINDOW_FRAMELESS:
     case HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS:
-        /* No system title bar or caption buttons; the app draws its own chrome.
-         * FRAMELESS_BUTTONS additionally creates library-drawn MDL2 control
-         * buttons at the top-right (see heliosview_window_show). WS_THICKFRAME
-         * keeps the resize border. */
-        style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        /* No system title bar, border, or caption buttons: the client covers the
+         * whole window (WM_NCCALCSIZE in the WndProc returns 0) and the resize
+         * handles come from the WndProc's WM_NCHITTEST edge mapping. FRAMELESS_
+         * BUTTONS additionally creates library-drawn MDL2 control buttons at the
+         * top-right (see heliosview_window_show). */
+        style = WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
         break;
     default:
         style = WS_OVERLAPPEDWINDOW;
@@ -1006,43 +1007,77 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    /* Custom title-bar chrome (drag regions + control buttons) only exists for
-     * the non-system-chrome styles; NORMAL leaves everything to the system. */
+    /* Non-system-chrome styles must not render a system title bar or border:
+     * the client area covers the whole window (WM_NCCALCSIZE -> 0 keeps the
+     * passed rect as-is, i.e. the full window). The resize handles then come
+     * from WM_NCHITTEST (below) mapping the edges instead of a thick frame. */
+    if constexpr (Style != HELIOSVIEW_WINDOW_NORMAL) {
+        if (message == WM_NCCALCSIZE) {
+            return 0; /* client = full window (no caption, no border) */
+        }
+    }
+
+    /* Non-system-chrome styles (BORDERLESS / FRAMELESS / FRAMELESS_BUTTONS):
+     * the client covers the whole window (WM_NCCALCSIZE -> 0), so the resize
+     * edges are mapped here manually and the custom title-bar chrome (control
+     * buttons + drag regions) is hit-tested. NORMAL leaves everything to the
+     * system. */
     if constexpr (Style != HELIOSVIEW_WINDOW_NORMAL) {
         if (message == WM_NCHITTEST) {
             auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-            if (win && (!win->control_buttons.empty() || !win->drag_regions.empty())) {
-                const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
-                                   static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
-                POINT client = screen;
-                if (ScreenToClient(hwnd, &client)) {
-                    /* Control buttons win over drag regions: a button inside a drag
-                     * strip must click, not drag. Only report a button the window can
-                     * actually perform (e.g. no maximize box -> HTCLIENT). */
-                    for (const auto& cb : win->control_buttons) {
-                        const RECT& r = cb.rect;
-                        if (client.x >= r.left && client.x < r.right
-                            && client.y >= r.top && client.y < r.bottom) {
-                            const LONG st = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-                            switch (cb.button) {
-                            case HELIOSVIEW_CONTROL_MINIMIZE:
-                                return (st & WS_MINIMIZEBOX) ? HTMINBUTTON : HTCLIENT;
-                            case HELIOSVIEW_CONTROL_MAXIMIZE:
-                                return (st & WS_MAXIMIZEBOX) ? HTMAXBUTTON : HTCLIENT;
-                            case HELIOSVIEW_CONTROL_CLOSE:
-                            default:
-                                return HTCLOSE;
-                            }
-                        }
-                    }
-                    for (const RECT& r : win->drag_regions) {
-                        if (client.x >= r.left && client.x < r.right
-                            && client.y >= r.top && client.y < r.bottom)
-                            return HTCAPTION;
+            if (!win)
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+
+            const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
+                               static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
+            POINT client = screen;
+            if (!ScreenToClient(hwnd, &client))
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+
+            /* Resize edges: an 8px band around the window, unless not resizable. */
+            if (win->resizable) {
+                RECT cr{};
+                GetClientRect(hwnd, &cr);
+                constexpr int kEdge = 8;
+                const bool left = client.x < kEdge;
+                const bool right = client.x >= cr.right - kEdge;
+                const bool top = client.y < kEdge;
+                const bool bottom = client.y >= cr.bottom - kEdge;
+                if (left && top)       return HTTOPLEFT;
+                if (right && top)      return HTTOPRIGHT;
+                if (left && bottom)    return HTBOTTOMLEFT;
+                if (right && bottom)   return HTBOTTOMRIGHT;
+                if (left)              return HTLEFT;
+                if (right)             return HTRIGHT;
+                if (top)               return HTTOP;
+                if (bottom)            return HTBOTTOM;
+            }
+
+            /* Control buttons win over drag regions: a button inside a drag strip
+             * must click, not drag. Only report a button the window can actually
+             * perform (e.g. no maximize box -> HTCLIENT). */
+            for (const auto& cb : win->control_buttons) {
+                const RECT& r = cb.rect;
+                if (client.x >= r.left && client.x < r.right
+                    && client.y >= r.top && client.y < r.bottom) {
+                    const LONG st = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+                    switch (cb.button) {
+                    case HELIOSVIEW_CONTROL_MINIMIZE:
+                        return (st & WS_MINIMIZEBOX) ? HTMINBUTTON : HTCLIENT;
+                    case HELIOSVIEW_CONTROL_MAXIMIZE:
+                        return (st & WS_MAXIMIZEBOX) ? HTMAXBUTTON : HTCLIENT;
+                    case HELIOSVIEW_CONTROL_CLOSE:
+                    default:
+                        return HTCLOSE;
                     }
                 }
             }
-            return DefWindowProcW(hwnd, message, wparam, lparam);
+            for (const RECT& r : win->drag_regions) {
+                if (client.x >= r.left && client.x < r.right
+                    && client.y >= r.top && client.y < r.bottom)
+                    return HTCAPTION;
+            }
+            return HTCLIENT;
         }
     }
 
@@ -1543,11 +1578,13 @@ int heliosview_window_set_resizable(heliosview_window_t* window, int resizable)
     if (!window->hwnd)
         return 0; /* applied at creation (map_win32_style reads the flag) */
     /* Toggle only the resize-related bits: preserve the current style as-is
-     * (WS_VISIBLE, the caption, WS_VSYNC, ...). Rebuilding the full style from
-     * map_win32_style would drop WS_VISIBLE and hide a shown window. */
+     * (WS_VISIBLE, the caption, WS_VSYNC, ...). For NORMAL the thick frame is
+     * the resize mechanism; for the frameless/borderless styles resizing is
+     * manual (WM_NCHITTEST edge mapping), so only the maximize box changes. */
     LONG_PTR style = GetWindowLongPtrW(window->hwnd, GWL_STYLE);
+    const bool manual_resize = window->style != HELIOSVIEW_WINDOW_NORMAL;
     if (window->resizable)
-        style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+        style |= manual_resize ? WS_MAXIMIZEBOX : (WS_THICKFRAME | WS_MAXIMIZEBOX);
     else
         style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     SetWindowLongPtrW(window->hwnd, GWL_STYLE, style);
