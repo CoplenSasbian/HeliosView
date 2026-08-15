@@ -66,12 +66,14 @@ public:
     void setIcon(const char* icon_path) { heliosview_tray_set_icon(m_tray, icon_path); }
 
     // Show a balloon notification next to the icon (works with no setup,
-    // unlike OS toasts). Message-loop thread.
-    void notify(const char* title, const char* message,
+    // unlike OS toasts). Message-loop thread. Returns true when the OS accepted
+    // it (false when suppressed, e.g. notifications off / Focus assist).
+    bool notify(const char* title, const char* message,
                 NotifyIcon iconType = NotifyIcon::Info, uint32_t timeoutMs = 0)
     {
-        heliosview_tray_notify(m_tray, title, message,
-                               static_cast<heliosview_tray_notify_icon_t>(iconType), timeoutMs);
+        return heliosview_tray_notify(m_tray, title, message,
+                                      static_cast<heliosview_tray_notify_icon_t>(iconType),
+                                      timeoutMs) == 0;
     }
 
     // ---- signals (UI thread) ----

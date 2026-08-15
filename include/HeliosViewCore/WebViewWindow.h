@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 
 namespace helios {
 
@@ -124,6 +125,20 @@ public:
     // registered; calling again replaces the previous one.
     std::function<bool(const std::string&, bool, bool)> navigationStartingGate;
 
+    // ---- WebView layout ----
+
+    // Keep the given insets (client pixels) clear around the WebView: it fills
+    // the window's client area minus these insets, and the cleared strips stay
+    // the window's own surface. Re-applied on every window resize. Useful when
+    // the window keeps native chrome of its own around the WebView (e.g. a
+    // header strip drawn by the app). Zero insets restore the default (WebView
+    // fills the whole client area). Applies immediately when initialized;
+    // otherwise when it becomes ready.
+    void setWebViewInsets(int32_t top, int32_t right, int32_t bottom, int32_t left)
+    {
+        heliosview_webview_set_insets(m_webview, top, right, bottom, left);
+    }
+
     // ---- local resources ----
 
     // Map a local folder to a virtual host name so the page can load files from
@@ -145,10 +160,19 @@ public:
     // is the JSON array of the JS arguments. Reply with resolve/reject.
     // userdata_dtor is called when the binding is replaced or the WebView is destroyed
     // (may be nullptr). Rebinding a name replaces the previous binding.
+    // name must be a valid C identifier ([A-Za-z_][A-Za-z0-9_]*); the C layer rejects
+    // anything else (e.g. dots) and this wrapper throws std::invalid_argument, so a
+    // bad name fails loudly at setup instead of silently never being callable.
+    // Internal names: the library's built-in bridge uses "__hv."-prefixed names
+    // (__hv.control / __hv.state / __hv.drag, used by the injected components);
+    // the dot makes them invalid C identifiers, so they cannot be bound here.
     void bind(const char* name, heliosview_webview_bind_cb callback, void* userdata = nullptr,
               heliosview_webview_userdata_dtor userdata_dtor = nullptr)
     {
-        heliosview_webview_bind(m_webview, name, callback, userdata, userdata_dtor);
+        const int rc = heliosview_webview_bind(m_webview, name, callback, userdata, userdata_dtor);
+        if (rc != 0)
+            throw std::invalid_argument(
+                "heliosview bind: invalid webview or name (names must be C identifiers, no dots)");
     }
 
     // nlohmann auto-binding (declared here, defined in <HeliosViewCore/WebViewJson.h>):
@@ -207,11 +231,16 @@ public:
     // callback(name, data_json, userdata) fires on the UI thread for every postMessage
     // to a channel of that name. Rebinding a name replaces the previous subscription
     // (running its dtor). userdata_dtor runs when replaced or on destruction (may be
-    // nullptr). UI-thread call (thread-safe: other threads are marshalled).
+    // nullptr). UI-thread call (thread-safe: other threads are marshalled). The
+    // internal "__hv.*" names (see bind) are not valid identifiers and cannot be
+    // subscribed. Like bind, an invalid name throws std::invalid_argument.
     void subscribe(const char* name, heliosview_webview_subscribe_cb callback,
                    void* userdata = nullptr, heliosview_webview_userdata_dtor userdata_dtor = nullptr)
     {
-        heliosview_webview_subscribe(m_webview, name, callback, userdata, userdata_dtor);
+        const int rc = heliosview_webview_subscribe(m_webview, name, callback, userdata, userdata_dtor);
+        if (rc != 0)
+            throw std::invalid_argument(
+                "heliosview subscribe: invalid webview or name (names must be C identifiers, no dots)");
     }
 
     // nlohmann auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):

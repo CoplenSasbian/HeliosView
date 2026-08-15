@@ -64,8 +64,10 @@ std::thread worker([app] {
 
 | area | API (C / C++) |
 | --- | --- |
-| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, drag regions, DPI, focus/blur) |
+| windows + events | `heliosview_window_*` / `helios::Window` (styles, opacity, icon, topmost, hide, min/max/restore, resizable, min/max size, drag regions, fullscreen, flash, enabled, DPI, focus/move/size events) |
+| screen geometry | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea` (multi-monitor) |
 | taskbar progress | `heliosview_window_set_progress` / `Window::setProgress` (+ state, overlay-capable) |
+| session end | `heliosview_set_session_end_callback` / `System::setSessionEndCallback` (save-on-shutdown) |
 | backdrop & dark mode (Win11) | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS bridge | `heliosview_webview_*` / `WebViewWindow` + `bindJson` auto-binding |
 | tray icon + menu | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
@@ -241,9 +243,86 @@ win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
 win.show();
 ```
 
+> **WebView caveat.** Drag regions are implemented through the host window's
+> `WM_NCHITTEST`. A full-bleed WebView is a child window covering the entire
+> client area, so hit-testing over it is answered by the WebView's own window
+> procedure and never reaches the host — registered drag regions are ineffective
+> while the WebView covers them. With a `WebViewWindow`, register the drag area
+> on the page instead: the injected `<helios-window-title-bar>` component drags
+> through WebView2's native `app-region: drag` support (enabled by the library
+> via `IsNonClientRegionSupportEnabled`), or bind `startDrag()` to a page
+> callback for a fully custom area.
+
+**Web-drawn title bar (recommended).** Because a full-bleed WebView cannot be
+covered by native DWM caption buttons ("no visible title bar" and "system
+caption buttons" are mutually exclusive on Win32), the natural way is to draw
+the title bar in the page. The bridge shim injects two web components on every
+page:
+
+- `<helios-window-title-bar>` — place it at the top of the page: it drags the
+  window through WebView2's **native `app-region: drag` support** (the library
+  enables `IsNonClientRegionSupportEnabled` — no bridge round-trip, nothing to
+  bind) and toggles maximize on double-click.
+- `<helios-window-controls>` — put it inside the title bar: the Win10/11
+  min/max/close glyphs (hover/pressed feedback, close turns red), calling the
+  built-in `__hv_control` / `__hv_state` bridge; the maximize button shows the
+  restore glyph while maximized. It opts its buttons out of the drag region
+  (`app-region: no-drag`) automatically.
+
+```cpp
+auto win = std::make_shared<helios::WebViewWindow>(
+    900, 640, "App", helios::WindowStyle::Frameless);
+win->show();
+win->createWebView();
+// that's it — no bindJson for drag or buttons: dragging is native app-region,
+// the buttons use the built-in __hv_control / __hv_state bridge (__hv_state
+// also reports titleBarHeight, the DPI-scaled title-bar strip height).
+```
+
+```html
+<helios-window-title-bar>
+  <span>App</span>
+  <helios-window-controls></helios-window-controls>
+</helios-window-title-bar>
+```
+
+The components are restyled via CSS on the elements (the title bar defaults to
+a 48 px flex row; the buttons float top-right). Other interactive children
+inside the title bar need `app-region: no-drag` to stay clickable.
+
+**Resize.** The `Frameless` style keeps a small non-client border on all four
+sides (`WM_NCCALCSIZE`), so the system draws a grab-able frame and resizing
+works natively — even with a full-bleed WebView, because the border is
+non-client and the system hit-tests it directly. Nothing to add to the page.
+
+> Native DWM buttons would require keeping the system caption (a "normal
+> window"), which a full-bleed WebView cannot cover — and web-drawn buttons have
+> no Win11 snap-layouts popup (that needs a real caption).
+
+**Custom control buttons.** Or draw your own buttons and register their
+rectangles — the library wires them to the real title-bar behavior (click =
+action, never drags; maximize/restore auto-toggles).
+
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
 to make the process per-monitor DPI aware (v2); `window.dpi()` reports a
 window's current DPI.
+
+**Screen geometry.** `System::screenWorkArea`, `Window::workArea`, and
+`System::primaryWorkArea` return the monitor's usable area (excluding the
+taskbar) in screen coordinates — handy for centering/positioning windows on
+multi-monitor setups. `System::cursorPosition` reports the mouse location.
+
+**Size limits, fullscreen, flash, and modal lock.** `setMinimumSize` /
+`setMaximumSize` clamp the client size (`WM_GETMINMAXINFO`);
+`setFullscreen` covers the whole monitor and restores the previous geometry on
+exit; `flash` / `flashUntilFocus` flash the taskbar button (a finished
+background task or an urgent notification); `setEnabled(false)` locks a window
+against input for modal states. `moved` / `moving` / `sizing` /
+`enabledChanged` signals report window state changes.
+
+**Session end.** `System::setSessionEndCallback` runs synchronously on the
+message-loop thread before the OS session ends (shutdown / restart / logoff) so
+the app can save state; returning non-zero vetoes the shutdown.
 
 ### 4. WebView — the core: JS ↔ native bridge
 
@@ -291,7 +370,11 @@ int main()
 pointer and the member pointer). The bridge shim exposes
 `window.helios.call(name, ...)` → `Promise` and a **bidirectional
 `BroadcastChannel`** (`broadcast` native→JS, `subscribe` JS→native). Every
-bridge name must be a C identifier `[A-Za-z_][A-Za-z0-9_]*`.
+bridge name must be a C identifier `[A-Za-z_][A-Za-z0-9_]*`; the library's
+internal bridge uses `__hv.`-prefixed names (`__hv.control`, `__hv.state`,
+`__hv.drag` — called by the injected components), which contain a dot and are
+therefore **not valid identifiers**, so applications cannot bind or subscribe
+them and can never shadow the built-in components.
 
 **Events, local resources, and native dialogs**:
 

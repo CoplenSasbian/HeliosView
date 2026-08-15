@@ -9,6 +9,7 @@
 
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Signal.h>
+#include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
@@ -114,6 +115,14 @@ public:
     // Register a client-area drag region: mouse-down + drag inside it moves the
     // window like a title bar (WM_NCHITTEST -> HTCAPTION). Call this for each
     // custom title-bar strip of a frameless/borderless window.
+    //
+    // WebView caveat: drag regions rely on the host window's WM_NCHITTEST. A
+    // full-bleed WebView is a child window covering the whole client area, so
+    // hit-testing over it is answered by the WebView itself and these regions
+    // never fire. On a WebViewWindow, drag from the page instead — the injected
+    // <helios-window-title-bar> component uses WebView2's native app-region:drag
+    // support (enabled by the library), or call startDrag() via a bridge binding
+    // for a fully custom area.
     void addDragRegion(int32_t x, int32_t y, int32_t width, int32_t height)
     {
         heliosview_window_add_drag_region(m_window, x, y, width, height);
@@ -122,8 +131,68 @@ public:
     // Remove all registered drag regions
     void clearDragRegions() { heliosview_window_clear_drag_regions(m_window); }
 
+    // Start a window drag (move loop). Use it when a full-bleed WebView covers
+    // the window (WM_NCHITTEST never fires there): have the page call this on
+    // mousedown over its own title bar to move the window like a native one.
+    void startDrag() { heliosview_window_start_drag(m_window); }
+
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
+
+    // Height (client pixels, DPI-scaled) of the title-bar strip a Frameless
+    // window reserves at the top (the drag area / where the page puts its
+    // title-bar buttons); 0 for other styles / before the window is created.
+    // Useful to keep page content clear of the strip (e.g. keep the top-right
+    // free for the buttons).
+    int32_t titleBarHeight() const { return heliosview_window_title_bar_height(m_window); }
+
+    // Work area (excluding taskbar) of the monitor the window is on.
+    // Returns false if the window is not created.
+    bool workArea(Rect& out) const
+    {
+        heliosview_rect_t r{};
+        if (heliosview_window_work_area(m_window, &r) != 0)
+            return false;
+        out = {r.x, r.y, r.width, r.height};
+        return true;
+    }
+
+    // ---- size constraints ----
+
+    // Enforce a minimum client size (so the UI is not crushed). 0 = unconstrained.
+    void setMinimumSize(int32_t w, int32_t h) { heliosview_window_set_min_size(m_window, w, h); }
+
+    // Enforce a maximum client size. (0, 0) = no maximum.
+    void setMaximumSize(int32_t w, int32_t h) { heliosview_window_set_max_size(m_window, w, h); }
+
+    // ---- taskbar flash ----
+
+    // Flash the taskbar button a few times (background task finished).
+    void flash() { heliosview_window_flash(m_window); }
+
+    // Flash the taskbar button until the window is focused (urgent notification).
+    void flashUntilFocus() { heliosview_window_flash_until_focus(m_window); }
+
+    // ---- fullscreen ----
+
+    // Enter (true) or leave (false) fullscreen. The previous geometry/style are
+    // restored on exit. A fullscreen window covers the whole monitor.
+    void setFullscreen(bool on) { heliosview_window_set_fullscreen(m_window, on ? 1 : 0); }
+
+    // Whether the window is currently fullscreen.
+    bool isFullscreen() const { return heliosview_window_is_fullscreen(m_window) != 0; }
+
+    // ---- enabled / modal ----
+
+    // Enable or disable the window (a disabled window is locked against input;
+    // used for modal states). Fires enabledChanged.
+    void setEnabled(bool on) { heliosview_window_set_enabled(m_window, on ? 1 : 0); }
+
+    // Whether the window is enabled.
+    bool isEnabled() const
+    {
+        return heliosview_window_is_enabled(m_window) != 0;
+    }
 
     // Request to close the window; goes through the event pipeline
     // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
@@ -220,8 +289,9 @@ public:
         m_window = nullptr;
     }
 
-    // The window id (the windowId field of events targeting this window; 0 before creation)
-    int32_t id() const { return heliosview_window_id(m_window); }
+    // The window's native handle (HWND on Windows) — the windowId field of
+    // events targeting this window; 0 until the window is shown
+    uintptr_t id() const { return heliosview_window_id(m_window); }
 
     // The raw C window handle (nullptr if not created/closed). Exposed so the
     // low-level API (e.g. helios::Tray) can be used directly on the native handle.
@@ -231,8 +301,12 @@ public:
 
     Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
+    Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
+    Signal<int32_t, int32_t> moving;                       // move drag in progress (x, y)
+    Signal<int32_t, int32_t> sizing;                       // resize drag in progress (w, h)
     Signal<> focused;                                      // window gained focus (activated)
     Signal<> blurred;                                      // window lost focus (deactivated)
+    Signal<bool> enabledChanged;                           // enabled (true) / disabled (false)
     Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered)
     Signal<KeyCode> keyReleased;                           // key released
     Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
@@ -248,11 +322,26 @@ public:
         case EventType::WindowResize:
             resized(e.width, e.height);
             return true;
+        case EventType::WindowMoved:
+            moved(e.x, e.y);
+            return true;
+        case EventType::WindowMoving:
+            moving(e.x, e.y);
+            return true;
+        case EventType::WindowSizing:
+            sizing(e.width, e.height);
+            return true;
         case EventType::WindowFocus:
             focused();
             return true;
         case EventType::WindowBlur:
             blurred();
+            return true;
+        case EventType::WindowEnabled:
+            enabledChanged(true);
+            return true;
+        case EventType::WindowDisabled:
+            enabledChanged(false);
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

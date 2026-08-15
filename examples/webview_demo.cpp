@@ -3,7 +3,7 @@
 //   - bindJson<Req>(): native functions callable from JS via window.helios.call(...) -> Promise
 //     the JS call's first argument is deserialized into a Req DTO (nlohmann), and the
 //     handler's task<Resp> result is serialized back automatically (resolve / reject)
-//   - each native function prints its 入参 and 返回值 with std::println (C++23)
+//   - each native function prints its arguments and return value with std::println (C++23)
 //   - a log panel on the page shows the same round-trip
 //   - broadcast() pushes a native -> JS message via BroadcastChannel
 //   - subscribeJson<Req>(): the page's BroadcastChannel postMessage -> native (JS -> native)
@@ -57,11 +57,16 @@ int main()
 
     auto app = std::make_shared<helios::App>();
 
-    auto window = std::make_shared<helios::WebViewWindow>(900, 640, "HeliosView WebView Demo");
+    // Frameless: a fully frameless window (no system title bar). The page's
+    // title bar is the injected <helios-window-title-bar> web component - it
+    // auto-registers as the drag region (built-in __hv_drag) and hosts
+    // <helios-window-controls> for the buttons (built-in __hv_control / __hv_state).
+    auto window = std::make_shared<helios::WebViewWindow>(
+        900, 640, "HeliosView WebView Demo", helios::WindowStyle::Frameless);
     window->show();
     window->createWebView();
 
-    /* ---- auto-bound native functions (nlohmann deserializes 入参, serializes 返回值) ---- */
+    /* ---- auto-bound native functions (nlohmann deserializes arguments, serializes return values) ---- */
 
     // add({a, b}) -> a + b
     window->bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<int> {
@@ -114,22 +119,33 @@ int main()
     window->navigateHtml(
         "<html><head><meta charset='utf-8'></head>"
         "<body style='font-family:system-ui;background:#1e1e2e;color:#cdd6f4;margin:0;"
-        "height:100%;display:flex;flex-direction:column'>"
-        "<div style='padding:12px'>"
-        "<h2 style='margin:0 0 8px'>HeliosView WebView 桥接演示 (nlohmann 自动绑定)</h2>"
+        "height:100%;display:flex;flex-direction:column;overflow:hidden'>"
+        // The title bar is the injected <helios-window-title-bar> web component:
+        // it drags the window through WebView2's native app-region:drag (the
+        // library enables IsNonClientRegionSupportEnabled - verified that this
+        // is the active drag mechanism, not WM_NCHITTEST, which a full-bleed
+        // WebView swallows). <helios-window-controls> inside it renders the
+        // min/max/close buttons.
+        "<helios-window-title-bar style='padding:0 16px;padding-right:150px;"
+        "box-sizing:border-box;background:#24243a;border-bottom:1px solid #3a3a55;"
+        "color:#cdd6f4;white-space:nowrap;overflow:hidden'>"
+        "<span style='font-weight:600;font-size:14px'>HeliosView WebView Bridge Demo (nlohmann auto-binding)</span>"
+        "<helios-window-controls></helios-window-controls>"
+        "</helios-window-title-bar>"
+        "<div style='padding:12px;flex:0 0 auto'>"
         "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
         "<button onclick=\"run('add', {a: 40, b: 2})\">add({a:40, b:2})</button>"
         "<button onclick=\"run('echo', {x:1, y:'hi'})\">echo({x:1,y:'hi'})</button>"
         "<button onclick=\"run('greet', {name:'helios'})\">greet({name:'helios'})</button>"
         "<button onclick=\"run('fail', {})\">fail()</button>"
-        "<button onclick=\"run('emit', {})\">emit() → 广播</button>"
+        "<button onclick=\"run('emit', {})\">emit() -&gt; broadcast</button>"
         "<button onclick=\"run('repeat', {s: 'ab', times: 3})\">repeat({s:'ab',times:3})</button>"
-        "<button onclick=\"bcSend()\">bc.postMessage → native</button>"
+        "<button onclick=\"bcSend()\">bc.postMessage -&gt; native</button>"
         "</div>"
         "</div>"
         "<div id='log' style='flex:1;overflow:auto;padding:0 12px 12px;"
         "font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.5'>"
-        "<div style='opacity:.6'>点击上面的按钮，观察入参与返回值</div></div>"
+        "<div style='opacity:.6'>Click the buttons above and watch the arguments and return values</div></div>"
         "<script>"
         "  const log = document.getElementById('log');"
         "  function line(txt, cls) {"
@@ -164,6 +180,6 @@ int main()
         std::println("[evalAsync] error={} result={}", error, result ? result : "(null)");
     });
 
-    std::println("[main] entering UI loop (Esc 关闭)...");
+    std::println("[main] entering UI loop (Esc to close)...");
     return app->exec();
 }

@@ -21,8 +21,13 @@ enum class EventType : int32_t {
     Quit = HELIOSVIEW_EVENT_QUIT,
     WindowClose = HELIOSVIEW_EVENT_WINDOW_CLOSE,
     WindowResize = HELIOSVIEW_EVENT_WINDOW_RESIZE,
+    WindowMoved = HELIOSVIEW_EVENT_WINDOW_MOVED,
+    WindowMoving = HELIOSVIEW_EVENT_WINDOW_MOVING,
+    WindowSizing = HELIOSVIEW_EVENT_WINDOW_SIZING,
     WindowFocus = HELIOSVIEW_EVENT_WINDOW_FOCUS,
     WindowBlur = HELIOSVIEW_EVENT_WINDOW_BLUR,
+    WindowEnabled = HELIOSVIEW_EVENT_WINDOW_ENABLED,
+    WindowDisabled = HELIOSVIEW_EVENT_WINDOW_DISABLED,
     KeyDown = HELIOSVIEW_EVENT_KEY_DOWN,
     KeyUp = HELIOSVIEW_EVENT_KEY_UP,
     MouseMove = HELIOSVIEW_EVENT_MOUSE_MOVE,
@@ -119,8 +124,8 @@ enum class MouseButton : int32_t {
 /* predefined window styles */
 enum class WindowStyle : int32_t {
     Normal = HELIOSVIEW_WINDOW_NORMAL,   /* normal window: title bar + border + system menu */
-    Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn) */
-    Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* bordered, no title bar (custom title-bar style) */
+    Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn; not resizable) */
+    Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* fully frameless: no title bar / caption buttons; resizable via the edges; the app draws all chrome (e.g. the injected <helios-window-controls> web component for the buttons) */
 };
 
 /* window show state */
@@ -137,7 +142,7 @@ enum class ShowState : int32_t {
 // Fields are meaningful only for the event types listed next to them.
 struct Event {
     EventType type = EventType::Quit;         /* event type */
-    int32_t windowId = 0;            /* window that produced the event (0 = none) */
+    uintptr_t windowId = 0;            /* native handle of the window that produced the event (0 = none; HWND on Windows) */
     int64_t timestampMs = 0;         /* milliseconds since library initialization */
     int32_t x = 0;                   /* mouse X (MouseMove / MouseButton*) */
     int32_t y = 0;                   /* mouse Y */

@@ -49,6 +49,7 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -330,12 +331,20 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
 
     // The userdata is a pmr_box (resource + handler copy) allocated through the
     // default PMR resource (lifetime = the binding); the C layer destroys it via the
-    // userdata_dtor when the binding is replaced or the webview dies.
+    // userdata_dtor when the binding is replaced or the webview dies. The C layer
+    // rejects invalid names (anything that is not a C identifier, e.g. with a dot);
+    // on failure the box is released here and std::invalid_argument is thrown, so a
+    // bad name fails loudly at setup instead of silently never being callable.
     auto* box = detail::pmrAllocate<Fn>(std::forward<Fn>(handler));
-    heliosview_webview_bind(m_webview, name,
-                            &detail::JsonHandler<Sender, Fn, Args...>::invoke,
-                            box,
-                            [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
+    const int rc = heliosview_webview_bind(m_webview, name,
+                                           &detail::JsonHandler<Sender, Fn, Args...>::invoke,
+                                           box,
+                                           [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
+    if (rc != 0) {
+        detail::pmrRelease(box); /* the C layer never took ownership on failure */
+        throw std::invalid_argument(
+            "bindJson: invalid webview or name (names must be C identifiers, no dots)");
+    }
 }
 
 // Member-function overload of bindJson: wraps (obj, method) into a lambda and forwards
@@ -390,12 +399,19 @@ void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
 
     // The userdata is a pmr_box (resource + callback copy) allocated through the
     // default PMR resource (lifetime = the subscription); the C layer destroys it via
-    // the userdata_dtor when replaced or the webview dies.
+    // the userdata_dtor when replaced or the webview dies. Like bindJson, an invalid
+    // name (not a C identifier, e.g. with a dot) releases the box and throws
+    // std::invalid_argument at setup.
     auto* box = detail::pmrAllocate<Fn>(std::forward<Fn>(callback));
-    heliosview_webview_subscribe(m_webview, name,
-                                 &detail::SubscribeHandler<Req, Fn>::invoke,
-                                 box,
-                                 [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
+    const int rc = heliosview_webview_subscribe(m_webview, name,
+                                                &detail::SubscribeHandler<Req, Fn>::invoke,
+                                                box,
+                                                [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
+    if (rc != 0) {
+        detail::pmrRelease(box); /* the C layer never took ownership on failure */
+        throw std::invalid_argument(
+            "subscribeJson: invalid webview or name (names must be C identifiers, no dots)");
+    }
 }
 
 // Member-function overload of subscribeJson: wraps (obj, method) into a lambda and

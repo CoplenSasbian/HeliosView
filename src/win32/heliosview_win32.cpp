@@ -1,10 +1,21 @@
-// HeliosView.dll — Windows implementation: windows, message loop, native-message → event conversion.
-// The cross-platform interface is in heliosview.h; this file implements only the win32 side.
 #include <HeliosView/heliosview.h>
 #include "../heliosview_internal.h"
+// HeliosView.dll — Windows implementation: windows, message loop, native-message → event conversion.
+// The cross-platform interface is in heliosview.h; this file implements only the win32 side.
+
+/* Enable modern (visual-styled) common controls for the whole process, from the
+ * library itself: HeliosView.dll embeds a Common-Controls v6 manifest resource
+ * (see hv_resources.rc / hv_common_controls.manifest). The loader merges a
+ * DLL's manifest dependencies into the hosting process's activation context, so
+ * any app that loads HeliosView.dll gets the themed ComCtl32 v6 (instead of the
+ * legacy v5 look) for message boxes and common controls - without needing its
+ * own manifest. This is the library-side equivalent of the classic application
+ * manifest, and it keeps the examples and consumers manifest-free. */
 
 #define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0A00 /* Windows 10: ActivateActivatedContext / CreateActivationContext */
 #include <windows.h>
+#include <commctrl.h>  /* InitCommonControlsEx (common controls v6 init) */
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATA (tray icon) */
 #include <objbase.h>  /* CoCreateInstance */
 #include <shobjidl.h> /* IFileOpenDialog / IShellItem (file pickers) / ITaskbarList3 */
@@ -13,6 +24,7 @@
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +33,6 @@
 #include <flat_map>
 #include <functional>
 #include <map>
-#include <memory_resource>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -29,16 +40,20 @@
 
 /* flat_map backed by std::pmr::vector, so a WebView's binding/subscription tables
  * allocate through the default PMR resource (set in main, after these runtime
- * objects are created). The global tables below keep std::vector: as statics they
- * are constructed before main, so a PMR default set later would not apply. */
+ * objects are created). The window registry keeps the plain std::vector flavor on
+ * purpose: it stays independent of whatever PMR default the app sets. */
 template <class K, class V>
 using hv_pmr_flat_map = std::flat_map<K, V, std::less<K>,
                                       std::pmr::vector<K>, std::pmr::vector<V>>;
 
 /* ================= Window (completes the header's opaque declaration; must be at global scope) ================= */
 
+/* A WebView attached to a window; the full struct is defined below. The window
+ * keeps the list of its attached WebViews (resize together with it, and WM_APP
+ * task-drain dispatch), so no separate hwnd → webview registry is needed. */
+struct heliosview_webview;
+
 struct heliosview_window {
-    int32_t id = 0;
     int width = 0;
     int height = 0;
     std::string title; /* UTF-8 */
@@ -47,7 +62,20 @@ struct heliosview_window {
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
     bool resizable = true;    /* whether the user can resize / maximize the window */
+    int32_t min_w = 0, min_h = 0; /* minimum client size (0 = unconstrained) */
+    int32_t max_w = 0, max_h = 0; /* maximum client size (0 = unconstrained) */
+    bool fullscreen = false;       /* whether the window covers the whole monitor */
+    RECT fs_restore_rect{};        /* pre-fullscreen window rect (restored on exit) */
+    DWORD fs_restore_style = 0;    /* pre-fullscreen window style */
+    DWORD fs_restore_exstyle = 0;  /* pre-fullscreen extended style */
     std::vector<RECT> drag_regions; /* client-area move regions (WM_NCHITTEST -> HTCAPTION) */
+
+    /* Attached WebViews (UI thread). The window owns the registry: WebViews are
+     * resized together with their window (WM_SIZE) and found for task-drain
+     * dispatch (WM_HV_WEBVIEW_MSG); heliosview_webview_destroy detaches first, so
+     * a queued message for a destroyed WebView is a no-op. The app destroys
+     * WebViews before the window (the window does not own them). */
+    std::vector<heliosview_webview_t*> webviews;
 
     /* Routing registry (type-erased): routing id -> userdata (the C++ object).
      * Tray icons (keyed by their WM_APP callback message id), menu items (keyed by
@@ -116,6 +144,13 @@ struct heliosview_webview {
     bool pending_html = false;  /* true = NavigateToString, false = Navigate */
     std::string pending_text;   /* UTF-8 */
 
+    /* WebView placement within the parent client area (client pixels); set via
+     * heliosview_webview_set_insets. The WebView fills the client area minus
+     * these insets, so a strip (e.g. a title bar with the DWM caption buttons)
+     * can stay visible around it. */
+    bool has_insets = false;
+    int32_t inset_top = 0, inset_right = 0, inset_bottom = 0, inset_left = 0;
+
     /* JS <-> native bridge */
     DWORD ui_thread = GetCurrentThreadId();            /* thread that created the webview */
     EventRegistrationToken message_token{};            /* JS -> native messages */
@@ -158,6 +193,28 @@ struct heliosview_webview {
     std::deque<std::function<void()>> ui_tasks;         /* marshalled tasks (drained on the UI thread) */
     std::mutex ui_mutex;                               /* guards ui_tasks (cross-thread marshalling) */
 };
+
+/* The WebView's bounds within the parent client area: the full client rect
+ * shrunk by the registered insets. Used wherever the WebView is placed (at
+ * creation and on every parent resize), so a native title-bar strip carrying
+ * the DWM caption buttons can stay visible above the WebView. */
+RECT hv_webview_rect(const heliosview_webview_t* webview)
+{
+    RECT rc{};
+    if (webview->parent)
+        GetClientRect(webview->parent, &rc);
+    if (webview->has_insets) {
+        rc.left += webview->inset_left;
+        rc.top += webview->inset_top;
+        rc.right -= webview->inset_right;
+        rc.bottom -= webview->inset_bottom;
+        if (rc.right < rc.left)
+            rc.right = rc.left;
+        if (rc.bottom < rc.top)
+            rc.bottom = rc.top;
+    }
+    return rc;
+}
 
 namespace {
 
@@ -233,6 +290,20 @@ bool hv_valid_name(const char* s)
     return true;
 }
 
+/* Names beginning with "__hv." are the library's internal bridge methods (the
+ * injected <helios-window-controls> / <helios-window-title-bar> components call
+ * __hv.control / __hv.state / __hv.drag). The dot makes them invalid C
+ * identifiers, so applications cannot bind or subscribe them through the public
+ * API (which requires valid identifiers) — only the library's internal
+ * whitelist (hv_bind_builtin) registers them. The wire parser still accepts
+ * them (the header stays separator-safe: dots carry no tab / CR / LF). */
+bool hv_internal_name(const char* s)
+{
+    static constexpr char kPrefix[] = "__hv.";
+    const size_t n = sizeof(kPrefix) - 1;
+    return s && std::strncmp(s, kPrefix, n) == 0;
+}
+
 /* Post a raw envelope string to the JS page (must run on the UI thread). */
 void hv_post_string(heliosview_webview_t* wv, const std::string& s)
 {
@@ -272,106 +343,14 @@ void hv_drain_ui_tasks(heliosview_webview_t* wv)
             fn();
 }
 
-/* The JS shim, injected into every document. Pure JS, no escaping needed (it is
- * inserted via AddScriptToExecuteOnDocumentCreated which takes raw script text).
- * window.helios.call invokes native functions; BroadcastChannel is subclassed so
- * native broadcasts (heliosview_webview_broadcast) dispatch synthetic message
- * events, and page postMessage()s are forwarded to native subscriptions
- * (heliosview_webview_subscribe) while still going to other same-origin tabs. */
-const char* kWebView2BridgeScript = R"JS(
-(function () {
-  'use strict';
-  if (window.__hvShim) return;        /* installed already (subframe/navigation) */
-  window.__hvShim = 1;
-
-  var pending = new Map();            /* id -> {resolve, reject} */
-  var seq = 0;
-
-  /* Bridge envelope wire format (shared with the C side - see the comment near
-   * hv_valid_name in heliosview_win32.cpp): a "HV" magic + tab-separated kind
-   * and fields, then a "\r\n\r\n" separator (HTTP-style) and a payload passed
-   * through verbatim. Registered names are C identifiers, so the header fields
-   * never contain a tab or CR/LF; the payload (JSON text for args/result/data,
-   * or a native error object) may contain anything. */
-  function pack(kind, fields, payload) {
-    var s = 'HV\t' + kind;
-    for (var i = 0; i < fields.length; i++) s += '\t' + fields[i];
-    return s + '\r\n\r\n' + (payload === undefined ? '' : payload);
-  }
-  function post(s) { window.chrome.webview.postMessage(s); }
-
-  /* Native -> page: parse an envelope string and dispatch. */
-  function recv(e) {
-    var m = e.data;
-    if (typeof m !== 'string') return;
-    var sep = m.indexOf('\r\n\r\n');
-    if (sep < 0) return;
-    var head = m.slice(0, sep);       /* "HV\t<kind>\t<...fields>" */
-    var body = m.slice(sep + 4);
-    var h = head.split('\t');
-    if (h.length < 2 || h[0] !== 'HV') return;
-    if (h[1] === 'resolve' || h[1] === 'reject') {
-      var id = Number(h[2]);
-      var p = pending.get(id);
-      if (!p) return;
-      pending.delete(id);
-      if (h[1] === 'resolve') {
-        try { p.resolve(body === '' ? null : JSON.parse(body)); }
-        catch (e2) { p.reject(e2); }
-      } else {
-        var err;
-        try { err = new Error((JSON.parse(body) || {}).message || 'bridge error'); }
-        catch (e3) { err = new Error(body || 'bridge error'); }
-        p.reject(err);
-      }
-    } else if (h[1] === 'broadcast' && h.length >= 3) {
-      var data = null;
-      try { data = body === '' ? null : JSON.parse(body); } catch (e4) {}
-      dispatchBC(h[2], data);
-    }
-  }
-
-  window.chrome.webview.addEventListener('message', recv);
-
-  window.helios = {
-    call: function (name) {
-      var args = Array.prototype.slice.call(arguments, 1);
-      return new Promise(function (resolve, reject) {
-        var id = ++seq;
-        pending.set(id, { resolve: resolve, reject: reject });
-        post(pack('call', [String(id), name], JSON.stringify(args)));
-      });
-    }
-  };
-
-  /* BroadcastChannel: keep the native broadcast and the standard same-origin
-     channel working together by subclassing. A native broadcast dispatches a
-     synthetic MessageEvent on matching instances; a page postMessage is forwarded
-     to native (subscribe) and still delivered to the other same-origin tabs. */
-  var NativeBC = window.BroadcastChannel;
-  var live = new Set();
-  function dispatchBC(name, data) {
-    live.forEach(function (ch) {
-      if (ch._hvName === name)
-        ch.dispatchEvent(new MessageEvent('message', { data: data }));
-    });
-  }
-  window.BroadcastChannel = function (name) {
-    var ch = new NativeBC(name);
-    ch._hvName = name;
-    live.add(ch);
-    var origPost = ch.postMessage.bind(ch);
-    var origClose = ch.close.bind(ch);
-    ch.postMessage = function (data) {
-      post(pack('broadcast', [name], JSON.stringify(data === undefined ? null : data)));
-      return origPost(data);
-    };
-    ch.close = function () { live.delete(ch); return origClose(); };
-    return ch;
-  };
-  window.BroadcastChannel.prototype = NativeBC.prototype;
-})();
-)JS";
+/* The JS bridge shim, injected into every document (AddScriptToExecuteOnDocumentCreated
+ * takes raw script text). window.helios.call invokes native functions; BroadcastChannel
+ * is subclassed so native broadcasts dispatch synthetic message events and page
+ * postMessage()s are forwarded to native subscriptions; <helios-window-controls> is the
+ * built-in title-bar button web component. Embedded from webview_bridge.js with C++23
+ * #embed, so the shim lives in a real .js file (editable/versionable/lintable on its
+ * own) instead of a raw string literal. */
+#include "webview_bridge.inc" /* generated from win32/webview_bridge.js (see src/CMakeLists.txt): kWebView2BridgeScript */
 
 } // namespace
 
@@ -515,8 +494,7 @@ DWORD map_win32_style(const heliosview_window_t* window)
         style = WS_POPUP; /* borderless and titleless; fully custom */
         break;
     case HELIOSVIEW_WINDOW_FRAMELESS:
-        /* resizable border, no title bar: the classic combo for custom-title-bar windows */
-        style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        style = WS_OVERLAPPEDWINDOW;
         break;
     default:
         style = WS_OVERLAPPEDWINDOW;
@@ -532,12 +510,105 @@ namespace {
 /* Event object that wakes the message loop's wait (triggered by post_event / quit via hv::g_platform_wake) */
 HANDLE g_wakeup_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
+/* Force the Common-Controls v6 activation context, from the library itself.
+ * HeliosView.dll embeds a v6 manifest dependency (hv_common_controls.manifest,
+ * passed to the MSVC linker via CMake), but the loader applies a DLL's manifest
+ * only to the DLL's own activation context - it does not merge it into the
+ * hosting process. So the library creates an activation context from the
+ * embedded resource and keeps it active: message boxes and common controls
+ * render themed (modern) for every consumer, with no exe-side manifest
+ * required. Created lazily on first use (not from a static initializer:
+ * CreateActCtxW during DLL load re-enters the loader's SxS state and can raise
+ * STATUS_SXS_CANT_GEN_ACTCTX, failing the load). */
+HANDLE g_cc_ctx = INVALID_HANDLE_VALUE;
+ULONG_PTR g_cc_cookie = 0;
+bool g_cc_attempted = false;
+
+void hv_ensure_common_controls_ctx()
+{
+    if (g_cc_attempted || g_cc_ctx != INVALID_HANDLE_VALUE)
+        return;
+    g_cc_attempted = true;
+
+    const HMODULE self = GetModuleHandleW(L"HeliosView.dll");
+    if (!self)
+        return;
+    wchar_t dll[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(self, dll, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH)
+        return;
+
+    /* The manifest may sit at resource id 1 (CREATEPROCESS) or 2
+     * (ISOLATIONAWARE) depending on the link pipeline, so pick the one that
+     * actually contains the Common-Controls dependency (CMake's default
+     * trustInfo-only manifest would activate without theming anything). */
+    static constexpr char kNeedle[] = "Microsoft.Windows.Common-Controls";
+    constexpr size_t kNeedleLen = sizeof(kNeedle) - 1;
+
+    for (const WORD id : {WORD{1}, WORD{2}, WORD{3}}) {
+        const HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(24)); /* 24 = RT_MANIFEST */
+        if (!res)
+            continue;
+        const HGLOBAL hg = LoadResource(self, res);
+        const char* data = hg ? static_cast<const char*>(LockResource(hg)) : nullptr;
+        const DWORD size = res ? SizeofResource(self, res) : 0;
+        if (!data || size < kNeedleLen)
+            continue;
+        bool has_v6 = false;
+        for (DWORD i = 0; i + kNeedleLen <= size; ++i)
+            if (std::memcmp(data + i, kNeedle, kNeedleLen) == 0) {
+                has_v6 = true;
+                break;
+            }
+        if (!has_v6)
+            continue;
+
+        ACTCTXW a{};
+        a.cbSize = sizeof(a);
+        a.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID;
+        a.lpSource = dll;
+        a.lpResourceName = MAKEINTRESOURCEW(id);
+        g_cc_ctx = CreateActCtxW(&a);
+        if (g_cc_ctx != INVALID_HANDLE_VALUE && ActivateActCtx(g_cc_ctx, &g_cc_cookie) != FALSE)
+            return; /* stays active for the process lifetime */
+        if (g_cc_ctx != INVALID_HANDLE_VALUE) {
+            ReleaseActCtx(g_cc_ctx);
+            g_cc_ctx = INVALID_HANDLE_VALUE;
+        }
+    }
+}
+
+/* Initialize the common controls (v6, loaded through the DLL manifest above).
+ * Runs once, at DLL load, before main: the app's first native window (and any
+ * controls it creates) is themed only after this. Idempotent. The static's
+ * value is never read — the declaration exists only to run the call once at
+ * load time (namespace scope cannot hold a bare statement). */
+const bool g_common_controls_initialized = [] {
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&icc);
+    return true;
+}();
+
 /* Register the platform wake callback with the cross-platform core (static init, before main) */
 const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_event); }, true);
 
-std::atomic<int32_t> g_next_window_id{1};
-std::flat_map<int32_t, heliosview_window_t*> g_windows_by_id; /* event dispatch: id → window */
-std::flat_map<HWND, heliosview_webview_t*> g_webviews_by_hwnd; /* resize WebViews together with their window */
+/* Per-thread library state. The win32 implementation is single-UI-thread by
+ * design — the same model as the cross-platform event queue (hv::g_queue in
+ * heliosview_internal.h): windows are created, looked up and destroyed on the
+ * thread that runs the message loop, so the live-window count is thread-local
+ * state, not a process-global variable. There is no id → window registry at
+ * all: a window's identity is its native handle (HWND), which events carry and
+ * heliosview_window_from_id resolves via IsWindow + GWLP_USERDATA — nothing to
+ * keep in sync with destroy, and a stale queued event resolves to NULL. */
+struct hv_ui_state {
+    int32_t window_count = 0; /* live windows on this thread (create/destroy) */
+};
+thread_local hv_ui_state g_ui_state;
+
+/* Session-end (WM_QUERYENDSESSION) callback: runs synchronously on the message-loop
+ * thread before shutdown/logoff; return non-zero to veto. */
+heliosview_session_end_cb g_session_end_cb = nullptr;
+void* g_session_end_userdata = nullptr;
 
 /* Routing ids (tray callback messages, menu item ids, caller ids) are allocated
  * from each window's own id space (window->next_route_id); the tray uid is the
@@ -597,11 +668,19 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
 
     switch (msg->message) {
     case WM_HV_WEBVIEW_MSG:
-        /* Marshalled webview tasks (cross-thread resolve/reject/broadcast).
-         * Looked up by hwnd: if the webview was destroyed, the entry is gone and
-         * the queued message is a no-op (never touches a freed object). */
-        if (auto it = g_webviews_by_hwnd.find(msg->hwnd); it != g_webviews_by_hwnd.end())
-            hv_drain_ui_tasks(it->second);
+        /* Marshalled webview tasks (cross-thread resolve/reject/broadcast). The
+         * message carries the posting WebView in wParam; it is drained only if
+         * that WebView is still attached to the window — destroy detaches it
+         * from the window's list first, so a queued message for a destroyed
+         * WebView is a no-op (never touches a freed object). */
+        if (win) {
+            const auto* wv = reinterpret_cast<heliosview_webview_t*>(msg->wParam);
+            for (auto* attached : win->webviews)
+                if (attached == wv) {
+                    hv_drain_ui_tasks(attached);
+                    break;
+                }
+        }
         return 0; /* consumed; not a user-facing event */
     case WM_COMMAND: {
         /* Menu item selection: TrackPopupMenu posts WM_COMMAND with the item's id
@@ -627,13 +706,12 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         out->timestamp_ms = ts;
         return 1;
     case WM_SIZE: {
-        /* WebViews attached to this window resize along with it */
-        auto range = g_webviews_by_hwnd.equal_range(msg->hwnd);
-        for (auto it = range.first; it != range.second; ++it)
-            if (auto* controller = it->second->controller.Get()) {
-                RECT rc{0, 0, LOWORD(msg->lParam), HIWORD(msg->lParam)};
-                controller->put_Bounds(rc);
-            }
+        /* WebViews attached to this window resize along with it (honoring any
+         * registered insets, so e.g. a title-bar strip stays uncovered) */
+        if (win)
+            for (auto* wv : win->webviews)
+                if (auto* controller = wv->controller.Get())
+                    controller->put_Bounds(hv_webview_rect(wv));
         out->type = HELIOSVIEW_EVENT_WINDOW_RESIZE;
         out->width = static_cast<int32_t>(LOWORD(msg->lParam));
         out->height = static_cast<int32_t>(HIWORD(msg->lParam));
@@ -648,6 +726,43 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         out->timestamp_ms = ts;
         return 1;
     }
+    case WM_MOVE:
+        /* final position (screen coords of the top-left corner) */
+        out->type = HELIOSVIEW_EVENT_WINDOW_MOVED;
+        out->x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
+        out->y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
+        out->timestamp_ms = ts;
+        return 1;
+    case WM_MOVING: {
+        /* drag in progress: lParam points at the current window rect */
+        const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
+        if (rc) {
+            out->type = HELIOSVIEW_EVENT_WINDOW_MOVING;
+            out->x = rc->left;
+            out->y = rc->top;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+        return 0;
+    }
+    case WM_SIZING: {
+        /* resize drag in progress: lParam points at the proposed window rect */
+        const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
+        if (rc) {
+            out->type = HELIOSVIEW_EVENT_WINDOW_SIZING;
+            out->width = rc->right - rc->left;
+            out->height = rc->bottom - rc->top;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+        return 0;
+    }
+    case WM_ENABLE:
+        /* wParam: TRUE = being enabled, FALSE = being disabled */
+        out->type = msg->wParam ? HELIOSVIEW_EVENT_WINDOW_ENABLED
+                                : HELIOSVIEW_EVENT_WINDOW_DISABLED;
+        out->timestamp_ms = ts;
+        return 1;
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
@@ -679,44 +794,166 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     return 1;
 }
 
-LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+/* ================= Title-bar strip metric =================
+ *
+ * Frameless windows draw all their chrome in the page (optionally with the
+ * injected <helios-window-controls> web component for the buttons). This is the
+ * 96-DPI height of the drag strip, scaled with the DPI. (Resizing needs no
+ * metric: FRAMELESS keeps the system WS_THICKFRAME border, which the system
+ * hit-tests natively.) */
+
+/* Height of the title-bar strip the drag area occupies, in 96-DPI pixels. */
+constexpr int kTitleBarHeight = 48;
+
+int hv_title_bar_height(HWND hwnd)
 {
-    /* WM_NCCREATE is sent synchronously during CreateWindowExW: register here so
-     * messages such as WM_SIZE delivered during creation get the correct window_id */
-    if (message == WM_NCCREATE) {
+    return MulDiv(kTitleBarHeight, GetDpiForWindow(hwnd), 96);
+}
+
+} // namespace
+
+/* ================= Window procedure (per-style, template + if constexpr) =================
+ *
+ * One window procedure per style, generated from a single template. `if
+ * constexpr` keeps each instantiation lean: only the code that style needs is
+ * compiled in, and the per-style differences (custom title bar hit-testing,
+ * control-button routing) are spelled out once here. heliosview_window_show
+ * picks the right instantiation + class name at creation. */
+
+template <heliosview_window_style_t Style>
+LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    /* WM_CREATE is sent synchronously during CreateWindowExW: register the
+     * window here so messages such as WM_SIZE delivered during creation find it
+     * (window_id = this hwnd).
+     * FRAMELESS styles: extend the DWM frame over the top strip so the native
+     * caption buttons (min/max/close) render there. */
+    if (message == WM_CREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
         auto* win = static_cast<heliosview_window_t*>(cs->lpCreateParams);
         if (win) {
             win->hwnd = hwnd;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(win));
         }
-        return DefWindowProcW(hwnd, message, wparam, lparam);
-    }
-
-    /* WM_NCHITTEST: registered drag regions act as a title bar (move the window
-     * on drag) for frameless/borderless windows. Any other point falls through to
-     * DefWindowProc (borders keep resize handles). */
-    if (message == WM_NCHITTEST) {
-        auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (win && !win->drag_regions.empty()) {
-            const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
-                               static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
-            POINT client = screen;
-            if (ScreenToClient(hwnd, &client)) {
-                for (const RECT& r : win->drag_regions) {
-                    if (client.x >= r.left && client.x < r.right
-                        && client.y >= r.top && client.y < r.bottom)
-                        return HTCAPTION;
-                }
-            }
+        /* FRAMELESS: immersive dark title-bar + rounded corners. The system's
+         * default WS_THICKFRAME border stays (DWM-drawn, modern look). */
+        if constexpr (Style == HELIOSVIEW_WINDOW_FRAMELESS) {
+            BOOL value = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
+            DWORD corner = DWMWCP_ROUND;
+            DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    const auto window_id_of = [hwnd] {
+    /* WM_NCCALCSIZE — no visible title bar / border:
+     *   - BORDERLESS: no frame at all (fully custom drawing).
+     *   - FRAMELESS: keep the system's default WS_THICKFRAME border — thin,
+     *     DWM-drawn and themed. The border is non-client, so the system
+     *     hit-tests it directly and resizing works natively (the WM_NCHITTEST
+     *     below passes non-client points back to DefWindowProc). */
+    if constexpr (Style == HELIOSVIEW_WINDOW_BORDERLESS) {
+        if (message == WM_NCCALCSIZE)
+            return 0;
+    }
+    if constexpr (Style == HELIOSVIEW_WINDOW_FRAMELESS) {
+        if (message == WM_NCCALCSIZE) {
+            /* Handle both wParam forms: the initial call at window creation
+             * arrives with wParam == FALSE (lParam is a RECT*), later resizes /
+             * frame changes with wParam == TRUE (NCCALCSIZE_PARAMS*). Skipping
+             * the FALSE case is why the border only appeared after the first
+             * resize. */
+            RECT* rc = wparam ? &reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)->rgrc[0]
+                              : reinterpret_cast<RECT*>(lparam);
+            const int border = 8;
+            rc->left += border;
+            rc->right -= border;
+            rc->bottom -= border;
+            /* top: 0 — no title bar, the client area starts at the window top */
+            return 0;
+        }
+    }
+
+    /* WM_NCHITTEST — custom chrome for the non-system-chrome styles:
+     *   - BORDERLESS / FRAMELESS: the whole window is the client area, so the
+     *     resize edges are mapped manually (there is no system caption).
+     * NORMAL leaves everything to the system. */
+    if constexpr (Style != HELIOSVIEW_WINDOW_NORMAL) {
+        if (message == WM_NCHITTEST) {
+            auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (!win)
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+
+            const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
+                               static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
+            POINT client = screen;
+            if (!ScreenToClient(hwnd, &client))
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+
+            /* Non-client points (the system WS_THICKFRAME resize border that
+             * FRAMELESS keeps) go back to DefWindowProc: it returns
+             * HTLEFT/HTTOP/... there, so the system resizes natively. */
+            RECT cr{};
+            GetClientRect(hwnd, &cr);
+            if (client.x < 0 || client.y < 0
+                || client.x >= cr.right || client.y >= cr.bottom)
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+
+            for (const RECT& r : win->drag_regions) {
+                if (client.x >= r.left && client.x < r.right
+                    && client.y >= r.top && client.y < r.bottom)
+                    return HTCAPTION;
+            }
+
+            /* FRAMELESS: the top strip drags the window (like a title bar).
+             * Only applies when no explicit drag region is registered — and only
+             * when the strip is not covered by a child window: a full-bleed
+             * WebView eats the hit-test, so those apps call startDrag() from the
+             * page instead. */
+            if constexpr (Style == HELIOSVIEW_WINDOW_FRAMELESS) {
+                if (win->drag_regions.empty() && client.y >= 0
+                    && client.y < hv_title_bar_height(hwnd))
+                    return HTCAPTION;
+            }
+            return HTCLIENT;
+        }
+    }
+
+    /* WM_GETMINMAXINFO: clamp the tracking size (min/max client size -> window
+     * size incl. frame). Must return 0 (handled). */
+    if (message == WM_GETMINMAXINFO) {
         auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        return win ? win->id : 0;
-    };
+        if (win && (win->min_w || win->min_h || win->max_w || win->max_h)) {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lparam);
+            const DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+            /* Frameless/borderless windows are entirely client area, so the
+             * min/max client size is the track size directly. */
+            const bool adjust = Style == HELIOSVIEW_WINDOW_NORMAL;
+            if (win->min_w || win->min_h) {
+                RECT rc{0, 0, win->min_w, win->min_h};
+                if (adjust)
+                    AdjustWindowRect(&rc, st, FALSE);
+                mmi->ptMinTrackSize.x = rc.right - rc.left;
+                mmi->ptMinTrackSize.y = rc.bottom - rc.top;
+            }
+            if (win->max_w || win->max_h) {
+                RECT rc{0, 0, win->max_w, win->max_h};
+                if (adjust)
+                    AdjustWindowRect(&rc, st, FALSE);
+                mmi->ptMaxTrackSize.x = rc.right - rc.left;
+                mmi->ptMaxTrackSize.y = rc.bottom - rc.top;
+            }
+        }
+        return 0;
+    }
+
+    /* WM_QUERYENDSESSION: run the session-end callback synchronously (save state,
+     * veto via non-zero return). */
+    if (message == WM_QUERYENDSESSION) {
+        if (g_session_end_cb)
+            return g_session_end_cb(g_session_end_userdata) ? FALSE : TRUE;
+        return TRUE; /* allow the session to end */
+    }
 
     MSG native{};
     native.hwnd = hwnd;
@@ -742,13 +979,19 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
 
     if (handled == 1) {
-        event.window_id = window_id_of();
+        /* The native handle IS the window id: events carry it, and the consumer
+         * looks the window back up via heliosview_window_from_id (IsWindow +
+         * GWLP_USERDATA), so no id registry is involved. */
+        event.window_id = reinterpret_cast<uintptr_t>(hwnd);
         hv::queue_push(event);
     }
     return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-} // namespace
+/* Explicit instantiations, one per style (the only WndProcs the library uses). */
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>(HWND, UINT, WPARAM, LPARAM);
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>(HWND, UINT, WPARAM, LPARAM);
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>(HWND, UINT, WPARAM, LPARAM);
 
 /* ================= Message loop ================= */
 
@@ -801,13 +1044,12 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
     if (!title)
         return nullptr;
     auto* window = hv::hv_alloc<heliosview_window>();
-    window->id = g_next_window_id.fetch_add(1);
     window->width = width;
     window->height = height;
     window->title = title;
     window->style = style;
     window->userdata = userdata;
-    g_windows_by_id[window->id] = window;
+    g_ui_state.window_count++;
     return window;
 }
 
@@ -822,22 +1064,36 @@ void heliosview_window_set_userdata(heliosview_window_t* window, void* userdata)
         window->userdata = userdata;
 }
 
-heliosview_window_t* heliosview_window_from_id(int32_t window_id)
+/* Look a window up by its native handle (the window_id an event carries).
+ * The handle must still exist and be one of this library's windows, so a
+ * destroyed window safely resolves to NULL (stale queued events become no-ops)
+ * and a foreign window that reused the handle never hands back a garbage
+ * pointer. Message-loop thread. */
+heliosview_window_t* heliosview_window_from_id(uintptr_t window_id)
 {
-    auto it = g_windows_by_id.find(window_id);
-    return it != g_windows_by_id.end() ? it->second : nullptr;
+    const HWND hwnd = reinterpret_cast<HWND>(window_id);
+    if (!hwnd || !IsWindow(hwnd))
+        return nullptr;
+    /* Only this library's windows store a heliosview_window_t* in GWLP_USERDATA;
+     * verify the window procedure is one of ours before trusting it. */
+    const auto proc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
+    if (proc != &heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>
+        && proc != &heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>
+        && proc != &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>)
+        return nullptr;
+    return reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 }
 
 int heliosview_window_count(void)
 {
-    return static_cast<int>(g_windows_by_id.size());
+    return static_cast<int>(g_ui_state.window_count);
 }
 
 void heliosview_window_destroy(heliosview_window_t* window)
 {
     if (!window)
         return;
-    g_windows_by_id.erase(window->id);
+    g_ui_state.window_count--;
     if (window->hwnd) {
         /* The window is a passive registry only: it does not own trays/menus.
          * Their C++ wrappers (Tray/Menu) must be destroyed before the window. */
@@ -853,44 +1109,77 @@ int heliosview_window_show(heliosview_window_t* window)
 {
     if (!window)
         return -1;
+    hv_ensure_common_controls_ctx(); /* v6 theming for this window's controls */
     if (window->hwnd) {
         ShowWindow(window->hwnd, SW_SHOW);
         return 0;
     }
 
+    /* Pick the window class + procedure for this style. Each style gets its own
+     * class (distinct lpfnWndProc instantiation, see the template above). */
+    const wchar_t* class_name = L"HeliosViewWindow";
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        class_name = L"HeliosViewWindowBorderless";
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        class_name = L"HeliosViewWindowFrameless";
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        class_name = L"HeliosViewWindow";
+        break;
+    }
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = heliosview_wndproc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-    wc.lpszClassName = L"HeliosViewWindow";
+    wc.lpszClassName = class_name;
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>;
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>;
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>;
+        break;
+    }
     RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
 
     const std::wstring title = utf8_to_wide(window->title);
 
-    /* compute the window size for the preset style (AdjustWindowRect is the identity for borderless styles) */
+    /* compute the window size for the preset style: NORMAL uses AdjustWindowRect
+     * (client + caption + frame); BORDERLESS and FRAMELESS are entirely client
+     * area (WM_NCCALCSIZE), so the requested client size is the window size. */
     const DWORD style = map_win32_style(window);
     RECT rect{0, 0, window->width, window->height};
-    AdjustWindowRect(&rect, style, FALSE);
+    if (window->style == HELIOSVIEW_WINDOW_NORMAL)
+        AdjustWindowRect(&rect, style, FALSE);
 
-    window->hwnd = CreateWindowExW(0, L"HeliosViewWindow", title.c_str(), style,
+    window->hwnd = CreateWindowExW(0, class_name, title.c_str(), style,
                                    CW_USEDEFAULT, CW_USEDEFAULT,
                                    rect.right - rect.left, rect.bottom - rect.top,
                                    nullptr, nullptr, GetModuleHandleW(nullptr), window);
     if (!window->hwnd)
         return -2;
 
-    /* already registered in WM_NCCREATE; fall back here if that did not happen */
+    /* already registered in WM_CREATE; fall back here if that did not happen */
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
     ShowWindow(window->hwnd, SW_SHOW);
     return 0;
 }
 
-int32_t heliosview_window_id(const heliosview_window_t* window)
+/* The window's native handle (HWND) — the window_id its events carry. 0 until
+ * the window is shown (the native window is created on show()). */
+uintptr_t heliosview_window_id(const heliosview_window_t* window)
 {
-    return window ? window->id : 0;
+    return window ? reinterpret_cast<uintptr_t>(window->hwnd) : 0;
 }
 
 uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata)
@@ -990,7 +1279,8 @@ int heliosview_window_set_size(heliosview_window_t* window, int32_t width, int32
     if (!window || !window->hwnd)
         return -1;
     RECT rc{0, 0, width, height};
-    AdjustWindowRect(&rc, map_win32_style(window), FALSE);
+    if (window->style == HELIOSVIEW_WINDOW_NORMAL)
+        AdjustWindowRect(&rc, map_win32_style(window), FALSE);
     window->width = width;
     window->height = height;
     return SetWindowPos(window->hwnd, nullptr, 0, 0,
@@ -1123,7 +1413,17 @@ int heliosview_window_set_resizable(heliosview_window_t* window, int resizable)
     window->resizable = resizable != 0;
     if (!window->hwnd)
         return 0; /* applied at creation (map_win32_style reads the flag) */
-    const DWORD style = map_win32_style(window);
+    /* Toggle only the resize-related bits: preserve the current style as-is
+     * (WS_VISIBLE, the caption, WS_VSYNC, ...). For BORDERLESS the thick frame
+     * is not present; resizing there is manual (WM_NCHITTEST edge mapping), so
+     * only the maximize box changes. */
+    LONG_PTR style = GetWindowLongPtrW(window->hwnd, GWL_STYLE);
+    if (window->resizable)
+        style |= (window->style == HELIOSVIEW_WINDOW_BORDERLESS)
+                     ? WS_MAXIMIZEBOX
+                     : (WS_THICKFRAME | WS_MAXIMIZEBOX);
+    else
+        style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     SetWindowLongPtrW(window->hwnd, GWL_STYLE, style);
     /* Re-frame the window so the (possibly removed) thick frame is applied. */
     SetWindowPos(window->hwnd, nullptr, 0, 0, 0, 0,
@@ -1149,11 +1449,150 @@ int heliosview_window_clear_drag_regions(heliosview_window_t* window)
     return 0;
 }
 
+int heliosview_window_start_drag(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    /* Standard programmatic title-bar drag: release any capture and replay a
+     * non-client left-button-down on the caption, which makes the system run the
+     * move loop. Needed when a full-bleed WebView covers the window (the WebView
+     * child receives all mouse input, so WM_NCHITTEST never reaches the title
+     * strip); the page calls this on mousedown over its own title bar. */
+    ReleaseCapture();
+    const DWORD pos = GetMessagePos();
+    SendMessageW(window->hwnd, WM_NCLBUTTONDOWN, HTCAPTION,
+                 MAKELPARAM(static_cast<int16_t>(LOWORD(pos)),
+                            static_cast<int16_t>(HIWORD(pos))));
+    return 0;
+}
+
 uint32_t heliosview_window_dpi(const heliosview_window_t* window)
 {
     if (!window || !window->hwnd)
         return 0;
     return static_cast<uint32_t>(GetDpiForWindow(window->hwnd));
+}
+
+int32_t heliosview_window_title_bar_height(const heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return 0;
+    if (window->style != HELIOSVIEW_WINDOW_FRAMELESS)
+        return 0; /* only the frameless style reserves a title-bar strip */
+    return hv_title_bar_height(window->hwnd);
+}
+
+int heliosview_window_set_min_size(heliosview_window_t* window, int32_t min_width, int32_t min_height)
+{
+    if (!window)
+        return -1;
+    window->min_w = min_width < 0 ? 0 : min_width;
+    window->min_h = min_height < 0 ? 0 : min_height;
+    return 0; /* WM_GETMINMAXINFO reads the fields on the next resize */
+}
+
+int heliosview_window_set_max_size(heliosview_window_t* window, int32_t max_width, int32_t max_height)
+{
+    if (!window)
+        return -1;
+    window->max_w = max_width < 0 ? 0 : max_width;
+    window->max_h = max_height < 0 ? 0 : max_height;
+    return 0;
+}
+
+int heliosview_window_flash(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    FLASHWINFO fi{};
+    fi.cbSize = sizeof(fi);
+    fi.hwnd = window->hwnd;
+    fi.dwFlags = FLASHW_ALL;
+    fi.uCount = 3; /* flash 3 times, then stop */
+    fi.dwTimeout = 0; /* system default caret blink rate */
+    FlashWindowEx(&fi);
+    return 0;
+}
+
+int heliosview_window_flash_until_focus(heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    FLASHWINFO fi{};
+    fi.cbSize = sizeof(fi);
+    fi.hwnd = window->hwnd;
+    fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG; /* flash until the window is focused */
+    fi.uCount = 0;
+    fi.dwTimeout = 0;
+    FlashWindowEx(&fi);
+    return 0;
+}
+
+int heliosview_window_set_fullscreen(heliosview_window_t* window, int on)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    if ((on != 0) == window->fullscreen)
+        return 0; /* already in the requested state */
+
+    if (on) {
+        /* Save the current geometry + style so exiting fullscreen can restore them. */
+        GetWindowRect(window->hwnd, &window->fs_restore_rect);
+        window->fs_restore_style = static_cast<DWORD>(GetWindowLongPtrW(window->hwnd, GWL_STYLE));
+        window->fs_restore_exstyle = static_cast<DWORD>(GetWindowLongPtrW(window->hwnd, GWL_EXSTYLE));
+
+        /* Cover the whole monitor (the work area would leave the taskbar visible;
+         * true fullscreen hides it). Drop the frame/caption so nothing is drawn. */
+        HMONITOR hmon = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(hmon, &mi);
+
+        SetWindowLongPtrW(window->hwnd, GWL_STYLE,
+                          window->fs_restore_style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+        SetWindowPos(window->hwnd, HWND_TOP,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+        window->fullscreen = true;
+    } else {
+        /* Restore the saved geometry and window style. */
+        SetWindowLongPtrW(window->hwnd, GWL_STYLE, window->fs_restore_style);
+        SetWindowLongPtrW(window->hwnd, GWL_EXSTYLE, window->fs_restore_exstyle);
+        SetWindowPos(window->hwnd, nullptr,
+                     window->fs_restore_rect.left, window->fs_restore_rect.top,
+                     window->fs_restore_rect.right - window->fs_restore_rect.left,
+                     window->fs_restore_rect.bottom - window->fs_restore_rect.top,
+                     SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+        window->fullscreen = false;
+    }
+    return 0;
+}
+
+int heliosview_window_is_fullscreen(const heliosview_window_t* window)
+{
+    return window && window->fullscreen ? 1 : 0;
+}
+
+int heliosview_window_set_enabled(heliosview_window_t* window, int enabled)
+{
+    if (!window || !window->hwnd)
+        return -1;
+    EnableWindow(window->hwnd, enabled != 0);
+    return 0;
+}
+
+int heliosview_window_is_enabled(const heliosview_window_t* window)
+{
+    return window && window->hwnd && IsWindowEnabled(window->hwnd) ? 1 : 0;
+}
+
+int heliosview_set_session_end_callback(heliosview_session_end_cb callback, void* userdata)
+{
+    g_session_end_cb = callback;
+    g_session_end_userdata = userdata;
+    return 0;
 }
 
 int heliosview_set_dpi_awareness(void)
@@ -1178,6 +1617,72 @@ int heliosview_set_dpi_awareness(void)
     using SetProcessDPIAwareFn = BOOL(WINAPI*)(void);
     const auto setAware = reinterpret_cast<SetProcessDPIAwareFn>(GetProcAddress(user32, "SetProcessDPIAware"));
     return (setAware && setAware()) ? 0 : -1;
+}
+
+/* ================= Screen / monitor geometry ================= */
+
+namespace {
+
+/* Fill a heliosview_rect_t from a MONITORINFO work area. Returns 0 on success. */
+int fill_rect_work(RECT rc, heliosview_rect_t* out)
+{
+    if (!out)
+        return -1;
+    out->x = rc.left;
+    out->y = rc.top;
+    out->width = rc.right - rc.left;
+    out->height = rc.bottom - rc.top;
+    return 0;
+}
+
+/* Work area of the monitor selected by `hmon`. Returns 0 on success. */
+int work_area_of(HMONITOR hmon, heliosview_rect_t* out_rect)
+{
+    if (!hmon)
+        return -1;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hmon, &mi))
+        return -1;
+    return fill_rect_work(mi.rcWork, out_rect);
+}
+
+} // namespace
+
+int heliosview_screen_work_area(int32_t x, int32_t y, heliosview_rect_t* out_rect)
+{
+    if (!out_rect)
+        return -1;
+    POINT pt{x, y};
+    HMONITOR hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    return work_area_of(hmon, out_rect);
+}
+
+int heliosview_window_work_area(const heliosview_window_t* window, heliosview_rect_t* out_rect)
+{
+    if (!window || !window->hwnd || !out_rect)
+        return -1;
+    HMONITOR hmon = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTONEAREST);
+    return work_area_of(hmon, out_rect);
+}
+
+int heliosview_primary_work_area(heliosview_rect_t* out_rect)
+{
+    if (!out_rect)
+        return -1;
+    return work_area_of(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), out_rect);
+}
+
+int heliosview_cursor_position(int32_t* out_x, int32_t* out_y)
+{
+    if (!out_x || !out_y)
+        return -1;
+    POINT pt{};
+    if (!GetCursorPos(&pt))
+        return -1;
+    *out_x = pt.x;
+    *out_y = pt.y;
+    return 0;
 }
 
 /* ================= Taskbar progress (ITaskbarList3) ================= */
@@ -1571,8 +2076,10 @@ bool parse_call_envelope(const std::string& msg, uint64_t& id, std::string& name
     }
     id = v;
 
-    /* name must be a valid C identifier (keeps the header separator-safe) */
-    if (!hv_valid_name(head[3].c_str()))
+    /* name must be a valid C identifier (keeps the header separator-safe), or
+     * one of the library's internal __hv.* names (hv_internal_name) — both are
+     * safe in the tab-separated header. */
+    if (!hv_valid_name(head[3].c_str()) && !hv_internal_name(head[3].c_str()))
         return false;
     name = head[3];
 
@@ -1632,6 +2139,130 @@ void hv_dispatch_broadcast(heliosview_webview_t* wv, const std::string& name, co
         s.callback(wv, name.c_str(), data.c_str(), s.userdata);
 }
 
+/* ---------- Built-in window-control bridge ----------
+ * Backs the injected <helios-window-controls> web component (see
+ * kWebView2BridgeScript). Registered on every WebView under the reserved
+ * __hv_* names; an app binding the same name replaces the built-in. */
+
+/* First JSON string literal of a JSON array (e.g. ["minimize"]) — a lightweight
+ * parse for the control actions the component sends. */
+std::string hv_first_json_string(const char* args_json)
+{
+    if (!args_json)
+        return {};
+    const char* q = strchr(args_json, '"');
+    if (!q)
+        return {};
+    const char* end = strchr(q + 1, '"');
+    if (!end)
+        return {};
+    return std::string(q + 1, end);
+}
+
+/* The window a webview is attached to (for the built-in control actions). */
+heliosview_window_t* hv_webview_owner(heliosview_webview_t* wv)
+{
+    if (!wv || !wv->parent)
+        return nullptr;
+    return reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(wv->parent, GWLP_USERDATA));
+}
+
+/* __hv_control("minimize"|"maximize"|"restore"|"close") — perform the caption
+ * action on the owner window (maximize auto-toggles like the real button). */
+void hv_control_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* name,
+                        const char* args_json, void* userdata)
+{
+    (void)name;
+    (void)userdata;
+    auto* win = hv_webview_owner(wv);
+    const std::string action = hv_first_json_string(args_json);
+    if (!win || !win->hwnd) {
+        heliosview_webview_reject(wv, call_id, R"({"error":"no window"})");
+        return;
+    }
+    if (action == "minimize")
+        ShowWindow(win->hwnd, SW_MINIMIZE);
+    else if (action == "maximize") {
+        /* Maximize is disabled while the window is not resizable (the maximize
+         * box was removed); restoring an already-maximized window stays allowed. */
+        if (!win->resizable && !IsZoomed(win->hwnd)) {
+            heliosview_webview_reject(wv, call_id, R"({"error":"maximize disabled"})");
+            return;
+        }
+        ShowWindow(win->hwnd, IsZoomed(win->hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    } else if (action == "restore")
+        ShowWindow(win->hwnd, SW_RESTORE);
+    else if (action == "close")
+        PostMessageW(win->hwnd, WM_CLOSE, 0, 0);
+    else {
+        heliosview_webview_reject(wv, call_id, R"({"error":"unknown control action"})");
+        return;
+    }
+    heliosview_webview_resolve(wv, call_id, R"({"ok":true})");
+}
+
+/* __hv_state() — the owner's show state (the component toggles the maximize /
+ * restore glyph from it), whether the window can be maximized (maximizable;
+ * the component disables the maximize button when false), plus the title-bar
+ * strip height. */
+void hv_state_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* name,
+                      const char* args_json, void* userdata)
+{
+    (void)name;
+    (void)args_json;
+    (void)userdata;
+    auto* win = hv_webview_owner(wv);
+    if (!win || !win->hwnd) {
+        heliosview_webview_reject(wv, call_id, R"({"error":"no window"})");
+        return;
+    }
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  R"({"maximized":%s,"minimized":%s,"fullscreen":%s,"maximizable":%s,"titleBarHeight":%d})",
+                  IsZoomed(win->hwnd) ? "true" : "false",
+                  IsIconic(win->hwnd) ? "true" : "false",
+                  win->fullscreen ? "true" : "false",
+                  win->resizable ? "true" : "false",
+                  static_cast<int>(hv_title_bar_height(win->hwnd)));
+    heliosview_webview_resolve(wv, call_id, buf);
+}
+
+/* __hv_drag() — start a window drag (the <helios-window-title-bar> component
+ * calls it on mousedown over its own strip). Same mechanism as
+ * heliosview_window_start_drag: a full-bleed WebView eats WM_NCHITTEST, so the
+ * page must initiate the move loop itself. */
+void hv_drag_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* name,
+                     const char* args_json, void* userdata)
+{
+    (void)name;
+    (void)args_json;
+    (void)userdata;
+    auto* win = hv_webview_owner(wv);
+    if (!win || !win->hwnd) {
+        heliosview_webview_reject(wv, call_id, R"({"error":"no window"})");
+        return;
+    }
+    ReleaseCapture();
+    const DWORD pos = GetMessagePos();
+    SendMessageW(win->hwnd, WM_NCLBUTTONDOWN, HTCAPTION,
+                 MAKELPARAM(static_cast<int16_t>(LOWORD(pos)),
+                            static_cast<int16_t>(HIWORD(pos))));
+    heliosview_webview_resolve(wv, call_id, R"({"ok":true})");
+}
+
+/* Internal: register a built-in bridge method under a reserved __hv_* name,
+ * bypassing the user-facing heliosview_webview_bind (which rejects reserved
+ * names so applications cannot shadow the built-in components' bridge).
+ * UI thread. */
+void hv_bind_builtin(heliosview_webview_t* wv, const char* name,
+                     heliosview_webview_bind_cb cb)
+{
+    auto it = wv->bindings.find(name);
+    if (it != wv->bindings.end() && it->second.dtor)
+        it->second.dtor(it->second.userdata);
+    wv->bindings[name] = hv_webview_binding{cb, nullptr, nullptr};
+}
+
 } // namespace
 
 heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
@@ -1641,7 +2272,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
 
     auto* webview = hv::hv_alloc<heliosview_webview>();
     webview->parent = parent->hwnd;
-    g_webviews_by_hwnd[parent->hwnd] = webview;
+    parent->webviews.push_back(webview); /* attached: WM_SIZE resizes it, WM_HV_WEBVIEW_MSG dispatches to it */
     webview->creating = true;
 
     /* hv_alloc + Release: hand the initial reference to the API (Release to zero deletes it when done) */
@@ -1660,9 +2291,8 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                     webview->controller = controller;
                     controller->get_CoreWebView2(&webview->webview);
                     controller->put_IsVisible(TRUE);
-                    RECT rc{};
-                    GetClientRect(webview->parent, &rc);
-                    controller->put_Bounds(rc);
+                    controller->put_Bounds(hv_webview_rect(webview));
+                   
 
                     /* JS -> native messaging */
                     auto* msg_handler = hv::hv_alloc<web_message_received_handler>(
@@ -1817,6 +2447,27 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                         title_handler->Release();
                     }
 
+                    /* Enable WebView2's CSS app-region: drag/no-drag support
+                     * (ICoreWebView2Settings9, stable SDK): the injected
+                     * <helios-window-title-bar> component drags the window with
+                     * it (no bridge round-trip), and <helios-window-controls>
+                     * opts its buttons out with app-region:no-drag. */
+                    Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+                    if (SUCCEEDED(webview->webview->get_Settings(&settings))) {
+                        Microsoft::WRL::ComPtr<ICoreWebView2Settings9> settings9;
+                        if (SUCCEEDED(settings.As(&settings9)))
+                            settings9->put_IsNonClientRegionSupportEnabled(TRUE);
+                    }
+
+                    /* Built-in window-control bridge for the injected
+                     * <helios-window-controls> / <helios-window-title-bar> web
+                     * components. The "__hv.*" names are not valid C identifiers
+                     * (they contain a dot), so applications cannot bind or
+                     * subscribe them — only this internal whitelist can. */
+                    hv_bind_builtin(webview, "__hv.control", hv_control_bind_cb);
+                    hv_bind_builtin(webview, "__hv.state", hv_state_bind_cb);
+                    hv_bind_builtin(webview, "__hv.drag", hv_drag_bind_cb);
+
                     /* run the navigation queued during initialization */
                     if (webview->has_pending) {
                         const std::wstring text = utf8_to_wide(webview->pending_text);
@@ -1836,7 +2487,7 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
     env_handler->Release();
 
     if (FAILED(hr)) {
-        g_webviews_by_hwnd.erase(webview->parent);
+        parent->webviews.pop_back(); /* undo the attach above (it is the last entry) */
         hv::hv_dealloc(webview);
         return nullptr;
     }
@@ -1849,7 +2500,18 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
      * the WebView2 controller and the bound userdata dtors are released here. */
     if (!webview)
         return;
-    g_webviews_by_hwnd.erase(webview->parent);
+    /* Detach from the owner window first, so queued WM_HV_WEBVIEW_MSG / WM_SIZE
+     * messages no longer find it. If the window is already gone (the app
+     * destroyed it before this WebView, contrary to the documented order), the
+     * window's list went with it — nothing to remove. */
+    if (webview->parent) {
+        if (auto* win = reinterpret_cast<heliosview_window_t*>(
+                GetWindowLongPtrW(webview->parent, GWLP_USERDATA))) {
+            auto& list = win->webviews;
+            if (auto it = std::find(list.begin(), list.end(), webview); it != list.end())
+                list.erase(it);
+        }
+    }
     if (webview->webview && webview->message_token.value != 0)
         webview->webview->remove_WebMessageReceived(webview->message_token);
     if (webview->webview && webview->nav_token.value != 0)
@@ -1923,7 +2585,9 @@ int heliosview_webview_bind(heliosview_webview_t* webview, const char* name,
     if (!webview || !name || !callback)
         return -1;
     /* names must be C identifiers ([A-Za-z_][A-Za-z0-9_]*): this is both the
-     * binding convention and what keeps the wire header separator-safe. */
+     * binding convention and what keeps the wire header separator-safe. The
+     * library's internal bridge names ("__hv.*", see hv_internal_name) contain a
+     * dot and therefore fail this check — they cannot be bound by applications. */
     if (!hv_valid_name(name))
         return -2;
     /* bindings are owned by the UI thread */
@@ -2034,7 +2698,9 @@ int heliosview_webview_subscribe(heliosview_webview_t* webview, const char* name
     if (!webview || !name || !callback)
         return -1;
     /* names must be C identifiers, same rule as bind (keeps the wire header
-     * separator-safe and consistent with the function-naming convention). */
+     * separator-safe and consistent with the function-naming convention); the
+     * internal "__hv.*" bridge names (hv_internal_name) fail this check and
+     * cannot be subscribed by applications. */
     if (!hv_valid_name(name))
         return -2;
     /* subscriptions are owned by the UI thread */
@@ -2186,6 +2852,30 @@ int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
     return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
 }
 
+int heliosview_webview_set_insets(heliosview_webview_t* webview,
+                                  int32_t top, int32_t right,
+                                  int32_t bottom, int32_t left)
+{
+    if (!webview)
+        return -1;
+    /* The WebView2 controller is UI-thread bound (put_Bounds included); follow
+     * the same marshalling contract as the other webview APIs. */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, top, right, bottom, left] {
+            heliosview_webview_set_insets(wv, top, right, bottom, left);
+        });
+        return 0;
+    }
+    webview->inset_top = top > 0 ? top : 0;
+    webview->inset_right = right > 0 ? right : 0;
+    webview->inset_bottom = bottom > 0 ? bottom : 0;
+    webview->inset_left = left > 0 ? left : 0;
+    webview->has_insets = true;
+    if (auto* controller = webview->controller.Get())
+        controller->put_Bounds(hv_webview_rect(webview));
+    return 0;
+}
+
 /* ================= Native dialogs & system helpers ================= */
 
 namespace {
@@ -2257,6 +2947,7 @@ int heliosview_select_folder(heliosview_window_t* window, const char* title, cha
         *out_path = nullptr;
     if (!out_path)
         return -1;
+    hv_ensure_common_controls_ctx(); /* themed file dialog */
     if (FAILED(hv_ensure_com()))
         return -1;
 
@@ -2300,6 +2991,7 @@ int heliosview_open_files(heliosview_window_t* window, const char* title, const 
         *out_paths = nullptr;
     if (!out_paths)
         return -1;
+    hv_ensure_common_controls_ctx(); /* themed file dialog */
     if (FAILED(hv_ensure_com()))
         return -1;
 
@@ -2397,6 +3089,7 @@ int heliosview_save_file(heliosview_window_t* window, const char* title, const c
         *out_path = nullptr;
     if (!out_path)
         return -1;
+    hv_ensure_common_controls_ctx(); /* themed file dialog */
     if (FAILED(hv_ensure_com()))
         return -1;
 
@@ -2447,6 +3140,7 @@ int heliosview_message_box(heliosview_window_t* window, heliosview_message_type_
                            heliosview_message_buttons_t buttons,
                            const char* title, const char* message)
 {
+    hv_ensure_common_controls_ctx(); /* themed (modern) message box, no exe manifest needed */
     UINT flags = 0;
     switch (type) {
     case HELIOSVIEW_MESSAGE_INFO:     flags |= MB_ICONINFORMATION; break;
