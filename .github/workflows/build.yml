@@ -11,6 +11,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # third_party/stdexec and third_party/json are git submodules
+          # (vendored header-only deps); checkout must fetch them.
+          submodules: recursive
 
       # windows-latest ships Visual Studio 2026, not 2022 - and std::flat_map
       # needs a recent MSVC. msvc-dev-cmd finds the latest installed VS toolset
