@@ -109,7 +109,7 @@ DLL 和 demo 一起落在 `build/bin/`，无需配置 `PATH`。
 
 | demo | 文件 | 演示内容 |
 | --- | --- | --- |
-| `HeliosViewDemo` | `examples/main.cpp` | 信号 + 线程契约（工作线程 → `postTask`） |
+| `HeliosViewDemo` | `examples/main.cpp` | **WebView 总演示**：滑块 + 输入框驱动全部功能 |
 | `HeliosViewWindowDemo` | `examples/window_demo.cpp` | 基础窗口 + 信号/槽 + 托盘 + 菜单 |
 | `HeliosViewAppDemo` | `examples/app_demo.cpp` | `Window` 子类化、窗口样式、成员函数槽、窗口 API |
 | `HeliosViewSystemDemo` | `examples/system_demo.cpp` | 对话框、剪贴板、toast、任务栏进度、托盘气泡 |
@@ -198,15 +198,15 @@ win.show();
 **Web 绘制标题栏（推荐）。** 因为铺满的 WebView 无法被原生 DWM caption 按钮覆盖（"无可见标题栏"与"系统标题栏按钮"在 Win32 上互斥），标题栏最自然的做法就是在页面里画。桥 shim 在每个页面注入两个 web component：
 
 - `<helios-window-title-bar>` —— 放在页面顶部：通过 WebView2 的**原生 `app-region: drag` 支持**拖动窗口（库已启用 `IsNonClientRegionSupportEnabled`——无桥接往返、无需绑定），双击切换最大化；
-- `<helios-window-controls>` —— 放进标题栏里：绘制 Win10/11 最小化 / 最大化 / 关闭字形（hover / 按下反馈，关闭键 hover 变红），调用内置 `__hv_control` / `__hv_state` 桥；最大化时按钮自动切换为还原字形。它会给自己的按钮自动加 `app-region: no-drag`，保证可点击。
+- `<helios-window-controls>` —— 放进标题栏里：绘制 Win10/11 最小化 / 最大化 / 关闭字形（hover / 按下反馈，关闭键 hover 变红），调用内置 `__hv.control` / `__hv.state` 桥；最大化时按钮自动切换为还原字形（窗口不可调整大小时最大化按钮禁用）。它会给自己的按钮自动加 `app-region: no-drag`，保证可点击。
 
 ```cpp
 auto win = std::make_shared<helios::WebViewWindow>(
     900, 640, "App", helios::WindowStyle::Frameless);
 win->show();
 win->createWebView();
-// 就这些——拖拽是原生 app-region，按钮用内置的 __hv_control / __hv_state 桥
-// （__hv_state 还返回 titleBarHeight，即 DPI 缩放的标题栏条带高度）。
+// 就这些——拖拽是原生 app-region，按钮用内置的 __hv.control / __hv.state 桥
+// （__hv.state 还返回 titleBarHeight，即 DPI 缩放的标题栏条带高度）。
 ```
 
 ```html
