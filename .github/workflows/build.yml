@@ -18,8 +18,21 @@ jobs:
         with:
           cmake-version: '4.3.0'
 
+      - name: Show cmake version
+        shell: pwsh
+        run: |
+          $v = cmake --version 2>&1 | Select-Object -First 1
+          "::notice::cmake: $v"
+
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        shell: pwsh
+        run: |
+          $log = cmake -S . -B build -G "Visual Studio 17 2022" -A x64 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $log | Select-Object -Last 30 | ForEach-Object { "::error::$_" }
+            exit 1
+          }
+          $log
 
       - name: Build (Release)
         run: cmake --build build --config Release
