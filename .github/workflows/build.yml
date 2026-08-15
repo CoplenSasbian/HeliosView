@@ -12,11 +12,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The top-level CMakeLists requires CMake >= 4.3; pin a recent one so the
-      # runner's bundled version cannot be too old.
+      # windows-latest ships Visual Studio 2026, not 2022 - and std::flat_map
+      # needs a recent MSVC. msvc-dev-cmd finds the latest installed VS toolset
+      # (vcvars); Ninja matches the local build setup. The top-level CMakeLists
+      # requires CMake >= 4.3, so install a recent one rather than trusting the
+      # runner's bundled version.
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '4.3.0'
 
       - name: Show cmake version
         shell: pwsh
@@ -27,7 +30,7 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          $log = cmake -S . -B build -G "Visual Studio 17 2022" -A x64 2>&1
+          $log = cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1
           if ($LASTEXITCODE -ne 0) {
             $log | Select-Object -Last 30 | ForEach-Object { "::error::$_" }
             exit 1
@@ -35,7 +38,7 @@ jobs:
           $log
 
       - name: Build (Release)
-        run: cmake --build build --config Release
+        run: cmake --build build
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
