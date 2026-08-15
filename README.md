@@ -243,25 +243,20 @@ win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
 win.show();
 ```
 
-**Custom control buttons.** Draw your own minimize / maximize / close buttons in
-the client area and register their rectangles — the library wires them to the
-real title-bar behavior (a click performs the action and never drags;
-maximize/restore auto-toggles). The button look is entirely yours:
+**Built-in control buttons.** The `FramelessWithButtons` style gives a
+frameless window (no system title bar, WebView fills the whole client area)
+with minimize / maximize / close buttons already drawn at the top-right corner
+(MDL2 glyphs — the same ones as the Win10/11 title bar — with hover/pressed
+feedback following the light/dark theme), and the top strip drags the window:
 
 ```cpp
-win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
-```
-
-Or let the library draw them the modern Windows way — MDL2 glyphs (the same
-ones as the system title bar) with hover/pressed feedback following the
-light/dark theme — as child windows floating above the WebView:
-
-```cpp
+helios::Window win(480, 320, "Frameless", helios::WindowStyle::FramelessWithButtons);
 win.show();
-win.enableNativeButtons(true);   // Windows-10/11-style control buttons
 ```
+
+**Custom control buttons.** Or draw your own buttons and register their
+rectangles — the library wires them to the real title-bar behavior (click =
+action, never drags; maximize/restore auto-toggles).
 
 **DPI.** Call `helios::enableDpiAwareness()` once, before creating any window,
 to make the process per-monitor DPI aware (v2); `window.dpi()` reports a

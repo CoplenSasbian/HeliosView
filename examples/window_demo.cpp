@@ -18,22 +18,18 @@ int main()
     window.setMinimumSize(400, 300);
     window.setMaximumSize(1200, 900);
 
-    // Frameless window with a custom title bar: register a drag region so the
-    // top strip moves the window, and three window control buttons (minimize /
-    // maximize / close) at the top-right corner. enableNativeButtons draws them
-    // with MDL2 glyphs (Windows 10/11 title-bar style, hover/pressed + dark
-    // theme) as child windows floating above the WebView.
-    helios::Window frameless(480, 320, "Frameless", helios::WindowStyle::Frameless);
-    frameless.addDragRegion(0, 0, 480, 32); // the custom title-bar strip
-    frameless.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 32);
-    frameless.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 32);
-    frameless.addControlButton(helios::ControlButton::Close, 480 - 1 * 46, 0, 46, 32);
+    // Frameless window with library-drawn control buttons: the FramelessWithButtons
+    // style creates a frameless window (no system title bar), auto-registers the
+    // three window control buttons (minimize / maximize / close) at the top-right
+    // corner, draws them with MDL2 glyphs (Windows 10/11 title-bar style, hover/
+    // pressed + dark theme), and makes the top strip a drag region.
+    helios::Window frameless(480, 320, "Frameless",
+                             helios::WindowStyle::FramelessWithButtons);
     frameless.resized.connect([](int32_t w, int32_t) {
         // keep the drag strip spanning the (new) window width
         std::printf("[frameless] resize %d\n", w);
     });
     frameless.show();
-    frameless.enableNativeButtons(true); // after show(): MDL2-glyph buttons
 
     helios::Menu menu(window.nativeHandle());
     helios::Menu::Item* showItem = menu.addItem("Show / Restore");

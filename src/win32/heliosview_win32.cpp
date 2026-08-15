@@ -547,10 +547,11 @@ DWORD map_win32_style(const heliosview_window_t* window)
         style = WS_POPUP; /* borderless and titleless; fully custom */
         break;
     case HELIOSVIEW_WINDOW_FRAMELESS:
+    case HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS:
         /* No system title bar or caption buttons; the app draws its own chrome.
-         * The library can draw native-look control buttons on request (see
-         * enableNativeButtons): real child windows with MDL2 glyphs, floating
-         * above the WebView. WS_THICKFRAME keeps the resize border. */
+         * FRAMELESS_BUTTONS additionally creates library-drawn MDL2 control
+         * buttons at the top-right (see heliosview_window_show). WS_THICKFRAME
+         * keeps the resize border. */
         style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
         break;
     default:
@@ -1241,6 +1242,22 @@ int heliosview_window_show(heliosview_window_t* window)
                                    nullptr, nullptr, GetModuleHandleW(nullptr), window);
     if (!window->hwnd)
         return -2;
+
+    /* FRAMELESS_BUTTONS: auto-register the standard three control buttons at the
+     * top-right corner (46x32 each, the usual caption-button size) and create
+     * their MDL2 child windows. The top strip left of them is the drag region. */
+    if (window->style == HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS && window->control_buttons.empty()) {
+        constexpr int kBtnW = 46, kBtnH = 32;
+        const int top = window->width - 3 * kBtnW;
+        heliosview_window_add_control_button(window, HELIOSVIEW_CONTROL_MINIMIZE,
+                                             top, 0, kBtnW, kBtnH);
+        heliosview_window_add_control_button(window, HELIOSVIEW_CONTROL_MAXIMIZE,
+                                             top + kBtnW, 0, kBtnW, kBtnH);
+        heliosview_window_add_control_button(window, HELIOSVIEW_CONTROL_CLOSE,
+                                             top + 2 * kBtnW, 0, kBtnW, kBtnH);
+        window->drag_regions.push_back(RECT{0, 0, top, kBtnH});
+        create_native_buttons(window);
+    }
 
     /* already registered in WM_NCCREATE; fall back here if that did not happen */
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))

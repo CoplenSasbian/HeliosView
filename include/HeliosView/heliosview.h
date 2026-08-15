@@ -289,6 +289,7 @@ typedef enum heliosview_window_style {
     HELIOSVIEW_WINDOW_NORMAL = 0, /* Standard window: title bar + border + system menu */
     HELIOSVIEW_WINDOW_BORDERLESS, /* Borderless (fully custom drawing) */
     HELIOSVIEW_WINDOW_FRAMELESS,  /* Bordered, no title bar (custom title-bar style, e.g. VS Code/Chrome) */
+    HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS, /* Frameless with library-drawn MDL2 control buttons (min/max/close) at the top-right */
 } heliosview_window_style_t;
 
 /* Create a window with a preset style and user data (parameters are only

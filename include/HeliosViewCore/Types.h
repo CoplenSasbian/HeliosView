@@ -126,6 +126,7 @@ enum class WindowStyle : int32_t {
     Normal = HELIOSVIEW_WINDOW_NORMAL,   /* normal window: title bar + border + system menu */
     Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn) */
     Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* bordered, no title bar (custom title-bar style) */
+    FramelessWithButtons = HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS, /* frameless + library-drawn min/max/close */
 };
 
 /* window show state */

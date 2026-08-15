@@ -193,20 +193,14 @@ win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
 win.show();
 ```
 
-**自定义控制按钮。** 在客户区自行绘制最小化 / 最大化 / 关闭按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。按钮外观完全由你绘制：
+**内置控制按钮。** `FramelessWithButtons` 风格创建无标题栏窗口（无系统标题栏，WebView 铺满整个客户区），右上角已绘制最小化 / 最大化 / 关闭按钮（MDL2 图标 —— 与 Win10/11 标题栏相同 —— hover / 按下反馈跟随深浅色主题），顶部条带可拖动窗口：
 
 ```cpp
-win.addControlButton(helios::ControlButton::Minimize, 480 - 3 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Maximize, 480 - 2 * 46, 0, 46, 40);
-win.addControlButton(helios::ControlButton::Close,    480 - 1 * 46, 0, 46, 40);
-```
-
-或者让库用**现代 Windows 风格**绘制 —— MDL2 图标（与系统标题栏相同的 glyph），hover / 按下反馈跟随深浅色主题，作为子窗口浮动在 WebView 之上：
-
-```cpp
+helios::Window win(480, 320, "Frameless", helios::WindowStyle::FramelessWithButtons);
 win.show();
-win.enableNativeButtons(true);   // Windows 10/11 风格的控制按钮
 ```
+
+**自定义控制按钮。** 或者自行绘制按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。
 
 **DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
 
