@@ -59,8 +59,8 @@ int main()
 
     // Frameless: a fully frameless window (no system title bar). The page's
     // title bar is the injected <helios-window-title-bar> web component - it
-    // auto-registers as the drag region (built-in __hv_drag) and hosts
-    // <helios-window-controls> for the buttons (built-in __hv_control / __hv_state).
+    // auto-registers as the drag region (built-in __hv.drag) and hosts
+    // <helios-window-controls> for the buttons (built-in __hv.control / __hv.state).
     auto window = std::make_shared<helios::WebViewWindow>(
         900, 640, "HeliosView WebView Demo", helios::WindowStyle::Frameless);
     window->show();

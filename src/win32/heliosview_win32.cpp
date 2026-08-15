@@ -2167,7 +2167,7 @@ heliosview_window_t* hv_webview_owner(heliosview_webview_t* wv)
     return reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(wv->parent, GWLP_USERDATA));
 }
 
-/* __hv_control("minimize"|"maximize"|"restore"|"close") — perform the caption
+/* "__hv.control"("minimize"|"maximize"|"restore"|"close") — perform the caption
  * action on the owner window (maximize auto-toggles like the real button). */
 void hv_control_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* name,
                         const char* args_json, void* userdata)
@@ -2201,7 +2201,7 @@ void hv_control_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* 
     heliosview_webview_resolve(wv, call_id, R"({"ok":true})");
 }
 
-/* __hv_state() — the owner's show state (the component toggles the maximize /
+/* "__hv.state"() — the owner's show state (the component toggles the maximize /
  * restore glyph from it), whether the window can be maximized (maximizable;
  * the component disables the maximize button when false), plus the title-bar
  * strip height. */
@@ -2227,7 +2227,7 @@ void hv_state_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* na
     heliosview_webview_resolve(wv, call_id, buf);
 }
 
-/* __hv_drag() — start a window drag (the <helios-window-title-bar> component
+/* "__hv.drag"() — start a window drag (the <helios-window-title-bar> component
  * calls it on mousedown over its own strip). Same mechanism as
  * heliosview_window_start_drag: a full-bleed WebView eats WM_NCHITTEST, so the
  * page must initiate the move loop itself. */

@@ -139,7 +139,7 @@ DLLs and demos land in `build/bin/` together, so no `PATH` setup is needed.
 
 | demo | file | shows |
 | --- | --- | --- |
-| `HeliosViewDemo` | `examples/main.cpp` | signals + the threading contract (worker → `postTask`) |
+| `HeliosViewDemo` | `examples/main.cpp` | **WebView master demo**: every feature driven by sliders + text inputs |
 | `HeliosViewWindowDemo` | `examples/window_demo.cpp` | basic window + signal/slot + tray + menu |
 | `HeliosViewAppDemo` | `examples/app_demo.cpp` | `Window` subclassing, window styles, member slots, window APIs |
 | `HeliosViewSystemDemo` | `examples/system_demo.cpp` | dialogs, clipboard, toasts, taskbar progress, tray balloon |
@@ -265,8 +265,9 @@ page:
   bind) and toggles maximize on double-click.
 - `<helios-window-controls>` — put it inside the title bar: the Win10/11
   min/max/close glyphs (hover/pressed feedback, close turns red), calling the
-  built-in `__hv_control` / `__hv_state` bridge; the maximize button shows the
-  restore glyph while maximized. It opts its buttons out of the drag region
+  built-in `__hv.control` / `__hv.state` bridge; the maximize button shows the
+  restore glyph while maximized (and is disabled while the window is not
+  resizable). It opts its buttons out of the drag region
   (`app-region: no-drag`) automatically.
 
 ```cpp
@@ -275,7 +276,7 @@ auto win = std::make_shared<helios::WebViewWindow>(
 win->show();
 win->createWebView();
 // that's it — no bindJson for drag or buttons: dragging is native app-region,
-// the buttons use the built-in __hv_control / __hv_state bridge (__hv_state
+// the buttons use the built-in __hv.control / __hv.state bridge (__hv.state
 // also reports titleBarHeight, the DPI-scaled title-bar strip height).
 ```
 
