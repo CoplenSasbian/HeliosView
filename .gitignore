@@ -1,6 +1,7 @@
 # CMake / CLion
 cmake-build-*/
 build/
+build-release/
 out/
 CMakeCache.txt
 CMakeFiles/

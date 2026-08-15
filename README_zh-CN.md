@@ -119,6 +119,32 @@ DLL 和 demo 一起落在 `build/bin/`，无需配置 `PATH`。
 
 ---
 
+## 发布包 —— SDK
+
+GitHub Release 资产是面向 Windows x64 的完整 **SDK zip**
+（`HeliosView-<版本>-win64-SDK.zip`），使用者无需自己构建库：
+
+```
+bin/        HeliosView.dll + WebView2Loader.dll + 预编译示例（解压即用）
+lib/        HeliosView.lib（导入库）+ CMake 包配置（find_package）
+include/    C API 头文件（HeliosView/）、C++ 封装头文件（HeliosViewCore/）、vendored 的 stdexec + nlohmann
+examples/   示例源码——可独立针对 SDK 构建
+README.md   使用说明（zip 内已附带）
+```
+
+CMake 消费方式：
+
+```cmake
+find_package(HeliosView REQUIRED)      # -DCMAKE_PREFIX_PATH=<SDK 根目录>
+target_link_libraries(my_app PRIVATE HeliosView::Core)
+```
+
+纯 C 消费方式：包含 `include\`、链接 `lib\HeliosView.lib`，并把 `bin\` 里的
+`HeliosView.dll` 和 `WebView2Loader.dll` 拷到 exe 旁边。完整说明见
+[packaging/README.md](packaging/README.md)，它会作为 zip 内的 `README.md` 一并发布。
+
+---
+
 ## 教程
 
 教程按依赖顺序展开：**App**（消息循环）→ **Signals** → **Window** → **WebView**（库的核心），然后是新系统 API 和支撑一切的 C API。

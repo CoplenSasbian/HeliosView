@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # The tag step creates the release and uploads the SDK zip.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,18 +56,61 @@ jobs:
             build/bin/WebView2Loader.dll
             build/bin/*.exe
 
-      # On version tags, attach the binaries to the GitHub release (if it has
-      # been created). Otherwise they stay on the build artifacts.
-      - name: Attach to release (tags only)
+      # ---- SDK package (bin/ + lib/ + include/ + examples/) ----
+      # `cmake --install` produces the bin/lib/include layout (import library,
+      # CMake package config under lib/cmake/HeliosView, C + C++ headers, and the
+      # vendored stdexec/nlohmann headers). The example *sources* are copied in
+      # separately, so the SDK is self-contained: extract the zip and build an
+      # app against it with find_package(HeliosView), or build examples/ as its
+      # own CMake project. packaging/README.md becomes the zip's README.md.
+      - name: Stage SDK package
+        shell: pwsh
+        run: |
+          $m = Select-String -Path CMakeLists.txt -Pattern 'project\(HeliosView\s+VERSION\s+([0-9.]+)'
+          $ver = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
+          if (-not $ver) { throw "could not read PROJECT_VERSION from CMakeLists.txt" }
+          "::notice::packaging HeliosView $ver (win64)"
+          $sdk = Join-Path $PWD "build/sdk"
+          if (Test-Path $sdk) { Remove-Item -Recurse -Force $sdk }
+          $root = Join-Path $sdk "HeliosView-$ver-win64"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          cmake --install build --prefix $root
+          New-Item -ItemType Directory -Force -Path (Join-Path $root "examples") | Out-Null
+          Copy-Item examples\CMakeLists.txt, examples\*.cpp, examples\*.c -Destination (Join-Path $root "examples")
+          # Prebuilt demos go into bin/ alongside the DLLs, so the package is
+          # runnable as-is (extract and double-click a demo).
+          Copy-Item build\bin\*.exe -Destination (Join-Path $root "bin")
+          Copy-Item packaging\README.md -Destination (Join-Path $root "README.md")
+          $zip = Join-Path $sdk "HeliosView-$ver-win64-SDK.zip"
+          Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal
+          Get-ChildItem $sdk | Select-Object Name, Length
+
+      - name: Upload SDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: heliosview-sdk-win64
+          path: build/sdk/HeliosView-*-win64-SDK.zip
+
+      # On version tags, publish the SDK zip: attach it to the release if one
+      # exists, otherwise create the release (title + bilingual notes from
+      # packaging/release-notes.md). Otherwise everything stays on the build
+      # artifacts.
+      - name: Publish SDK zip to release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          zip="$(ls build/sdk/HeliosView-*-win64-SDK.zip | head -n1)"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" build/bin/HeliosView.dll build/bin/WebView2Loader.dll build/bin/*.exe --clobber
-            echo "attached binaries to $tag"
+            gh release upload "$tag" "$zip" --clobber
+            echo "attached $zip to $tag"
           else
-            echo "release $tag does not exist yet - binaries are on the build artifacts"
+            if [ -f packaging/release-notes.md ]; then
+              gh release create "$tag" "$zip" --title "HeliosView $tag" --notes-file packaging/release-notes.md
+            else
+              gh release create "$tag" "$zip" --title "HeliosView $tag"
+            fi
+            echo "created release $tag with $zip"
           fi

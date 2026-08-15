@@ -134,7 +134,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosViewCore
 # Vendored header-only deps of HeliosView.Core (stdexec, nlohmann/json):
 # install them into the same include tree so exported HeliosView::Core resolves.
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        PATTERN "._clangd_helper_file.cpp" EXCLUDE)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 

@@ -149,6 +149,34 @@ DLLs and demos land in `build/bin/` together, so no `PATH` setup is needed.
 
 ---
 
+## Releases — SDK package
+
+GitHub release assets are a self-contained **SDK zip** for Windows x64
+(`HeliosView-<version>-win64-SDK.zip`), so consumers don't have to build the
+library themselves:
+
+```
+bin/        HeliosView.dll + WebView2Loader.dll + prebuilt demos (runnable as-is)
+lib/        HeliosView.lib (import library) + CMake package config (find_package)
+include/    C API header (HeliosView/), C++ wrapper (HeliosViewCore/), vendored stdexec + nlohmann
+examples/   demo sources — build standalone against the SDK
+README.md   usage instructions (also shipped inside the zip)
+```
+
+Consume from CMake:
+
+```cmake
+find_package(HeliosView REQUIRED)      # -DCMAKE_PREFIX_PATH=<sdk root>
+target_link_libraries(my_app PRIVATE HeliosView::Core)
+```
+
+or from plain C: include `include\`, link `lib\HeliosView.lib`, and copy
+`HeliosView.dll` + `WebView2Loader.dll` from `bin\` next to your exe. Full
+instructions live in [packaging/README.md](packaging/README.md), which is
+shipped as the zip's `README.md`.
+
+---
+
 ## Tutorial
 
 The tutorial is ordered by dependency: **App** (message loop) → **Signals** →
