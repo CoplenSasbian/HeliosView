@@ -243,16 +243,61 @@ win.addDragRegion(0, 0, 480, 40);          // the title-bar strip
 win.show();
 ```
 
-**Built-in control buttons.** The `FramelessWithButtons` style gives a
-frameless window (no system title bar, WebView fills the whole client area)
-with minimize / maximize / close buttons already drawn at the top-right corner
-(MDL2 glyphs — the same ones as the Win10/11 title bar — with hover/pressed
-feedback following the light/dark theme), and the top strip drags the window:
+> **WebView caveat.** Drag regions are implemented through the host window's
+> `WM_NCHITTEST`. A full-bleed WebView is a child window covering the entire
+> client area, so hit-testing over it is answered by the WebView's own window
+> procedure and never reaches the host — registered drag regions are ineffective
+> while the WebView covers them. With a `WebViewWindow`, register the drag area
+> on the page instead: the injected `<helios-window-title-bar>` component drags
+> through WebView2's native `app-region: drag` support (enabled by the library
+> via `IsNonClientRegionSupportEnabled`), or bind `startDrag()` to a page
+> callback for a fully custom area.
+
+**Web-drawn title bar (recommended).** Because a full-bleed WebView cannot be
+covered by native DWM caption buttons ("no visible title bar" and "system
+caption buttons" are mutually exclusive on Win32), the natural way is to draw
+the title bar in the page. The bridge shim injects two web components on every
+page:
+
+- `<helios-window-title-bar>` — place it at the top of the page: it drags the
+  window through WebView2's **native `app-region: drag` support** (the library
+  enables `IsNonClientRegionSupportEnabled` — no bridge round-trip, nothing to
+  bind) and toggles maximize on double-click.
+- `<helios-window-controls>` — put it inside the title bar: the Win10/11
+  min/max/close glyphs (hover/pressed feedback, close turns red), calling the
+  built-in `__hv_control` / `__hv_state` bridge; the maximize button shows the
+  restore glyph while maximized. It opts its buttons out of the drag region
+  (`app-region: no-drag`) automatically.
 
 ```cpp
-helios::Window win(480, 320, "Frameless", helios::WindowStyle::FramelessWithButtons);
-win.show();
+auto win = std::make_shared<helios::WebViewWindow>(
+    900, 640, "App", helios::WindowStyle::Frameless);
+win->show();
+win->createWebView();
+// that's it — no bindJson for drag or buttons: dragging is native app-region,
+// the buttons use the built-in __hv_control / __hv_state bridge (__hv_state
+// also reports titleBarHeight, the DPI-scaled title-bar strip height).
 ```
+
+```html
+<helios-window-title-bar>
+  <span>App</span>
+  <helios-window-controls></helios-window-controls>
+</helios-window-title-bar>
+```
+
+The components are restyled via CSS on the elements (the title bar defaults to
+a 48 px flex row; the buttons float top-right). Other interactive children
+inside the title bar need `app-region: no-drag` to stay clickable.
+
+**Resize.** The `Frameless` style keeps a small non-client border on all four
+sides (`WM_NCCALCSIZE`), so the system draws a grab-able frame and resizing
+works natively — even with a full-bleed WebView, because the border is
+non-client and the system hit-tests it directly. Nothing to add to the page.
+
+> Native DWM buttons would require keeping the system caption (a "normal
+> window"), which a full-bleed WebView cannot cover — and web-drawn buttons have
+> no Win11 snap-layouts popup (that needs a real caption).
 
 **Custom control buttons.** Or draw your own buttons and register their
 rectangles — the library wires them to the real title-bar behavior (click =
@@ -325,7 +370,11 @@ int main()
 pointer and the member pointer). The bridge shim exposes
 `window.helios.call(name, ...)` → `Promise` and a **bidirectional
 `BroadcastChannel`** (`broadcast` native→JS, `subscribe` JS→native). Every
-bridge name must be a C identifier `[A-Za-z_][A-Za-z0-9_]*`.
+bridge name must be a C identifier `[A-Za-z_][A-Za-z0-9_]*`; the library's
+internal bridge uses `__hv.`-prefixed names (`__hv.control`, `__hv.state`,
+`__hv.drag` — called by the injected components), which contain a dot and are
+therefore **not valid identifiers**, so applications cannot bind or subscribe
+them and can never shadow the built-in components.
 
 **Events, local resources, and native dialogs**:
 

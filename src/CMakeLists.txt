@@ -9,6 +9,13 @@ if(WIN32)
     target_sources(HeliosView PRIVATE
         win32/heliosview_win32.cpp      # windows / message loop / native message translation / WebView2 / dialogs
         win32/heliosview_notify_win32.cpp # OS toast notifications (WinRT via the Windows SDK)
+        # Common-Controls v6 manifest: CMake passes .manifest sources to the MSVC
+        # linker (/MANIFESTINPUT) so it is embedded into HeliosView.dll. The loader
+        # does not merge a DLL's manifest into the host process, so the library
+        # additionally activates it as a process/thread activation context at load
+        # (see heliosview_win32.cpp) - consumers get themed message boxes and
+        # common controls without an exe-side manifest.
+        win32/hv_common_controls.manifest
     )
     # This backend's OS system libraries (user32, shell32, ole32, dwmapi,
     # runtimeobject, propsys) come through the platform macro so the "which
@@ -24,6 +31,28 @@ if(WIN32)
             "${HELIOSVIEW_WEBVIEW2_LOADER_DLL}"
             $<TARGET_FILE_DIR:HeliosView>
     )
+
+    # The WebView bridge shim (win32/webview_bridge.js) is embedded into the DLL
+    # as a raw-string literal (heliosview_win32.cpp #includes webview_bridge.inc).
+    # C++23 #embed is not supported by MSVC yet, so a small CMake script wraps the
+    # .js into the .inc; the .inc is regenerated whenever the .js changes.
+    set(HELIOSVIEW_BRIDGE_JS "${CMAKE_CURRENT_SOURCE_DIR}/win32/webview_bridge.js")
+    set(HELIOSVIEW_BRIDGE_INC "${CMAKE_CURRENT_BINARY_DIR}/webview_bridge.inc")
+    add_custom_command(
+        OUTPUT "${HELIOSVIEW_BRIDGE_INC}"
+        COMMAND ${CMAKE_COMMAND}
+            -DIN=${HELIOSVIEW_BRIDGE_JS}
+            -DOUT=${HELIOSVIEW_BRIDGE_INC}
+            -DVAR=kWebView2BridgeScript
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/make_bridge_inc.cmake"
+        DEPENDS "${HELIOSVIEW_BRIDGE_JS}"
+        VERBATIM
+        COMMENT "Generating webview_bridge.inc from webview_bridge.js"
+    )
+    # Tie the generated .inc into the build graph (it is not compiled — unknown
+    # extension — but the HeliosView compile depends on it).
+    target_sources(HeliosView PRIVATE "${HELIOSVIEW_BRIDGE_INC}")
+    target_include_directories(HeliosView PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
 add_library(HeliosView::HeliosView ALIAS HeliosView)

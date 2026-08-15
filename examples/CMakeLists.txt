@@ -1,5 +1,12 @@
+# The demo sources contain UTF-8 string literals (Chinese labels in the WebView
+# pages). MSVC defaults to the system ANSI codepage, which would corrupt them;
+# force UTF-8 for the demo TUs.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 add_executable(HeliosViewDemo main.cpp)
-target_link_libraries(HeliosViewDemo PRIVATE HeliosView::Core)
+target_link_libraries(HeliosViewDemo PRIVATE HeliosView::Core )
 
 add_executable(HeliosViewWindowDemo window_demo.cpp)
 target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)

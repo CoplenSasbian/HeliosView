@@ -115,6 +115,14 @@ public:
     // Register a client-area drag region: mouse-down + drag inside it moves the
     // window like a title bar (WM_NCHITTEST -> HTCAPTION). Call this for each
     // custom title-bar strip of a frameless/borderless window.
+    //
+    // WebView caveat: drag regions rely on the host window's WM_NCHITTEST. A
+    // full-bleed WebView is a child window covering the whole client area, so
+    // hit-testing over it is answered by the WebView itself and these regions
+    // never fire. On a WebViewWindow, drag from the page instead — the injected
+    // <helios-window-title-bar> component uses WebView2's native app-region:drag
+    // support (enabled by the library), or call startDrag() via a bridge binding
+    // for a fully custom area.
     void addDragRegion(int32_t x, int32_t y, int32_t width, int32_t height)
     {
         heliosview_window_add_drag_region(m_window, x, y, width, height);
@@ -123,32 +131,20 @@ public:
     // Remove all registered drag regions
     void clearDragRegions() { heliosview_window_clear_drag_regions(m_window); }
 
-    // ---- custom title-bar control buttons ----
-
-    // Register a client-area rectangle for a window control (minimize / maximize
-    // / close). The library wires it to the OS title-bar button behavior: a click
-    // performs the action (maximize auto-toggles with the window state) and never
-    // starts a drag. The button's *look* is yours to draw; this only handles the
-    // hit-testing + behavior.
-    void addControlButton(ControlButton button, int32_t x, int32_t y,
-                          int32_t width, int32_t height)
-    {
-        heliosview_window_add_control_button(
-            m_window, static_cast<heliosview_control_button_t>(button), x, y, width, height);
-    }
-
-    // Remove all registered control buttons
-    void clearControlButtons() { heliosview_window_clear_control_buttons(m_window); }
-
-    // Draw the registered control buttons the modern Windows way (MDL2 glyphs —
-    // the same ones as the system title bar — with hover/pressed feedback
-    // following the light/dark theme), as child windows layered above the
-    // WebView. The alternative is drawing them yourself in the client area.
-    // Call after show(). Pass false to return to app-drawn buttons.
-    void enableNativeButtons(bool on) { heliosview_window_enable_native_buttons(m_window, on ? 1 : 0); }
+    // Start a window drag (move loop). Use it when a full-bleed WebView covers
+    // the window (WM_NCHITTEST never fires there): have the page call this on
+    // mousedown over its own title bar to move the window like a native one.
+    void startDrag() { heliosview_window_start_drag(m_window); }
 
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
+
+    // Height (client pixels, DPI-scaled) of the title-bar strip a Frameless
+    // window reserves at the top (the drag area / where the page puts its
+    // title-bar buttons); 0 for other styles / before the window is created.
+    // Useful to keep page content clear of the strip (e.g. keep the top-right
+    // free for the buttons).
+    int32_t titleBarHeight() const { return heliosview_window_title_bar_height(m_window); }
 
     // Work area (excluding taskbar) of the monitor the window is on.
     // Returns false if the window is not created.
@@ -293,8 +289,9 @@ public:
         m_window = nullptr;
     }
 
-    // The window id (the windowId field of events targeting this window; 0 before creation)
-    int32_t id() const { return heliosview_window_id(m_window); }
+    // The window's native handle (HWND on Windows) — the windowId field of
+    // events targeting this window; 0 until the window is shown
+    uintptr_t id() const { return heliosview_window_id(m_window); }
 
     // The raw C window handle (nullptr if not created/closed). Exposed so the
     // low-level API (e.g. helios::Tray) can be used directly on the native handle.

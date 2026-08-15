@@ -124,9 +124,8 @@ enum class MouseButton : int32_t {
 /* predefined window styles */
 enum class WindowStyle : int32_t {
     Normal = HELIOSVIEW_WINDOW_NORMAL,   /* normal window: title bar + border + system menu */
-    Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn) */
-    Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* bordered, no title bar (custom title-bar style) */
-    FramelessWithButtons = HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS, /* frameless + library-drawn min/max/close */
+    Borderless = HELIOSVIEW_WINDOW_BORDERLESS, /* borderless (fully custom drawn; not resizable) */
+    Frameless = HELIOSVIEW_WINDOW_FRAMELESS,   /* fully frameless: no title bar / caption buttons; resizable via the edges; the app draws all chrome (e.g. the injected <helios-window-controls> web component for the buttons) */
 };
 
 /* window show state */
@@ -137,20 +136,13 @@ enum class ShowState : int32_t {
     Maximized = HELIOSVIEW_SHOW_MAXIMIZED,
 };
 
-/* custom title-bar window control button (mirrors heliosview_control_button_t) */
-enum class ControlButton : int32_t {
-    Minimize = HELIOSVIEW_CONTROL_MINIMIZE, /* minimize the window */
-    Maximize = HELIOSVIEW_CONTROL_MAXIMIZE, /* maximize / restore (auto-toggles) */
-    Close = HELIOSVIEW_CONTROL_CLOSE,       /* request close (WINDOW_CLOSE event) */
-};
-
 /* ---------- events ---------- */
 
 // A queued event, mirroring heliosview_event_t with type-safe C++ enums.
 // Fields are meaningful only for the event types listed next to them.
 struct Event {
     EventType type = EventType::Quit;         /* event type */
-    int32_t windowId = 0;            /* window that produced the event (0 = none) */
+    uintptr_t windowId = 0;            /* native handle of the window that produced the event (0 = none; HWND on Windows) */
     int64_t timestampMs = 0;         /* milliseconds since library initialization */
     int32_t x = 0;                   /* mouse X (MouseMove / MouseButton*) */
     int32_t y = 0;                   /* mouse Y */

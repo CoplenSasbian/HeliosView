@@ -13,6 +13,9 @@
  *   - Native messages are passed to the registered conversion delegate as opaque
  *     void* pointers, valid only during the callback
  *   - Windows are opaque handles of type heliosview_window_t*
+ *   - An event's window_id is the platform's native window handle, as a
+ *     pointer-sized integer (uintptr_t; 0 = none) — the HWND on Windows. It is
+ *     valid only while the window exists; see heliosview_window_from_id.
  *   - Keycodes and mouse buttons are uniformly mapped to platform-independent enums
  *
  * Strings: every string parameter and result is UTF-8 (const char*). The two-phase
@@ -209,7 +212,7 @@ typedef enum heliosview_mouse_button {
  * fixed for the 1.x series: new event data is added only at a major version. */
 typedef struct heliosview_event {
     heliosview_event_type_t type;
-    int32_t window_id;                       /* window id of the event's origin (0 = not window-related) */
+    uintptr_t window_id;                     /* native window handle of the event's origin (0 = not window-related; HWND on Windows) */
     int64_t timestamp_ms;                    /* milliseconds since library initialization */
     int32_t x;                               /* mouse X (window client area) */
     int32_t y;                               /* mouse Y */
@@ -287,9 +290,8 @@ typedef struct heliosview_window heliosview_window_t;
 /* Predefined window styles */
 typedef enum heliosview_window_style {
     HELIOSVIEW_WINDOW_NORMAL = 0, /* Standard window: title bar + border + system menu */
-    HELIOSVIEW_WINDOW_BORDERLESS, /* Borderless (fully custom drawing) */
-    HELIOSVIEW_WINDOW_FRAMELESS,  /* Bordered, no title bar (custom title-bar style, e.g. VS Code/Chrome) */
-    HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS, /* Frameless with library-drawn MDL2 control buttons (min/max/close) at the top-right */
+    HELIOSVIEW_WINDOW_BORDERLESS, /* Borderless (fully custom drawing; not resizable) */
+    HELIOSVIEW_WINDOW_FRAMELESS,  /* Fully frameless: no title bar / caption buttons; resizable via the edges; the app draws all chrome (e.g. the injected <helios-window-controls> web component for the buttons) */
 } heliosview_window_style_t;
 
 /* Create a window with a preset style and user data (parameters are only
@@ -308,8 +310,11 @@ HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int heig
 HELIOSVIEW_API void* heliosview_window_userdata(const heliosview_window_t* window);
 HELIOSVIEW_API void heliosview_window_set_userdata(heliosview_window_t* window, void* userdata);
 
-/* Look up a window by id (for event dispatch; call only on the message-loop thread) */
-HELIOSVIEW_API heliosview_window_t* heliosview_window_from_id(int32_t window_id);
+/* Look up a window by its native handle (the window_id an event carries; the
+ * HWND on Windows). The handle is validated against the OS before the window is
+ * read back, so a destroyed window safely resolves to NULL and a stale queued
+ * event becomes a no-op. Call only on the message-loop thread. */
+HELIOSVIEW_API heliosview_window_t* heliosview_window_from_id(uintptr_t window_id);
 
 /* Number of live windows (used to detect when the last window closes) */
 HELIOSVIEW_API int heliosview_window_count(void);
@@ -396,7 +401,18 @@ HELIOSVIEW_API int heliosview_window_set_resizable(heliosview_window_t* window, 
 /* Register a client-area drag region: a mouse-down + drag inside any registered
  * region moves the window (like a title bar; WM_NCHITTEST -> HTCAPTION). This is
  * how frameless/borderless windows get an OS move gesture. Regions accumulate;
- * all are cleared when the window is destroyed. 0 = success, negative = error. */
+ * all are cleared when the window is destroyed. 0 = success, negative = error.
+ *
+ * WebView caveat: drag regions are implemented through the host window's
+ * WM_NCHITTEST. A full-bleed WebView is a child window covering the entire
+ * client area, so hit-testing for points over it is answered by the WebView's
+ * own window procedure and never reaches the host — registered drag regions are
+ * therefore ineffective while the WebView covers them. With a WebViewWindow,
+ * register the drag area on the page instead: the injected
+ * <helios-window-title-bar> component drags through WebView2's native
+ * app-region:drag support (enabled by the library via
+ * ICoreWebView2Settings9::IsNonClientRegionSupportEnabled), or bind
+ * heliosview_window_start_drag to a page callback for a fully custom area. */
 HELIOSVIEW_API int heliosview_window_add_drag_region(heliosview_window_t* window,
                                                      int32_t x, int32_t y,
                                                      int32_t width, int32_t height);
@@ -404,48 +420,21 @@ HELIOSVIEW_API int heliosview_window_add_drag_region(heliosview_window_t* window
 /* Remove all registered drag regions. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_clear_drag_regions(heliosview_window_t* window);
 
-/* ================= Window control buttons (custom title bar) =================
- *
- * Frameless / borderless windows have no OS title bar, so the app draws its own
- * minimize / maximize / close buttons (e.g. in the WebView). The library makes
- * them *work like native* title-bar buttons: each registered button rectangle
- * is reported to the OS as a hit-test code (HTMINBUTTON / HTMAXBUTTON /
- * HTCLOSE), so clicking it performs the action (DefWindowProc handles it) and
- * never starts a window drag. The button *looks* are entirely the app's job
- * (the library does not paint); it only wires up the hit-testing + behavior.
- *
- * Buttons take priority over drag regions (a button inside a drag strip still
- * clicks instead of dragging). A maximize/restore button switches its action
- * automatically with the window state. Rectangles are in client coordinates
- * and accumulate; all are cleared when the window is destroyed. */
-
-typedef enum heliosview_control_button {
-    HELIOSVIEW_CONTROL_MINIMIZE = 1, /* minimize the window */
-    HELIOSVIEW_CONTROL_MAXIMIZE,     /* maximize / restore (auto-toggles) */
-    HELIOSVIEW_CONTROL_CLOSE,        /* request close (WINDOW_CLOSE event) */
-} heliosview_control_button_t;
-
-/* Register a control-button rectangle (client coords). 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_window_add_control_button(heliosview_window_t* window,
-                                                        heliosview_control_button_t button,
-                                                        int32_t x, int32_t y,
-                                                        int32_t width, int32_t height);
-
-/* Remove all registered control buttons. 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_window_clear_control_buttons(heliosview_window_t* window);
-
-/* Draw the control buttons in the modern Windows style (on != 0) or leave them
- * to the app (on == 0, the default). When enabled, each registered
- * control-button rectangle becomes a real child window drawn with MDL2 glyphs
- * (the same ones as the system title bar) plus hover/pressed feedback that
- * follows the light/dark theme. The child window sits above the WebView; a
- * click performs the action and the maximize button shows the restore glyph
- * while maximized. Call after show() (the child windows need the parent HWND).
- * 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_window_enable_native_buttons(heliosview_window_t* window, int on);
+/* Start a window drag (move loop). Frameless windows whose chrome is covered by
+ * a full-bleed WebView never receive WM_NCHITTEST (the WebView child eats the
+ * input), so the page calls this on mousedown over its own title bar to move the
+ * window like a native title bar. Message-loop thread. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_window_start_drag(heliosview_window_t* window);
 
 /* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
 HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
+
+/* Height (client pixels, DPI-scaled) of the title-bar strip a FRAMELESS window
+ * reserves at the top (the drag area / where the page puts its title-bar
+ * buttons). Returns 0 for styles without such a strip (NORMAL / BORDERLESS) or
+ * when the window is not created. Useful to keep page content clear of the
+ * strip (e.g. keep the top-right free for the buttons). */
+HELIOSVIEW_API int32_t heliosview_window_title_bar_height(const heliosview_window_t* window);
 
 /* Enforce a minimum client size (prevents the window from being resized below
  * it, e.g. so the UI is not crushed). Pass 0 for either dimension to leave it
@@ -501,8 +490,9 @@ HELIOSVIEW_API int heliosview_set_session_end_callback(heliosview_session_end_cb
  * created. Returns 0 on success, negative if already set or unsupported. */
 HELIOSVIEW_API int heliosview_set_dpi_awareness(void);
 
-/* Window id (source of window_id in events) */
-HELIOSVIEW_API int32_t heliosview_window_id(const heliosview_window_t* window);
+/* Native window handle (HWND on Windows) — the window_id carried in events;
+ * 0 until the window is shown (the native window is created on show()). */
+HELIOSVIEW_API uintptr_t heliosview_window_id(const heliosview_window_t* window);
 
 /* ================= Screen / monitor geometry =================
  *
@@ -780,7 +770,12 @@ typedef void (*heliosview_webview_navigation_cb)(heliosview_webview_t* webview,
 /* Register a native function under `name`, callable from JS via
  * window.helios.call(name, ...). Rebinding a name replaces the previous binding
  * and calls its dtor (if any). dtor(userdata) also runs when the WebView is
- * destroyed. UI-thread call. */
+ * destroyed. UI-thread call.
+ * Internal names: the library's built-in bridge uses "__hv."-prefixed names
+ * (__hv.control / __hv.state / __hv.drag, called by the injected
+ * <helios-window-controls> / <helios-window-title-bar> components). They contain
+ * a dot, so they are not valid C identifiers and applications cannot bind (or
+ * subscribe) them — the call fails with -2 like any invalid name. */
 HELIOSVIEW_API int heliosview_webview_bind(heliosview_webview_t* webview, const char* name,
                                            heliosview_webview_bind_cb callback, void* userdata,
                                            heliosview_webview_userdata_dtor dtor);
@@ -811,7 +806,8 @@ HELIOSVIEW_API int heliosview_webview_broadcast(heliosview_webview_t* webview,
  * callback(name, data_json, userdata) fires on the UI thread for every postMessage
  * to a channel of that name. Subscribing to a name replaces the previous
  * subscription (calling its dtor). dtor(userdata) also runs when the WebView is
- * destroyed. UI-thread call. */
+ * destroyed. UI-thread call. The internal "__hv.*" bridge names (see
+ * heliosview_webview_bind) are not valid identifiers and cannot be subscribed. */
 HELIOSVIEW_API int heliosview_webview_subscribe(heliosview_webview_t* webview, const char* name,
                                                 heliosview_webview_subscribe_cb callback,
                                                 void* userdata,
@@ -896,6 +892,19 @@ HELIOSVIEW_API int heliosview_webview_set_title_changed_callback(
 HELIOSVIEW_API int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
                                                        const char* host_name,
                                                        const char* folder_path);
+
+/* Keep the given insets (client pixels) clear around the WebView: the WebView
+ * occupies the parent client area minus these insets on each side, and the
+ * cleared strips remain the parent window's own surface. Re-applied on every
+ * window resize. Useful when the window keeps native chrome of its own around
+ * the WebView (e.g. a header strip drawn by the app). Zero insets restore the
+ * default (WebView fills the client area). Applies immediately when the WebView
+ * is initialized; when called during initialization the bounds are applied when
+ * it becomes ready. Negative insets are clamped to 0. Message-loop thread.
+ * 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
+                                                 int32_t top, int32_t right,
+                                                 int32_t bottom, int32_t left);
 
 /* ================= Native dialogs =================
  *

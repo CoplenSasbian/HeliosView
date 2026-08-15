@@ -193,12 +193,34 @@ win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
 win.show();
 ```
 
-**内置控制按钮。** `FramelessWithButtons` 风格创建无标题栏窗口（无系统标题栏，WebView 铺满整个客户区），右上角已绘制最小化 / 最大化 / 关闭按钮（MDL2 图标 —— 与 Win10/11 标题栏相同 —— hover / 按下反馈跟随深浅色主题），顶部条带可拖动窗口：
+> **WebView 注意事项。** 拖拽区域依赖宿主窗口的 `WM_NCHITTEST`。全幅 WebView 是覆盖整个客户区的子窗口，其上的命中测试由 WebView 自身的窗口过程应答、永远不会到达宿主——因此 WebView 覆盖范围内注册的拖拽区域**不生效**。使用 `WebViewWindow` 时，应在页面侧注册拖拽区：注入的 `<helios-window-title-bar>` 组件通过 WebView2 原生 `app-region: drag` 支持拖拽（库已启用 `IsNonClientRegionSupportEnabled`），或把 `startDrag()` 绑定到页面回调实现完全自定义的区域。
+
+**Web 绘制标题栏（推荐）。** 因为铺满的 WebView 无法被原生 DWM caption 按钮覆盖（"无可见标题栏"与"系统标题栏按钮"在 Win32 上互斥），标题栏最自然的做法就是在页面里画。桥 shim 在每个页面注入两个 web component：
+
+- `<helios-window-title-bar>` —— 放在页面顶部：通过 WebView2 的**原生 `app-region: drag` 支持**拖动窗口（库已启用 `IsNonClientRegionSupportEnabled`——无桥接往返、无需绑定），双击切换最大化；
+- `<helios-window-controls>` —— 放进标题栏里：绘制 Win10/11 最小化 / 最大化 / 关闭字形（hover / 按下反馈，关闭键 hover 变红），调用内置 `__hv_control` / `__hv_state` 桥；最大化时按钮自动切换为还原字形。它会给自己的按钮自动加 `app-region: no-drag`，保证可点击。
 
 ```cpp
-helios::Window win(480, 320, "Frameless", helios::WindowStyle::FramelessWithButtons);
-win.show();
+auto win = std::make_shared<helios::WebViewWindow>(
+    900, 640, "App", helios::WindowStyle::Frameless);
+win->show();
+win->createWebView();
+// 就这些——拖拽是原生 app-region，按钮用内置的 __hv_control / __hv_state 桥
+// （__hv_state 还返回 titleBarHeight，即 DPI 缩放的标题栏条带高度）。
 ```
+
+```html
+<helios-window-title-bar>
+  <span>App</span>
+  <helios-window-controls></helios-window-controls>
+</helios-window-title-bar>
+```
+
+组件可用 CSS 在元素上自定义（标题栏默认 48px flex 行；按钮浮在右上角）。标题栏内其他交互子元素需要加 `app-region: no-drag` 才能保持可点击。
+
+**调整大小。** `Frameless` 风格保留四周一圈非客户区边框（`WM_NCCALCSIZE`），系统会绘制可抓取的边框并原生处理调整大小——即使全幅 WebView 也没关系（边框是非客户区，系统直接命中测试）。页面无需任何改动。
+
+> 原生 DWM 按钮必须保留系统 caption（即"普通窗口"），而铺满的 WebView 覆盖不了它；web 自绘按钮也没有 Win11 snap layouts 悬浮菜单（那需要真实 caption）。
 
 **自定义控制按钮。** 或者自行绘制按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。
 
@@ -246,7 +268,7 @@ int main()
 }
 ```
 
-`bindJson` / `subscribeJson` 也接受**成员函数**（传入对象指针和成员指针）。桥接 shim 暴露 `window.helios.call(name, ...)` → `Promise` 和**双向 `BroadcastChannel`**（`broadcast` 原生→JS，`subscribe` JS→原生）。所有桥接名字必须是 C 标识符 `[A-Za-z_][A-Za-z0-9_]*`。
+`bindJson` / `subscribeJson` 也接受**成员函数**（传入对象指针和成员指针）。桥接 shim 暴露 `window.helios.call(name, ...)` → `Promise` 和**双向 `BroadcastChannel`**（`broadcast` 原生→JS，`subscribe` JS→原生）。所有桥接名字必须是 C 标识符 `[A-Za-z_][A-Za-z0-9_]*`；库的内置桥使用 **`__hv.` 前缀名**（`__hv.control` / `__hv.state` / `__hv.drag`，供注入的组件调用）——它们含有点号、**不是合法标识符**，应用无法绑定或订阅，永远遮蔽不了内置组件。
 
 **事件、本地资源与原生对话框**：
 

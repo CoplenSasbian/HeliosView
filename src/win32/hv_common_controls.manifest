@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  HeliosView.dll manifest: declares the Common-Controls v6 dependency so the
+  whole process gets the modern (themed) look for message boxes and common
+  controls - the DLL-side equivalent of an application manifest, so consumers
+  do not need one of their own.
+
+  Embedded as an RT_MANIFEST resource (id 1, CREATEPROCESS_MANIFEST_RESOURCE_ID)
+  via hv_resources.rc. The loader processes a DLL's manifest resource when the
+  DLL loads and merges its dependencies into the process activation context.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32"
+                        name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0"
+                        processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df"
+                        language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

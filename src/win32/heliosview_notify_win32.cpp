@@ -34,6 +34,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::WRL;
@@ -106,14 +107,21 @@ struct toast_state {
 
 toast_state g_state;
 
-/* Ensure COM is initialized on the calling thread (MTA). */
+/* Ensure WinRT/COM is available on the calling thread WITHOUT changing the
+ * thread's apartment model. The message-loop thread must stay an STA (WebView2
+ * requires it), so a thread that already has an apartment (STA or MTA) is left
+ * untouched; only a thread with no apartment yet (e.g. a fresh worker thread)
+ * is initialized, as MTA. */
 void ensure_com_mta()
 {
     thread_local bool done = false;
-    if (!done) {
-        RoInitialize(RO_INIT_MULTITHREADED);
-        done = true;
-    }
+    if (done)
+        return;
+    APTTYPE apt{};
+    APTTYPEQUALIFIER qual{};
+    if (FAILED(CoGetApartmentType(&apt, &qual)))
+        RoInitialize(RO_INIT_MULTITHREADED); /* fresh thread: MTA */
+    done = true;
 }
 
 /* Create the Start Menu shortcut carrying the AppUserModelID. Returns S_OK when
@@ -189,7 +197,8 @@ HRESULT initialize(const char* app_user_model_id)
     if (FAILED(hr))
         return hr;
 
-    hr = mgr->CreateToastNotifier(&g_state.notifier);
+    hr = mgr->CreateToastNotifierWithId(HStringReference(app_id.c_str()).Get(),
+                                        g_state.notifier.GetAddressOf());
     if (FAILED(hr))
         return hr;
     g_state.app_id = app_id;
@@ -200,7 +209,14 @@ HRESULT initialize(const char* app_user_model_id)
 
 int heliosview_notification_init(const char* app_user_model_id)
 {
-    std::call_once(g_state.once, [&] { g_state.init_result = initialize(app_user_model_id); });
+    /* Initialize on a dedicated worker thread: the toast objects are agile, so
+     * the notifier can be used from any thread afterwards — and the caller's
+     * apartment is never touched. (Forcing MTA on the message-loop thread would
+     * break WebView2, which requires that thread to be an STA.) */
+    std::call_once(g_state.once, [&] {
+        std::thread worker([&] { g_state.init_result = initialize(app_user_model_id); });
+        worker.join();
+    });
     return SUCCEEDED(g_state.init_result) ? 0 : -1;
 }
 

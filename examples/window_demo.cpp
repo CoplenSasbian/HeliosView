@@ -18,13 +18,10 @@ int main()
     window.setMinimumSize(400, 300);
     window.setMaximumSize(1200, 900);
 
-    // Frameless window with library-drawn control buttons: the FramelessWithButtons
-    // style creates a frameless window (no system title bar), auto-registers the
-    // three window control buttons (minimize / maximize / close) at the top-right
-    // corner, draws them with MDL2 glyphs (Windows 10/11 title-bar style, hover/
-    // pressed + dark theme), and makes the top strip a drag region.
+    // Frameless: a fully frameless window (no system title bar); the app draws
+    // all chrome (title bar + buttons), and the top strip drags the window.
     helios::Window frameless(480, 320, "Frameless",
-                             helios::WindowStyle::FramelessWithButtons);
+                             helios::WindowStyle::Frameless);
     frameless.resized.connect([](int32_t w, int32_t) {
         // keep the drag strip spanning the (new) window width
         std::printf("[frameless] resize %d\n", w);
