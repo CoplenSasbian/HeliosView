@@ -66,8 +66,10 @@ jobs:
       - name: Stage SDK package
         shell: pwsh
         run: |
-          $m = Select-String -Path CMakeLists.txt -Pattern 'project\(HeliosView\s+VERSION\s+([0-9.]+)'
-          $ver = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
+          # project(HeliosView ... VERSION ...) spans multiple lines, so
+          # Select-String (line-based) would never match; read the file whole.
+          $cmakeLists = Get-Content -Raw CMakeLists.txt
+          $ver = if ($cmakeLists -match 'project\(HeliosView\s+VERSION\s+([0-9.]+)') { $Matches[1] } else { '' }
           if (-not $ver) { throw "could not read PROJECT_VERSION from CMakeLists.txt" }
           "::notice::packaging HeliosView $ver (win64)"
           $sdk = Join-Path $PWD "build/sdk"
