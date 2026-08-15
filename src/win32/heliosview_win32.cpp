@@ -1,7 +1,7 @@
-﻿// HeliosView.dll — Windows implementation: windows, message loop, native-message → event conversion.
-// The cross-platform interface is in heliosview.h; this file implements only the win32 side.
-#include <HeliosView/heliosview.h>
+﻿#include <HeliosView/heliosview.h>
 #include "../heliosview_internal.h"
+// HeliosView.dll — Windows implementation: windows, message loop, native-message → event conversion.
+// The cross-platform interface is in heliosview.h; this file implements only the win32 side.
 
 /* Enable modern (visual-styled) common controls for the whole process, from the
  * library itself: embed a Common-Controls v6 dependency in HeliosView.dll's own
@@ -983,7 +983,16 @@ void destroy_native_buttons(heliosview_window_t* win)
 
 } // namespace
 
-LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+/* ================= Window procedure (per-style, template + if constexpr) =================
+ *
+ * One window procedure per style, generated from a single template. `if
+ * constexpr` keeps each instantiation lean: only the code that style needs is
+ * compiled in, and the per-style differences (custom title bar hit-testing,
+ * control-button routing) are spelled out once here. heliosview_window_show
+ * picks the right instantiation + class name at creation. */
+
+template <heliosview_window_style_t Style>
+LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
     /* WM_NCCREATE is sent synchronously during CreateWindowExW: register here so
      * messages such as WM_SIZE delivered during creation get the correct window_id */
@@ -997,51 +1006,44 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    /* WM_NCHITTEST: the top strip of a FRAMELESS (hidden title bar) window acts
-     * as the title bar (drag = HTCAPTION). The right corner is left to
-     * DefWindowProc so the *system* buttons (which DWM paints there) are hit and
-     * their actions + Win11 snap-layouts work. Registered control buttons and
-     * drag regions also participate. */
-    if (message == WM_NCHITTEST) {
-        auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (win && (!win->control_buttons.empty() || !win->drag_regions.empty())) {
-            const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
-                               static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
-            POINT client = screen;
-            if (ScreenToClient(hwnd, &client)) {
-                /* Control buttons win over drag regions: a button inside a drag
-                 * strip must click, not drag. Only report a button the window can
-                 * actually perform (e.g. no maximize box -> HTCLIENT). */
-                for (const auto& cb : win->control_buttons) {
-                    const RECT& r = cb.rect;
-                    if (client.x >= r.left && client.x < r.right
-                        && client.y >= r.top && client.y < r.bottom) {
-                        const LONG style = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-                        switch (cb.button) {
-                        case HELIOSVIEW_CONTROL_MINIMIZE:
-                            return (style & WS_MINIMIZEBOX) ? HTMINBUTTON : HTCLIENT;
-                        case HELIOSVIEW_CONTROL_MAXIMIZE:
-                            return (style & WS_MAXIMIZEBOX) ? HTMAXBUTTON : HTCLIENT;
-                        case HELIOSVIEW_CONTROL_CLOSE:
-                        default:
-                            return HTCLOSE;
+    /* Custom title-bar chrome (drag regions + control buttons) only exists for
+     * the non-system-chrome styles; NORMAL leaves everything to the system. */
+    if constexpr (Style != HELIOSVIEW_WINDOW_NORMAL) {
+        if (message == WM_NCHITTEST) {
+            auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (win && (!win->control_buttons.empty() || !win->drag_regions.empty())) {
+                const POINT screen{static_cast<LONG>(static_cast<int16_t>(LOWORD(lparam))),
+                                   static_cast<LONG>(static_cast<int16_t>(HIWORD(lparam)))};
+                POINT client = screen;
+                if (ScreenToClient(hwnd, &client)) {
+                    /* Control buttons win over drag regions: a button inside a drag
+                     * strip must click, not drag. Only report a button the window can
+                     * actually perform (e.g. no maximize box -> HTCLIENT). */
+                    for (const auto& cb : win->control_buttons) {
+                        const RECT& r = cb.rect;
+                        if (client.x >= r.left && client.x < r.right
+                            && client.y >= r.top && client.y < r.bottom) {
+                            const LONG st = static_cast<LONG>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+                            switch (cb.button) {
+                            case HELIOSVIEW_CONTROL_MINIMIZE:
+                                return (st & WS_MINIMIZEBOX) ? HTMINBUTTON : HTCLIENT;
+                            case HELIOSVIEW_CONTROL_MAXIMIZE:
+                                return (st & WS_MAXIMIZEBOX) ? HTMAXBUTTON : HTCLIENT;
+                            case HELIOSVIEW_CONTROL_CLOSE:
+                            default:
+                                return HTCLOSE;
+                            }
                         }
                     }
+                    for (const RECT& r : win->drag_regions) {
+                        if (client.x >= r.left && client.x < r.right
+                            && client.y >= r.top && client.y < r.bottom)
+                            return HTCAPTION;
+                    }
                 }
-                for (const RECT& r : win->drag_regions) {
-                    if (client.x >= r.left && client.x < r.right
-                        && client.y >= r.top && client.y < r.bottom)
-                        return HTCAPTION;
-                }
-                /* A Frameless (hidden title bar) window keeps the system caption,
-                 * so DefWindowProc handles the whole caption area natively: the
-                 * strip drags (HTCAPTION), the buttons hit (HT*BUTTON) and the
-                 * maximize button triggers the Win11 snap-layouts popup. We must
-                 * NOT intercept the top strip here, or the system buttons (and
-                 * their snap-layouts hover) stop working. */
             }
+            return DefWindowProcW(hwnd, message, wparam, lparam);
         }
-        return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
     /* WM_GETMINMAXINFO: clamp the tracking size (min/max client size -> window
@@ -1050,16 +1052,16 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (win && (win->min_w || win->min_h || win->max_w || win->max_h)) {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lparam);
-            const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+            const DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
             if (win->min_w || win->min_h) {
                 RECT rc{0, 0, win->min_w, win->min_h};
-                AdjustWindowRect(&rc, style, FALSE);
+                AdjustWindowRect(&rc, st, FALSE);
                 mmi->ptMinTrackSize.x = rc.right - rc.left;
                 mmi->ptMinTrackSize.y = rc.bottom - rc.top;
             }
             if (win->max_w || win->max_h) {
                 RECT rc{0, 0, win->max_w, win->max_h};
-                AdjustWindowRect(&rc, style, FALSE);
+                AdjustWindowRect(&rc, st, FALSE);
                 mmi->ptMaxTrackSize.x = rc.right - rc.left;
                 mmi->ptMaxTrackSize.y = rc.bottom - rc.top;
             }
@@ -1109,6 +1111,12 @@ LRESULT CALLBACK heliosview_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
     return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
 }
+
+/* Explicit instantiations, one per style (the only WndProcs the library uses). */
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>(HWND, UINT, WPARAM, LPARAM);
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>(HWND, UINT, WPARAM, LPARAM);
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>(HWND, UINT, WPARAM, LPARAM);
+template LRESULT CALLBACK heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS>(HWND, UINT, WPARAM, LPARAM);
 
 /* ================= Message loop ================= */
 
@@ -1219,13 +1227,46 @@ int heliosview_window_show(heliosview_window_t* window)
         return 0;
     }
 
+    /* Pick the window class + procedure for this style. Each style gets its own
+     * class (distinct lpfnWndProc instantiation, see the template above). */
+    const wchar_t* class_name = L"HeliosViewWindow";
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        class_name = L"HeliosViewWindowBorderless";
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        class_name = L"HeliosViewWindowFrameless";
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS:
+        class_name = L"HeliosViewWindowFramelessButtons";
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        class_name = L"HeliosViewWindow";
+        break;
+    }
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = heliosview_wndproc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-    wc.lpszClassName = L"HeliosViewWindow";
+    wc.lpszClassName = class_name;
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>;
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>;
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS_BUTTONS>;
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>;
+        break;
+    }
     RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
 
     const std::wstring title = utf8_to_wide(window->title);
@@ -1236,7 +1277,7 @@ int heliosview_window_show(heliosview_window_t* window)
     RECT rect{0, 0, window->width, window->height};
     AdjustWindowRect(&rect, style, FALSE);
 
-    window->hwnd = CreateWindowExW(0, L"HeliosViewWindow", title.c_str(), style,
+    window->hwnd = CreateWindowExW(0, class_name, title.c_str(), style,
                                    CW_USEDEFAULT, CW_USEDEFAULT,
                                    rect.right - rect.left, rect.bottom - rect.top,
                                    nullptr, nullptr, GetModuleHandleW(nullptr), window);
