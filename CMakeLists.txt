@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 4.3)
 
 project(HeliosView
-        VERSION 1.0.0
+        VERSION 1.0.1
         DESCRIPTION "HeliosView - a C++ WebView windowing library"
         LANGUAGES CXX C)
 

@@ -16,8 +16,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # third_party/stdexec and third_party/json are git submodules
-          # (vendored header-only deps); checkout must fetch them.
-          submodules: recursive
+          # (vendored header-only deps); checkout must fetch them. third_party/
+          # boost is the boostorg superproject — do NOT init recursively, it
+          # would drag in all ~150 lib submodules; CMake selects and inits only
+          # the libs the build needs at configure time.
+          submodules: true
 
       # windows-latest ships Visual Studio 2026, not 2022 - and std::flat_map
       # needs a recent MSVC. msvc-dev-cmd finds the latest installed VS toolset

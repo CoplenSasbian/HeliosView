@@ -1,62 +1,70 @@
-# HeliosView v1.0.0
+# HeliosView v1.0.1
 
-The first stable release of HeliosView — a C++ WebView windowing library:
-a pure C API (`HeliosView.dll`) plus a header-only C++ wrapper (`HeliosView.Core`).
+Async I/O release — a shared asio context for background work and network I/O,
+a TLS-capable HTTP client, and a new console demo.
 
-## Features
+## What's new
 
-**Windows**
-- Three styles: NORMAL / BORDERLESS / FRAMELESS (with built-in MDL2 control buttons)
-- Position / size / opacity / topmost / fullscreen / min-max size / taskbar
-  progress & flash / Mica backdrop / dark mode
-- Window ids are the native HWND (`uintptr_t`); events dispatch safely by
-  handle — no process-global state
+**Async (`HeliosViewCore/Async.h`)**
+- One asio context shared by the library: thread pool + timers + sockets
+- Timers: `timer` / `sleepAsync` / `wait` / `waitAsync` / `sleep`
+- Socket I/O: `read` / `write` / `connect` / `accept`, in both callback and
+  stdexec sender styles (`helios::use_sender`)
+- `BasicSender` — a generic stdexec sender ported from HeliosExec (the
+  completion functor is the only customization point)
 
-**WebView (WebView2)**
-- JS ⇄ native bridge: `window.helios.call` → Promise, nlohmann auto-binding
-  (`bindJson` / `subscribeJson`)
-- Bidirectional BroadcastChannel, eval / evalAsync, local folder mapping, insets
-- Built-in `<helios-window-title-bar>` / `<helios-window-controls>` components
-  (native app-region drag; maximize button disables when the window is not resizable)
+**HttpClient (`HeliosViewCore/Http.h`)**
+- `http::Client` on the shared pool: http/https GET and POST
+- TLS via beast `ssl_stream` with peer verification against a CA bundle
+  (OpenSSL 3.5.2 fetched at configure time, no vcpkg)
+- One exchange per request (`Connection: close`); pooling planned under the
+  same API
 
-**System**
-- Tray, popup menus, message box, file/folder dialogs, clipboard, open URL,
-  toast notifications
-- Common-Controls v6 activated from the library itself: themed message boxes
-  and dialogs for every consumer — no exe manifest required
+**Dependencies**
+- Standalone asio replaced by the boostorg superproject submodule
+  (pinned boost-1.92.0); CMake selectively inits only the libs the build
+  needs — no `--recursive` checkout
+- stdexec pinned to `b783aac` (matches HeliosExec)
 
 **Examples**
-- `HeliosViewDemo`: WebView master demo — every feature driven by sliders and
-  text inputs
-- Window / App / System / WebView / Events / C demos
+- `webview_demo`: new fetch handler + URL input (https by default)
+- New `async_http_demo`: console example exercising pool timers/sockets and
+  http/https/POST
 
 **Requirements**: Windows 10/11, C++23 (the C API is usable from C99),
 CMake ≥ 4.3, no vcpkg.
 
 ---
 
-# HeliosView v1.0.0（中文）
+# HeliosView v1.0.1（中文）
 
-HeliosView 首个稳定版本 —— 一个 C++ WebView 窗口库：纯 C API（`HeliosView.dll`）+ 头文件 C++ 包装层（`HeliosView.Core`）。
+异步 I/O 版本 —— 共享 asio 上下文支持后台任务与网络 I/O，新增支持 TLS 的
+HTTP 客户端，以及一个新的控制台示例。
 
-## 功能
+## 新增内容
 
-**窗口**
-- 三种样式：NORMAL / BORDERLESS / FRAMELESS（含内置 MDL2 控制按钮组件）
-- 位置 / 尺寸 / 透明度 / 置顶 / 全屏 / 最小最大尺寸 / 任务栏进度与闪烁 / Mica 背景 / 暗色模式
-- 窗口 id 即原生 HWND（`uintptr_t`），事件按句柄安全分发 —— 无进程级全局状态
+**Async（`HeliosViewCore/Async.h`）**
+- 库共享一个 asio 上下文：线程池 + 定时器 + 套接字
+- 定时器：`timer` / `sleepAsync` / `wait` / `waitAsync` / `sleep`
+- 套接字 I/O：`read` / `write` / `connect` / `accept`，回调与 stdexec sender
+  两种风格（`helios::use_sender`）
+- `BasicSender` —— 从 HeliosExec 移植的通用 stdexec sender（完成函数是唯一
+  定制点）
 
-**WebView（WebView2）**
-- JS ⇄ 原生桥：`window.helios.call` → Promise，nlohmann 自动绑定（`bindJson` / `subscribeJson`）
-- 双向 BroadcastChannel、eval / evalAsync、本地目录映射、insets
-- 内置 `<helios-window-title-bar>` / `<helios-window-controls>` 组件（原生 app-region 拖动；窗口不可调整大小时最大化按钮自动禁用）
+**HttpClient（`HeliosViewCore/Http.h`）**
+- `http::Client` 运行在共享线程池上：http/https GET 与 POST
+- TLS 基于 beast `ssl_stream`，对 CA bundle 校验对端证书（配置时自动拉取
+  OpenSSL 3.5.2，无需 vcpkg）
+- 一次请求一次连接（`Connection: close`）；连接池计划在相同 API 下提供
 
-**系统能力**
-- 托盘、右键菜单、消息框、文件 / 文件夹对话框、剪贴板、打开 URL、Toast 通知
-- 公共控件 v6 由库自身激活：消息框 / 对话框现代化主题，无需 exe 清单
+**依赖**
+- 独立 asio 替换为 boostorg 超工程子模块（pin boost-1.92.0）；CMake 配置时
+  按需只初始化构建需要的库 —— 无需 `--recursive` checkout
+- stdexec 固定到 `b783aac`（与 HeliosExec 一致）
 
 **示例**
-- `HeliosViewDemo`：WebView 总演示 —— 滑块 + 输入框驱动全部功能
-- 另有窗口 / 应用 / 系统 / WebView / 事件 / C 示例
+- `webview_demo`：新增 fetch 处理 + URL 输入框（默认 https）
+- 新增 `async_http_demo`：控制台示例，演示池定时器 / 套接字与 http/https/POST
 
-**环境要求**：Windows 10/11，C++23（C API 可被 C99 使用），CMake ≥ 4.3，无 vcpkg。
+**环境要求**：Windows 10/11，C++23（C API 可被 C99 使用），CMake ≥ 4.3，
+无 vcpkg。
