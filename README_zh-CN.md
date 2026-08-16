@@ -94,6 +94,7 @@ HeliosView 把**所有分配都路由到一个可配置的分配器**，因此�
 | `nlohmann/json` | 3.12 | vendored（`third_party/json/`） | WebView 桥接的自动绑定（`bindJson`） |
 | WebView2 SDK | 1.0.4129.50 | 配置时从 NuGet 下载 | 内嵌 WebView（win32） |
 | `stdexec` | 固定 commit 758f41f4（origin/main，2026-08-15，0.11.0+） | vendored（`third_party/stdexec/`） | C++23 协程（sender/receiver） |
+| `asio` | 1.31.0（standalone，仅头文件） | vendored（`third_party/asio/`） | 后台线程池（`Async`，UI 线程外的处理器） |
 
 其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。
 

@@ -16,6 +16,7 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -57,6 +58,11 @@ int main()
 
     auto app = std::make_shared<helios::App>();
 
+    // Background thread pool (asio-backed, see HeliosViewCore/Async.h): handlers
+    // hop off the UI thread with `co_await schedule(async.get_scheduler())`.
+    // Must outlive the bindings below.
+    helios::Async async;
+
     // Frameless: a fully frameless window (no system title bar). The page's
     // title bar is the injected <helios-window-title-bar> web component - it
     // auto-registers as the drag region (built-in __hv.drag) and hosts
@@ -92,6 +98,18 @@ int main()
     window->bindJson<nlohmann::json>("fail", [](nlohmann::json) -> std::execution::task<helios::JsonError<std::string>> {
         std::println("[native] fail() -> reject");
         co_return helios::JsonError<std::string>{"error", "nope"};
+    });
+
+    // spin({a,b}) -> hops off the UI thread onto the asio worker pool, does some
+    // busy work there, and resolves from the pool thread (resolve/reject is
+    // thread-safe in the C bridge, so no marshalling back is needed).
+    window->bindJson<AddReq>("spin", [&async](AddReq req) -> std::execution::task<helios::JsonResp<std::string>> {
+        co_await std::execution::schedule(async.get_scheduler()); // UI thread -> pool worker
+        std::this_thread::sleep_for(std::chrono::milliseconds(200)); // simulated work
+        const std::string msg = std::format("{} + {} = {} on worker thread {}",
+                                            req.a, req.b, req.a + req.b, std::this_thread::get_id());
+        std::println("[native] spin: computed on pool thread {}", std::this_thread::get_id());
+        co_return helios::JsonResp<std::string>{"msg", msg};
     });
 
     // emit() -> resolves {"ok":true}, then pushes a native broadcast to the "status" channel
@@ -138,6 +156,7 @@ int main()
         "<button onclick=\"run('echo', {x:1, y:'hi'})\">echo({x:1,y:'hi'})</button>"
         "<button onclick=\"run('greet', {name:'helios'})\">greet({name:'helios'})</button>"
         "<button onclick=\"run('fail', {})\">fail()</button>"
+        "<button onclick=\"run('spin', {a: 20, b: 22})\">spin({a:20,b:22}) -&gt; Async pool</button>"
         "<button onclick=\"run('emit', {})\">emit() -&gt; broadcast</button>"
         "<button onclick=\"run('repeat', {s: 'ab', times: 3})\">repeat({s:'ab',times:3})</button>"
         "<button onclick=\"bcSend()\">bc.postMessage -&gt; native</button>"

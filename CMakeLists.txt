@@ -21,6 +21,9 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 #   - stdexec:     P2300 senders/receivers reference implementation, pinned to
 #                  the latest origin/main commit (0.11.0+) HeliosView.Core is
 #                  built and tested against.
+#   - asio:        standalone asio (header-only), pinned to asio-1-31-0 — the
+#                  version stdexec's own asio adapters are tested against.
+#                  Backs the library's background scheduler (Async.h).
 #   - nlohmann/json (single header, exposed below as nlohmann_json::nlohmann_json).
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
@@ -40,12 +43,39 @@ target_include_directories(nlohmann_json INTERFACE
 # stdexec: P2300 senders/receivers reference implementation (header-only),
 # pinned to origin/main 758f41f4 (2026-08-15) — vendored, not downloaded.
 add_library(stdexec INTERFACE)
+# stdexec's exec::asio adapters require a generated asio_config.hpp selecting
+# standalone vs Boost asio. HeliosView does not run stdexec's own CMake, so we
+# generate it here (mirroring stdexec's ConfigureASIO.cmake).
+set(STDEXEC_ASIO_USES_STANDALONE 1)
+set(STDEXEC_ASIO_USES_BOOST 0)
+set(STDEXEC_ASIO_CONFIG_HPP "${CMAKE_CURRENT_BINARY_DIR}/generated/exec/asio/asio_config.hpp")
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/exec/asio/asio_config.hpp.in
+    ${STDEXEC_ASIO_CONFIG_HPP})
 target_include_directories(stdexec INTERFACE
+    # generated/ first, so <exec/asio/asio_config.hpp> resolves to the generated file
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include>
     $<INSTALL_INTERFACE:include>)
 if(MSVC)
     # stdexec requires MSVC's conforming __cplusplus / preprocessor
     target_compile_options(stdexec INTERFACE /Zc:__cplusplus /Zc:preprocessor)
+endif()
+
+# asio (standalone, header-only): vendored submodule — backs the library's
+# background scheduler (HeliosViewCore/Async.h via stdexec's exec::asio
+# adapters). Pinned to asio-1-31-0, the version stdexec's adapters test with.
+add_library(asio INTERFACE)
+add_library(asio::asio ALIAS asio)
+target_include_directories(asio INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio/asio/include>
+    $<INSTALL_INTERFACE:include>)
+# Standalone asio: never pick up a Boost.Asio by accident
+target_compile_definitions(asio INTERFACE ASIO_STANDALONE)
+if(WIN32)
+    # asio defaults _WIN32_WINNT to 0x0601 with a message otherwise; HeliosView
+    # targets Win10+ (WebView2 requires it), so state it explicitly.
+    target_compile_definitions(asio INTERFACE _WIN32_WINNT=0x0A00)
 endif()
 
 # heliosview_link_platform_system_libs(): links each backend's OS-specific
@@ -100,7 +130,7 @@ target_include_directories(HeliosView.Core INTERFACE
 )
 # stdexec + nlohmann propagate via INTERFACE: targets linking HeliosView::Core
 # (e.g. the examples) automatically get their include paths and the C++23 requirement
-target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec nlohmann_json::nlohmann_json)
+target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec asio nlohmann_json::nlohmann_json)
 # exported to consumers: any target linking HeliosView::Core is compiled as C++23
 target_compile_features(HeliosView.Core INTERFACE cxx_std_23)
 
@@ -126,19 +156,27 @@ install(TARGETS HeliosView
 # so C++ consumers get a working HeliosView::Core from the installed config.
 # stdexec/nlohmann keep build-tree include paths (the source is vendored under
 # third_party/); this is a self-hosting install.
-install(TARGETS HeliosView.Core stdexec nlohmann_json EXPORT HeliosViewTargets)
+install(TARGETS HeliosView.Core stdexec asio nlohmann_json EXPORT HeliosViewTargets)
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosView
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosViewCore
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# Vendored header-only deps of HeliosView.Core (stdexec, nlohmann/json):
+# Vendored header-only deps of HeliosView.Core (stdexec, asio, nlohmann/json):
 # install them into the same include tree so exported HeliosView::Core resolves.
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         PATTERN "._clangd_helper_file.cpp" EXCLUDE)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio/asio/include/asio
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio/asio/include/asio.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# Generated stdexec asio config: installed consumers resolve
+# <exec/asio/asio_config.hpp> to this standalone-asio configuration.
+install(FILES ${STDEXEC_ASIO_CONFIG_HPP}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/exec/asio)
 
 if(WIN32)
     # WebView2Loader.dll must sit next to the app exe at runtime.
