@@ -120,15 +120,19 @@ install**:
 | --- | --- | --- | --- |
 | `nlohmann/json` | 3.12 | vendored (`third_party/json/`) | WebView bridge auto-binding (`bindJson`) |
 | WebView2 SDK | 1.0.4129.50 | downloaded from NuGet at configure time | embedded WebView (win32) |
-| `stdexec` | pinned commit b783aac (Mar 2024) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
+| `stdexec` | pinned commit 758f41f4 (origin/main, 2026-08-15, 0.11.0+) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
+| `Boost` (Asio/Beast) | 1.92.0 (superproject submodule, needed libs auto-initialized) | vendored (`third_party/boost/`) | background thread pool (`Async`) + HTTP via Boost.Beast |
 
 Everything else comes from the OS: windowing, dialogs, toasts (WinRT via the
 Windows SDK), DWM backdrop. The WebView2 SDK is the only thing fetched at
 configure time (a `.nupkg` is just a zip of headers + the WebView2Loader
-library), cached in the build directory.
+library), cached in the build directory. Boost libs are initialized
+selectively at configure time (`git submodule update --init --depth 1` inside
+`third_party/boost/`) — do not run `git submodule update --init --recursive`,
+it would fetch all ~160 Boost libraries.
 
 ```sh
-git submodule update --init --recursive
+git submodule update --init
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```

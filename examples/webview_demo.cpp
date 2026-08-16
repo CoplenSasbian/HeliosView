@@ -11,11 +11,13 @@
 //   - eval() / evalAsync(): run JS from native (output on the terminal)
 // The bridge shim is injected into every page automatically.
 #include <HeliosViewCore/HeliosView.h>
+#include <HeliosViewCore/Http.h>
 
 #include <format>
 #include <memory>
 #include <print>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -57,6 +59,17 @@ int main()
 
     auto app = std::make_shared<helios::App>();
 
+    // Background thread pool (asio-backed, see HeliosViewCore/Async.h): handlers
+    // hop off the UI thread with `co_await schedule(async.get_scheduler())`.
+    // Must outlive the bindings below.
+    helios::Async async;
+
+    // HTTP client on the pool (see HeliosViewCore/Http.h): each request is one
+    // complete exchange (DNS -> connect -> [TLS] -> write -> read -> close; no
+    // pooling yet). Must not outlive `async`. cacert.pem (CA bundle) sits next
+    // to the exe (copied at configure time) so https certificates verify.
+    helios::http::Client client{async, std::chrono::seconds(10), "cacert.pem"};
+
     // Frameless: a fully frameless window (no system title bar). The page's
     // title bar is the injected <helios-window-title-bar> web component - it
     // auto-registers as the drag region (built-in __hv.drag) and hosts
@@ -92,6 +105,37 @@ int main()
     window->bindJson<nlohmann::json>("fail", [](nlohmann::json) -> std::execution::task<helios::JsonError<std::string>> {
         std::println("[native] fail() -> reject");
         co_return helios::JsonError<std::string>{"error", "nope"};
+    });
+
+    // spin({a,b}) -> hops off the UI thread onto the asio worker pool, does some
+    // busy work there, and resolves from the pool thread (resolve/reject is
+    // thread-safe in the C bridge, so no marshalling back is needed).
+    window->bindJson<AddReq>("spin", [&async](AddReq req) -> std::execution::task<helios::JsonResp<std::string>> {
+        co_await std::execution::schedule(async.get_scheduler()); // UI thread -> pool worker
+        std::this_thread::sleep_for(std::chrono::milliseconds(200)); // simulated work
+        const std::string msg = std::format("{} + {} = {} on worker thread {}",
+                                            req.a, req.b, req.a + req.b, std::this_thread::get_id());
+        std::println("[native] spin: computed on pool thread {}", std::this_thread::get_id());
+        co_return helios::JsonResp<std::string>{"msg", msg};
+    });
+
+    // fetch({url}) -> HTTP GET through helios::http::Client on the Async pool:
+    // the response (status/headers/body) is serialized back to JS. Network or
+    // timeout errors reject the Promise with {"error": ...}.
+    window->bindJson<nlohmann::json>("fetch", [&client](nlohmann::json j) -> std::execution::task<helios::JsonResp<nlohmann::json>> {
+        const std::string url = j.value("url", "http://example.com/");
+        std::println("[native] fetch: GET {}", url);
+        auto resp = co_await client.get(url);
+        nlohmann::json headers = nlohmann::json::array();
+        for (const auto& [k, v] : resp.headers)
+            headers.push_back({{k, v}});
+        nlohmann::json out = {{"status", resp.status},
+                              {"reason", resp.reason},
+                              {"headers", headers},
+                              {"body", resp.body}};
+        std::println("[native] fetch: -> {} {} ({} body bytes)", resp.status, resp.reason,
+                     resp.body.size());
+        co_return helios::JsonResp<nlohmann::json>{"resp", std::move(out)};
     });
 
     // emit() -> resolves {"ok":true}, then pushes a native broadcast to the "status" channel
@@ -138,8 +182,12 @@ int main()
         "<button onclick=\"run('echo', {x:1, y:'hi'})\">echo({x:1,y:'hi'})</button>"
         "<button onclick=\"run('greet', {name:'helios'})\">greet({name:'helios'})</button>"
         "<button onclick=\"run('fail', {})\">fail()</button>"
+        "<button onclick=\"run('spin', {a: 20, b: 22})\">spin({a:20,b:22}) -&gt; Async pool</button>"
         "<button onclick=\"run('emit', {})\">emit() -&gt; broadcast</button>"
         "<button onclick=\"run('repeat', {s: 'ab', times: 3})\">repeat({s:'ab',times:3})</button>"
+        "<input id='url' value='https://example.com/' style='width:220px;background:#2a2a44;border:1px solid #3a3a55;"
+        "color:#cdd6f4;border-radius:4px;padding:2px 6px;font-size:12px'>"
+        "<button onclick=\"run('fetch', {url: document.getElementById('url').value})\">fetch() -&gt; HttpClient</button>"
         "<button onclick=\"bcSend()\">bc.postMessage -&gt; native</button>"
         "</div>"
         "</div>"

@@ -9,6 +9,13 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(GNUInstallDirs)
+
+if(MSVC)
+    # beast/stdexec template-heavy headers exceed the default COMDAT section limit
+    add_compile_options(/bigobj)
+endif()
+
 # DLLs and demo exes land in the same directory, so no manual PATH setup at runtime
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -16,10 +23,18 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # ---------- Third-party dependencies ----------
 #
-# Git submodules (third_party/, fetched with `git submodule update --init
-# --recursive`, header-only, nothing to compile):
-#   - stdexec:     pinned to the commit HeliosView.Core was written against
-#                  (newer releases removed the concept tags this code uses).
+# Git submodules (third_party/, fetched with `git submodule update --init`
+# — NOT --recursive, see the Boost note below; header-only, nothing to compile):
+#   - stdexec:     P2300 senders/receivers reference implementation, pinned to
+#                  the latest origin/main commit (0.11.0+) HeliosView.Core is
+#                  built and tested against.
+#   - Boost:       Boost superproject submodule (third_party/boost), pinned to
+#                  boost-1.92.0. Only the libraries HeliosView needs are
+#                  initialized (HELIOSVIEW_BOOST_LIBS) — Boost.Asio for the
+#                  background scheduler (Async.h) and Boost.Beast for HTTP.
+#                  Do NOT run `git submodule update --init --recursive` on
+#                  HeliosView: it would fetch all ~160 Boost libraries; the
+#                  selective init runs automatically at configure time.
 #   - nlohmann/json (single header, exposed below as nlohmann_json::nlohmann_json).
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
@@ -37,14 +52,177 @@ target_include_directories(nlohmann_json INTERFACE
     $<INSTALL_INTERFACE:include>)
 
 # stdexec: P2300 senders/receivers reference implementation (header-only),
-# pinned to commit b783aac (March 2024) — vendored, not downloaded.
+# pinned to origin/main 758f41f4 (2026-08-15) — vendored, not downloaded.
 add_library(stdexec INTERFACE)
+# stdexec's exec::asio adapters require a generated asio_config.hpp selecting
+# standalone vs Boost asio. HeliosView does not run stdexec's own CMake, so we
+# generate it here (mirroring stdexec's ConfigureASIO.cmake). Boost.Asio is
+# the configured backend.
+set(STDEXEC_ASIO_USES_STANDALONE 0)
+set(STDEXEC_ASIO_USES_BOOST 1)
+set(STDEXEC_ASIO_CONFIG_HPP "${CMAKE_CURRENT_BINARY_DIR}/generated/exec/asio/asio_config.hpp")
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/exec/asio/asio_config.hpp.in
+    ${STDEXEC_ASIO_CONFIG_HPP})
 target_include_directories(stdexec INTERFACE
+    # generated/ first, so <exec/asio/asio_config.hpp> resolves to the generated file
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include>
     $<INSTALL_INTERFACE:include>)
 if(MSVC)
     # stdexec requires MSVC's conforming __cplusplus / preprocessor
     target_compile_options(stdexec INTERFACE /Zc:__cplusplus /Zc:preprocessor)
+endif()
+
+# Boost: the superproject only contains lib submodules; initialize the subset
+# HeliosView needs at configure time (a no-op once they are present). Append
+# new libraries here when more of Boost is used (e.g. libs/url for HTTP).
+# Do NOT run `git submodule update --init --recursive` on HeliosView — it
+# would fetch all ~160 Boost libraries.
+set(HELIOSVIEW_BOOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost")
+# asio + beast (HTTP) and their header-only dependency closure. A shallow
+# fetch can leave a lib with an empty include/ (git dir present, index empty);
+# heliosview_ensure_boost_libs detects and repairs that.
+set(HELIOSVIEW_BOOST_LIBS
+    asio beast system config core assert throw_exception static_assert
+    type_traits utility detail winapi preprocessor integer move
+    align compat mp11 variant2 predef date_time optional
+    smart_ptr bind intrusive logic static_string container_hash describe io)
+function(_heliosview_boost_lib_ok lib out_var)
+    file(GLOB_RECURSE _f "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include/*")
+    if(_f)
+        set(${out_var} TRUE PARENT_SCOPE)
+    else()
+        set(${out_var} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+function(heliosview_ensure_boost_libs)
+    if(NOT EXISTS "${HELIOSVIEW_BOOST_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "Boost submodule missing at ${HELIOSVIEW_BOOST_ROOT}.\n"
+            "Run `git submodule update --init` (HeliosView's own submodules).")
+    endif()
+    set(missing "")
+    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
+        _heliosview_boost_lib_ok(${lib} _ok)
+        if(NOT _ok)
+            list(APPEND missing "libs/${lib}")
+        endif()
+    endforeach()
+    if(missing)
+        message(STATUS "Initializing Boost libraries: ${missing}")
+        execute_process(
+            COMMAND git submodule update --init --depth 1 -- ${missing}
+            WORKING_DIRECTORY "${HELIOSVIEW_BOOST_ROOT}"
+            RESULT_VARIABLE _boost_init_result)
+        if(NOT _boost_init_result EQUAL 0)
+            message(FATAL_ERROR
+                "Failed to initialize Boost submodules (${missing}).\n"
+                "Network access is needed at configure time for first-time builds.")
+        endif()
+    endif()
+    # A shallow fetch can leave an empty checkout (git dir present, index
+    # empty); materialize any such library from its pinned commit.
+    set(broken "")
+    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
+        _heliosview_boost_lib_ok(${lib} _ok)
+        if(NOT _ok)
+            list(APPEND broken "${lib}")
+        endif()
+    endforeach()
+    if(broken)
+        message(STATUS "Repairing empty Boost checkouts: ${broken}")
+        foreach(lib ${broken})
+            execute_process(
+                COMMAND git -C "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}" checkout --detach --force HEAD
+                COMMAND git -C "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}" reset --hard HEAD
+                WORKING_DIRECTORY "${HELIOSVIEW_BOOST_ROOT}")
+        endforeach()
+    endif()
+    set(still_missing "")
+    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
+        _heliosview_boost_lib_ok(${lib} _ok)
+        if(NOT _ok)
+            list(APPEND still_missing "${lib}")
+        endif()
+    endforeach()
+    if(still_missing)
+        message(FATAL_ERROR
+            "Boost libraries still missing after init/repair: ${still_missing}")
+    endif()
+endfunction()
+heliosview_ensure_boost_libs()
+
+# Boost.Asio/Beast: header-only for our use (asio + system are header-only
+# since Boost 1.69); nothing to compile or link except ws2_32 on Windows for
+# sockets. Backs the library's background scheduler (HeliosViewCore/Async.h
+# via stdexec's exec::asio adapters) and Boost.Beast for HTTP.
+add_library(boost INTERFACE)
+foreach(lib ${HELIOSVIEW_BOOST_LIBS})
+    target_include_directories(boost INTERFACE
+        $<BUILD_INTERFACE:${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include>
+        $<INSTALL_INTERFACE:include>)
+endforeach()
+if(WIN32)
+    # Windows sockets (asio/beast) + explicit Win10+ target (asio defaults to
+    # 0x0601 with a message otherwise; WebView2 requires Win10 anyway).
+    target_link_libraries(boost INTERFACE ws2_32 mswsock)
+    target_compile_definitions(boost INTERFACE _WIN32_WINNT=0x0A00)
+endif()
+
+# OpenSSL: prebuilt x64 from the openssl.vcpkg nuget package, downloaded at
+# configure time (like the WebView2 SDK) and cached in the build dir. Needed
+# by boost::asio::ssl for https (Http.h) — Windows has no system OpenSSL.
+if(WIN32)
+    set(HELIOSVIEW_OPENSSL_VERSION "3.5.2")
+    set(HELIOSVIEW_OPENSSL_ARCHIVE "${CMAKE_BINARY_DIR}/openssl.vcpkg.${HELIOSVIEW_OPENSSL_VERSION}.nupkg")
+    set(HELIOSVIEW_OPENSSL_ROOT "${CMAKE_BINARY_DIR}/openssl")
+    if(NOT EXISTS "${HELIOSVIEW_OPENSSL_ROOT}/build/native/include/openssl/ssl.h")
+        if(NOT EXISTS "${HELIOSVIEW_OPENSSL_ARCHIVE}")
+            message(STATUS "Downloading OpenSSL ${HELIOSVIEW_OPENSSL_VERSION} (x64, ~22 MB, one-time)...")
+            file(DOWNLOAD
+                "https://api.nuget.org/v3-flatcontainer/openssl.vcpkg/${HELIOSVIEW_OPENSSL_VERSION}/openssl.vcpkg.${HELIOSVIEW_OPENSSL_VERSION}.nupkg"
+                "${HELIOSVIEW_OPENSSL_ARCHIVE}"
+                STATUS _ossl_status)
+            list(GET _ossl_status 0 _ossl_code)
+            if(NOT _ossl_code EQUAL 0)
+                list(GET _ossl_status 1 _ossl_err)
+                message(FATAL_ERROR "Failed to download OpenSSL: ${_ossl_err}")
+            endif()
+        endif()
+        file(ARCHIVE_EXTRACT INPUT "${HELIOSVIEW_OPENSSL_ARCHIVE}" DESTINATION "${HELIOSVIEW_OPENSSL_ROOT}")
+    endif()
+    add_library(openssl INTERFACE)
+    target_include_directories(openssl INTERFACE
+        $<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/include>
+        $<INSTALL_INTERFACE:include>)
+    target_link_libraries(openssl INTERFACE
+        $<$<CONFIG:Debug>:$<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Debug/libssl.lib>>
+        $<$<CONFIG:Debug>:$<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Debug/libcrypto.lib>>
+        $<$<NOT:$<CONFIG:Debug>>:$<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Release/libssl.lib>>
+        $<$<NOT:$<CONFIG:Debug>>:$<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Release/libcrypto.lib>>
+        $<$<CONFIG:Debug>:$<INSTALL_INTERFACE:${CMAKE_INSTALL_LIBDIR}/openssl/Debug/libssl.lib>>
+        $<$<CONFIG:Debug>:$<INSTALL_INTERFACE:${CMAKE_INSTALL_LIBDIR}/openssl/Debug/libcrypto.lib>>
+        $<$<NOT:$<CONFIG:Debug>>:$<INSTALL_INTERFACE:${CMAKE_INSTALL_LIBDIR}/openssl/Release/libssl.lib>>
+        $<$<NOT:$<CONFIG:Debug>>:$<INSTALL_INTERFACE:${CMAKE_INSTALL_LIBDIR}/openssl/Release/libcrypto.lib>>)
+    # Runtime DLLs next to the demo exes
+    set(HELIOSVIEW_OPENSSL_DLLS
+        "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libssl-3-x64.dll"
+        "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libcrypto-3-x64.dll")
+    file(COPY ${HELIOSVIEW_OPENSSL_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    # CA bundle for TLS verification (curl.se; OpenSSL on Windows does not use
+    # the system certificate store). TLS-verified download, cached.
+    set(HELIOSVIEW_CACERT_PEM "${CMAKE_BINARY_DIR}/cacert.pem")
+    if(NOT EXISTS "${HELIOSVIEW_CACERT_PEM}")
+        file(DOWNLOAD "https://curl.se/ca/cacert.pem" "${HELIOSVIEW_CACERT_PEM}"
+             STATUS _cacert_status)
+        list(GET _cacert_status 0 _cacert_code)
+        if(NOT _cacert_code EQUAL 0)
+            list(GET _cacert_status 1 _cacert_err)
+            message(FATAL_ERROR "Failed to download cacert.pem: ${_cacert_err}")
+        endif()
+    endif()
+    file(COPY "${HELIOSVIEW_CACERT_PEM}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 endif()
 
 # heliosview_link_platform_system_libs(): links each backend's OS-specific
@@ -97,9 +275,10 @@ target_include_directories(HeliosView.Core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-# stdexec + nlohmann propagate via INTERFACE: targets linking HeliosView::Core
-# (e.g. the examples) automatically get their include paths and the C++23 requirement
-target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec nlohmann_json::nlohmann_json)
+# stdexec + boost + openssl + nlohmann propagate via INTERFACE: targets linking
+# HeliosView::Core (e.g. the examples) automatically get their include paths
+# and the C++23 requirement
+target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec boost openssl nlohmann_json::nlohmann_json)
 # exported to consumers: any target linking HeliosView::Core is compiled as C++23
 target_compile_features(HeliosView.Core INTERFACE cxx_std_23)
 
@@ -113,7 +292,6 @@ endif()
 # Consumers (including FFI wrappers in other languages) link the built DLL/import
 # lib and include the C header directly; C++ consumers use the exported
 # HeliosView::Core INTERFACE target.
-include(GNUInstallDirs)
 
 install(TARGETS HeliosView
         EXPORT HeliosViewTargets
@@ -125,19 +303,43 @@ install(TARGETS HeliosView
 # so C++ consumers get a working HeliosView::Core from the installed config.
 # stdexec/nlohmann keep build-tree include paths (the source is vendored under
 # third_party/); this is a self-hosting install.
-install(TARGETS HeliosView.Core stdexec nlohmann_json EXPORT HeliosViewTargets)
+install(TARGETS HeliosView.Core stdexec boost openssl nlohmann_json EXPORT HeliosViewTargets)
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosView
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosViewCore
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# Vendored header-only deps of HeliosView.Core (stdexec, nlohmann/json):
+# Vendored header-only deps of HeliosView.Core (stdexec, boost, nlohmann/json):
 # install them into the same include tree so exported HeliosView::Core resolves.
+# Only the initialized Boost libs (HELIOSVIEW_BOOST_LIBS) are installed.
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         PATTERN "._clangd_helper_file.cpp" EXCLUDE)
+foreach(lib ${HELIOSVIEW_BOOST_LIBS})
+    install(DIRECTORY ${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include/
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endforeach()
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# Generated stdexec asio config: installed consumers resolve
+# <exec/asio/asio_config.hpp> to this Boost-asio configuration.
+install(FILES ${STDEXEC_ASIO_CONFIG_HPP}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/exec/asio)
+
+if(WIN32)
+    # OpenSSL headers/import libs (self-hosting install) + runtime DLLs and
+    # the CA bundle (both next to the exes).
+    install(DIRECTORY ${HELIOSVIEW_OPENSSL_ROOT}/build/native/include/openssl
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Debug/libssl.lib
+                  ${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Debug/libcrypto.lib
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/openssl/Debug)
+    install(FILES ${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Release/libssl.lib
+                  ${HELIOSVIEW_OPENSSL_ROOT}/build/native/lib/x64/Release/libcrypto.lib
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/openssl/Release)
+    install(FILES ${HELIOSVIEW_OPENSSL_DLLS} ${HELIOSVIEW_CACERT_PEM}
+            DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 if(WIN32)
     # WebView2Loader.dll must sit next to the app exe at runtime.

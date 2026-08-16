@@ -38,6 +38,7 @@
  */
 
 #include <HeliosViewCore/App.h>
+#include <HeliosViewCore/Async.h>
 #include <HeliosViewCore/Dialogs.h>
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Menu.h>

@@ -7,7 +7,8 @@
  * this header adds type-safe, JSON-serialized bindings:
  *
  *   struct AddReq { int a; int b; };          // + NLOHMANN_DEFINE_TYPE_INTRUSIVE / NON_INTRUSIVE
- *   window->bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<std::string> {
+ *   helios::Async async;                      // background thread pool (asio-backed), app-scoped
+ *   window->bindJson<AddReq>("add", [&async](AddReq req) -> std::execution::task<std::string> {
  *       co_await std::execution::schedule(async.get_scheduler());  // run off the UI thread
  *       co_return std::format("{}", req.a + req.b);
  *   });
@@ -36,9 +37,12 @@
  *   - JsonError<T>            -> reject with the top-level object {"<key>": value}
  *   - void                    -> resolve with null
  *
- * Requirements: nlohmann::json (single header or FetchContent nlohmann_json) and
- * HeliosViewCore/Execution.h (stdexec under C++23, std::execution under C++26).
- * Lifetime: destroy the WebView only when no bindJson task is still in flight.
+ * Requirements: nlohmann::json (single header or FetchContent nlohmann_json),
+ * HeliosViewCore/Execution.h (stdexec under C++23, std::execution under C++26)
+ * and — for off-UI-thread work — HeliosViewCore/Async.h (the asio-backed
+ * background pool behind `async.get_scheduler()` above).
+ * Lifetime: destroy the WebView only when no bindJson task is still in flight,
+ * and keep any Async the handlers use alive for at least as long as the bindings.
  */
 
 #include <HeliosViewCore/Execution.h>
