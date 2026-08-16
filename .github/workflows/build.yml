@@ -1,10 +1,13 @@
 name: build
 
 on:
+  # Builds are manual: run from the Actions page (Run workflow, pick a branch)
+  # whenever needed. The only automatic run is a version tag push, which also
+  # publishes the release.
+  workflow_dispatch:
   push:
-    branches: [master, main]
-    tags: ['v*']
-  pull_request:
+    tags:
+      - 'v*'
 
 jobs:
   build:
