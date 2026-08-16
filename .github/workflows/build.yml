@@ -14,13 +14,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          # third_party/stdexec and third_party/json are git submodules
-          # (vendored header-only deps); checkout must fetch them. third_party/
-          # boost is the boostorg superproject — do NOT init recursively, it
-          # would drag in all ~150 lib submodules; CMake selects and inits only
-          # the libs the build needs at configure time.
-          submodules: true
+        # Submodules are inited manually below: actions/checkout fetches
+        # submodules with full history, and the boost superproject must never
+        # be recursed into (all ~160 lib submodules). A shallow init keeps the
+        # checkout small; CMake then inits only the boost libs the build needs.
+      - name: Init submodules (shallow)
+        shell: bash
+        run: git submodule update --init --depth 1
 
       # windows-latest ships Visual Studio 2026, not 2022 - and std::flat_map
       # needs a recent MSVC. msvc-dev-cmd finds the latest installed VS toolset
