@@ -18,8 +18,9 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 #
 # Git submodules (third_party/, fetched with `git submodule update --init
 # --recursive`, header-only, nothing to compile):
-#   - stdexec:     pinned to the commit HeliosView.Core was written against
-#                  (newer releases removed the concept tags this code uses).
+#   - stdexec:     P2300 senders/receivers reference implementation, pinned to
+#                  the latest origin/main commit (0.11.0+) HeliosView.Core is
+#                  built and tested against.
 #   - nlohmann/json (single header, exposed below as nlohmann_json::nlohmann_json).
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
@@ -37,7 +38,7 @@ target_include_directories(nlohmann_json INTERFACE
     $<INSTALL_INTERFACE:include>)
 
 # stdexec: P2300 senders/receivers reference implementation (header-only),
-# pinned to commit b783aac (March 2024) — vendored, not downloaded.
+# pinned to origin/main 758f41f4 (2026-08-15) — vendored, not downloaded.
 add_library(stdexec INTERFACE)
 target_include_directories(stdexec INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include>

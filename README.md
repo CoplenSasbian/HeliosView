@@ -120,7 +120,7 @@ install**:
 | --- | --- | --- | --- |
 | `nlohmann/json` | 3.12 | vendored (`third_party/json/`) | WebView bridge auto-binding (`bindJson`) |
 | WebView2 SDK | 1.0.4129.50 | downloaded from NuGet at configure time | embedded WebView (win32) |
-| `stdexec` | pinned commit b783aac (Mar 2024) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
+| `stdexec` | pinned commit 758f41f4 (origin/main, 2026-08-15, 0.11.0+) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
 
 Everything else comes from the OS: windowing, dialogs, toasts (WinRT via the
 Windows SDK), DWM backdrop. The WebView2 SDK is the only thing fetched at
