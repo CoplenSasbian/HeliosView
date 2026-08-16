@@ -12,4 +12,16 @@ if(NOT TARGET HeliosView::Core AND TARGET HeliosView::HeliosView.Core)
     INTERFACE_LINK_LIBRARIES HeliosView::HeliosView.Core)
 endif()
 
+# The build tree exports the OpenSSL import-library paths relative to the
+# install prefix ("lib/openssl/Release/libssl.lib"); MSVC treats such entries
+# as library *names* and appends ".lib", so consumers fail to link with
+# "LNK1181: cannot open ...libssl.lib.lib". Re-anchor them to the install
+# prefix here (PACKAGE_PREFIX_DIR is computed from this file's location at
+# consume time, so the SDK zip stays relocatable).
+if(TARGET HeliosView::openssl)
+  set_target_properties(HeliosView::openssl PROPERTIES
+    INTERFACE_LINK_LIBRARIES
+      "$<$<CONFIG:Debug>:${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/openssl/Debug/libssl.lib>;$<$<CONFIG:Debug>:${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/openssl/Debug/libcrypto.lib>;$<$<NOT:$<CONFIG:Debug>>:${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/openssl/Release/libssl.lib>;$<$<NOT:$<CONFIG:Debug>>:${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/openssl/Release/libcrypto.lib>")
+endif()
+
 check_required_components(HeliosView)
