@@ -31,6 +31,10 @@ target_link_libraries(HeliosViewAppDemo PRIVATE HeliosView::Core)
 add_executable(HeliosViewSystemDemo system_demo.cpp)
 target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
 
+# Console demo: Async pool (timers/sockets) + HttpClient (http/https GET, POST).
+add_executable(HeliosViewAsyncHttpDemo async_http_demo.cpp)
+target_link_libraries(HeliosViewAsyncHttpDemo PRIVATE HeliosView::Core)
+
 add_executable(HeliosViewWebViewDemo webview_demo.cpp)
 target_link_libraries(HeliosViewWebViewDemo PRIVATE HeliosView::Core)
 
