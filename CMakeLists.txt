@@ -83,10 +83,16 @@ set(HELIOSVIEW_BOOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost")
 # asio + beast (HTTP) and their header-only dependency closure. A shallow
 # fetch can leave a lib with an empty include/ (git dir present, index empty);
 # heliosview_ensure_boost_libs detects and repairs that.
+# Each lib here is verified against the #include closure of HeliosView's
+# public headers; the following were 0-reference and are intentionally NOT
+# initialized/installed (saves ~11 MB in the SDK):
+#   preprocessor (~10 MB)  date_time  compat  variant2  integer
+# Note: include/boost/functional/ ships inside container_hash (historic
+# namespace) — not a separate lib, do not try to drop it independently.
 set(HELIOSVIEW_BOOST_LIBS
     asio beast system config core assert throw_exception static_assert
-    type_traits utility detail winapi preprocessor integer move
-    align compat mp11 variant2 predef date_time optional
+    type_traits utility detail winapi move
+    align mp11 predef optional
     smart_ptr bind intrusive logic static_string container_hash describe io)
 function(_heliosview_boost_lib_ok lib out_var)
     file(GLOB_RECURSE _f "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include/*")
