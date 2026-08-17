@@ -21,6 +21,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+include(cmake/ensure-submodule.cmake)
+
 # ---------- Third-party dependencies ----------
 #
 # Git submodules (third_party/, fetched with `git submodule update --init`
@@ -74,90 +76,7 @@ if(MSVC)
     target_compile_options(stdexec INTERFACE /Zc:__cplusplus /Zc:preprocessor)
 endif()
 
-# Boost: the superproject only contains lib submodules; initialize the subset
-# HeliosView needs at configure time (a no-op once they are present). Append
-# new libraries here when more of Boost is used (e.g. libs/url for HTTP).
-# Do NOT run `git submodule update --init --recursive` on HeliosView — it
-# would fetch all ~160 Boost libraries.
-set(HELIOSVIEW_BOOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost")
-# asio + beast (HTTP) and their header-only dependency closure. A shallow
-# fetch can leave a lib with an empty include/ (git dir present, index empty);
-# heliosview_ensure_boost_libs detects and repairs that.
-# Each lib here is verified against the #include closure of HeliosView's
-# public headers; the following were 0-reference and are intentionally NOT
-# initialized/installed (saves ~11 MB in the SDK):
-#   preprocessor (~10 MB)  date_time  compat  variant2  integer
-# Note: include/boost/functional/ ships inside container_hash (historic
-# namespace) — not a separate lib, do not try to drop it independently.
-set(HELIOSVIEW_BOOST_LIBS
-    asio beast system config core assert throw_exception static_assert
-    type_traits utility detail winapi move
-    align mp11 predef optional
-    smart_ptr bind intrusive logic static_string container_hash describe io)
-function(_heliosview_boost_lib_ok lib out_var)
-    file(GLOB_RECURSE _f "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include/*")
-    if(_f)
-        set(${out_var} TRUE PARENT_SCOPE)
-    else()
-        set(${out_var} FALSE PARENT_SCOPE)
-    endif()
-endfunction()
-function(heliosview_ensure_boost_libs)
-    if(NOT EXISTS "${HELIOSVIEW_BOOST_ROOT}/CMakeLists.txt")
-        message(FATAL_ERROR
-            "Boost submodule missing at ${HELIOSVIEW_BOOST_ROOT}.\n"
-            "Run `git submodule update --init` (HeliosView's own submodules).")
-    endif()
-    set(missing "")
-    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
-        _heliosview_boost_lib_ok(${lib} _ok)
-        if(NOT _ok)
-            list(APPEND missing "libs/${lib}")
-        endif()
-    endforeach()
-    if(missing)
-        message(STATUS "Initializing Boost libraries: ${missing}")
-        execute_process(
-            COMMAND git submodule update --init --depth 1 -- ${missing}
-            WORKING_DIRECTORY "${HELIOSVIEW_BOOST_ROOT}"
-            RESULT_VARIABLE _boost_init_result)
-        if(NOT _boost_init_result EQUAL 0)
-            message(FATAL_ERROR
-                "Failed to initialize Boost submodules (${missing}).\n"
-                "Network access is needed at configure time for first-time builds.")
-        endif()
-    endif()
-    # A shallow fetch can leave an empty checkout (git dir present, index
-    # empty); materialize any such library from its pinned commit.
-    set(broken "")
-    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
-        _heliosview_boost_lib_ok(${lib} _ok)
-        if(NOT _ok)
-            list(APPEND broken "${lib}")
-        endif()
-    endforeach()
-    if(broken)
-        message(STATUS "Repairing empty Boost checkouts: ${broken}")
-        foreach(lib ${broken})
-            execute_process(
-                COMMAND git -C "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}" checkout --detach --force HEAD
-                COMMAND git -C "${HELIOSVIEW_BOOST_ROOT}/libs/${lib}" reset --hard HEAD
-                WORKING_DIRECTORY "${HELIOSVIEW_BOOST_ROOT}")
-        endforeach()
-    endif()
-    set(still_missing "")
-    foreach(lib ${HELIOSVIEW_BOOST_LIBS})
-        _heliosview_boost_lib_ok(${lib} _ok)
-        if(NOT _ok)
-            list(APPEND still_missing "${lib}")
-        endif()
-    endforeach()
-    if(still_missing)
-        message(FATAL_ERROR
-            "Boost libraries still missing after init/repair: ${still_missing}")
-    endif()
-endfunction()
-heliosview_ensure_boost_libs()
+
 
 # Boost.Asio/Beast: header-only for our use (asio + system are header-only
 # since Boost 1.69); nothing to compile or link except ws2_32 on Windows for
@@ -216,16 +135,53 @@ if(WIN32)
         "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libssl-3-x64.dll"
         "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libcrypto-3-x64.dll")
     file(COPY ${HELIOSVIEW_OPENSSL_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
-    # CA bundle for TLS verification (curl.se; OpenSSL on Windows does not use
-    # the system certificate store). TLS-verified download, cached.
+    # CA bundle for TLS verification (OpenSSL on Windows does not use the
+    # system certificate store). TLS-verified download, cached, and tried from
+    # several sources in order: curl.se is canonical, but some networks
+    # (firewalled/proxied, or ones that route GitHub through a mirror such as
+    # this project's ghproxy insteadof) fail a direct TLS handshake to it, so
+    # we fall back to a content-identical copy served from a GitHub repo.
+    # Override the list entirely with -DHELIOSVIEW_CACERT_URL="<url>".
     set(HELIOSVIEW_CACERT_PEM "${CMAKE_BINARY_DIR}/cacert.pem")
     if(NOT EXISTS "${HELIOSVIEW_CACERT_PEM}")
-        file(DOWNLOAD "https://curl.se/ca/cacert.pem" "${HELIOSVIEW_CACERT_PEM}"
-             STATUS _cacert_status)
-        list(GET _cacert_status 0 _cacert_code)
-        if(NOT _cacert_code EQUAL 0)
-            list(GET _cacert_status 1 _cacert_err)
-            message(FATAL_ERROR "Failed to download cacert.pem: ${_cacert_err}")
+        if(HELIOSVIEW_CACERT_URL)
+            set(_cacert_sources "${HELIOSVIEW_CACERT_URL}")
+        else()
+            set(_cacert_sources
+                "https://curl.se/ca/cacert.pem"
+                "https://ghproxy.net/https://raw.githubusercontent.com/bagder/ca-bundle/master/ca-bundle.crt"
+                "https://raw.githubusercontent.com/bagder/ca-bundle/master/ca-bundle.crt")
+        endif()
+        set(_cacert_ok FALSE)
+        foreach(_src IN LISTS _cacert_sources)
+            message(STATUS "HeliosView: fetching CA bundle from ${_src}")
+            file(DOWNLOAD "${_src}" "${HELIOSVIEW_CACERT_PEM}"
+                 STATUS _cacert_status)
+            list(GET _cacert_status 0 _cacert_code)
+            if(_cacert_code EQUAL 0 AND EXISTS "${HELIOSVIEW_CACERT_PEM}")
+                # Sanity-check it really is a PEM cert bundle (a firewall can
+                # return an HTML error page with HTTP 200). Read the first few
+                # KB: the bundle's leading "## ..." comment header puts the
+                # first ----BEGIN CERTIFICATE---- marker a little inside the
+                # file (curl.se ~2 KB, the bagder copy ~1 KB).
+                file(READ "${HELIOSVIEW_CACERT_PEM}"
+                     _cacert_head LIMIT 4096 OFFSET 0)
+                string(FIND "${_cacert_head}" "-----BEGIN CERTIFICATE-----" _cacert_idx)
+                if(NOT _cacert_idx EQUAL -1)
+                    set(_cacert_ok TRUE)
+                    break()
+                endif()
+            endif()
+            file(REMOVE "${HELIOSVIEW_CACERT_PEM}")
+        endforeach()
+        if(NOT _cacert_ok)
+            message(FATAL_ERROR
+                "Failed to download cacert.pem from any source "
+                "(${_cacert_sources}). If this is an https-certificate "
+                "verification failure on a restrictive network, either set "
+                "-DHELIOSVIEW_CACERT_URL to a reachable copy or run CMake with "
+                "-DCMAKE_TLS_VERIFY=0 (disables TLS verification only for "
+                "file(DOWNLOAD)).")
         endif()
     endif()
     file(COPY "${HELIOSVIEW_CACERT_PEM}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
