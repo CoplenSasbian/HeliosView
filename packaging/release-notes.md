@@ -1,4 +1,4 @@
-# HeliosView v1.0.1
+# HeliosView v1.0.0
 
 Async I/O release — a shared asio context for background work and network I/O,
 a TLS-capable HTTP client, and a new console demo.
@@ -36,7 +36,7 @@ CMake ≥ 4.3, no vcpkg.
 
 ---
 
-# HeliosView v1.0.1（中文）
+# HeliosView v1.0.0（中文）
 
 异步 I/O 版本 —— 共享 asio 上下文支持后台任务与网络 I/O，新增支持 TLS 的
 HTTP 客户端，以及一个新的控制台示例。
