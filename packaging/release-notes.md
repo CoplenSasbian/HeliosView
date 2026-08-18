@@ -16,7 +16,7 @@ a TLS-capable HTTP client, and a new console demo.
 **HttpClient (`HeliosViewCore/Http.h`)**
 - `http::Client` on the shared pool: http/https GET and POST
 - TLS via beast `ssl_stream` with peer verification against a CA bundle
-  (OpenSSL 3.5.2 fetched at configure time, no vcpkg)
+  (OpenSSL 3.5.2 fetched automatically at configure time — no manual install)
 - One exchange per request (`Connection: close`); pooling planned under the
   same API
 
@@ -32,7 +32,8 @@ a TLS-capable HTTP client, and a new console demo.
   http/https/POST
 
 **Requirements**: Windows 10/11, C++23 (the C API is usable from C99),
-CMake ≥ 4.3, no vcpkg.
+CMake ≥ 4.3. Zero third-party setup — submodules, OpenSSL, and the WebView2
+SDK are all fetched and initialized automatically by CMake.
 
 ---
 
@@ -54,7 +55,7 @@ HTTP 客户端，以及一个新的控制台示例。
 **HttpClient（`HeliosViewCore/Http.h`）**
 - `http::Client` 运行在共享线程池上：http/https GET 与 POST
 - TLS 基于 beast `ssl_stream`，对 CA bundle 校验对端证书（配置时自动拉取
-  OpenSSL 3.5.2，无需 vcpkg）
+  OpenSSL 3.5.2，无需手动安装）
 - 一次请求一次连接（`Connection: close`）；连接池计划在相同 API 下提供
 
 **依赖**
@@ -66,5 +67,5 @@ HTTP 客户端，以及一个新的控制台示例。
 - `webview_demo`：新增 fetch 处理 + URL 输入框（默认 https）
 - 新增 `async_http_demo`：控制台示例，演示池定时器 / 套接字与 http/https/POST
 
-**环境要求**：Windows 10/11，C++23（C API 可被 C99 使用），CMake ≥ 4.3，
-无 vcpkg。
+**环境要求**：Windows 10/11，C++23（C API 可被 C99 使用），CMake ≥ 4.3。
+零依赖准备——submodule、OpenSSL、WebView2 SDK 全部由 CMake 自动拉取并初始化。
