@@ -175,10 +175,10 @@ public:
                 "heliosview bind: invalid webview or name (names must be C identifiers, no dots)");
     }
 
-    // nlohmann auto-binding (declared here, defined in <HeliosViewCore/WebViewJson.h>):
+    // Boost.JSON auto-binding (declared here, defined in <HeliosViewCore/WebViewJson.h>):
     // parses the JS call's argument array into the Args... types, runs handler(Args...)
     // as a detached std::execution::task, and resolves the Promise with the serialized
-    // Resp (or rejects it with the error). Requires nlohmann::json; include WebViewJson.h
+    // Resp (or rejects it with the error). Requires Boost.JSON; include WebViewJson.h
     // before calling. Example:
     //   win.bindJson<int, int>("add", [](int a, int b) -> std::execution::task<int> {
     //       co_return a + b;
@@ -243,10 +243,10 @@ public:
                 "heliosview subscribe: invalid webview or name (names must be C identifiers, no dots)");
     }
 
-    // nlohmann auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):
+    // Boost.JSON auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):
     // the page's BroadcastChannel(name).postMessage(data) is deserialized into a Req DTO and
     // passed to callback(Req) on the UI thread; the callback returns void. Requires
-    // nlohmann::json; include WebViewJson.h before calling. Example:
+    // Boost.JSON; include WebViewJson.h before calling. Example:
     //   win.subscribeJson<StatusReq>("status", [](StatusReq req) { ... });
     template <class Req, class Fn>
     void subscribeJson(const char* name, Fn&& callback);

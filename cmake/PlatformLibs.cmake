@@ -9,7 +9,7 @@
 #   2. add an `elseif(...)` branch here with that OS's system libraries,
 #   3. that's it -- src/CMakeLists.txt stays untouched.
 #
-# Non-OS dependencies (WebView2, vendored nlohmann / stdexec) are linked
+# Non-OS dependencies (WebView2, vendored stdexec / Boost) are linked
 # separately and are NOT part of this macro.
 
 # heliosview_link_platform_system_libs(<target>) --

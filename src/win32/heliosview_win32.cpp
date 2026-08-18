@@ -3205,13 +3205,16 @@ int heliosview_clipboard_set_text(const char* text)
     HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
     int result = -1;
     if (h) {
-        if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, h) != nullptr) {
-            void* dst = GlobalLock(h);
-            if (dst) {
-                std::memcpy(dst, w.c_str(), bytes);
-                GlobalUnlock(h);
+        /* Fill the memory BEFORE SetClipboardData: once that call succeeds the
+         * system owns h and the application must not write to it again (the old
+         * order — SetClipboardData first, memcpy after — left the clipboard
+         * holding the uninitialized GlobalAlloc garbage). */
+        void* dst = GlobalLock(h);
+        if (dst) {
+            std::memcpy(dst, w.c_str(), bytes);
+            GlobalUnlock(h);
+            if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, h) != nullptr)
                 result = 0;
-            }
         }
         /* GlobalFree is not needed after a successful SetClipboardData (the
          * clipboard owns the memory); free only on failure. */

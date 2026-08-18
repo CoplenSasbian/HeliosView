@@ -26,14 +26,27 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <boost/describe.hpp>
+#include <boost/json.hpp>
 
 namespace {
-using json = nlohmann::json;
+using json = boost::json::value;
 template <class T>
 using Task = std::execution::task<T>;
+
+// boost::json::value has no jget(j, "key", default) accessor (nlohmann::json did);
+// jget provides the equivalent: value_to<T>(j["key"]) or `fallback` when missing.
+template <class T>
+T jget(const json& j, std::string_view key, T fallback)
+{
+    if (const auto* obj = j.if_object())
+        if (const auto* it = obj->if_contains(key))
+            return boost::json::value_to<T>(*it);
+    return fallback;
+}
 
 /* ---------- shared demo state ---------- */
 
@@ -51,13 +64,13 @@ struct DemoState {
 };
 
 /* Push a native event to the page's BroadcastChannel("events"). */
-void emit(DemoState& s, const char* ev, const json& payload = json::object())
+void emit(DemoState& s, const char* ev, const json& payload = boost::json::object{})
 {
     if (!s.win)
         return;
     json j = payload;
-    j["event"] = ev;
-    s.win->broadcast("events", j.dump().c_str());
+    j.as_object()["event"] = ev;
+    s.win->broadcast("events", boost::json::serialize(j).c_str());
 }
 
 /* Bind a no-argument action: JS run('name', {}) resolves true. */
@@ -100,7 +113,7 @@ struct BcMsg {
     std::string from;
     int n = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(BcMsg, from, n)
+BOOST_DESCRIBE_STRUCT(BcMsg, (), (from, n))
 
 /* ---------- the demo page ---------- */
 
@@ -326,23 +339,23 @@ int main()
     bindAction(win, "win_focus", [&state] { state.win->focus(); });
 
     win->bindJson<json>("win_move", [&state](json j) -> Task<bool> {
-        state.win->move(j.value("x", 0), j.value("y", 0));
+        state.win->move(jget(j, "x", 0), jget(j, "y", 0));
         co_return true;
     });
     win->bindJson<json>("win_resize", [&state](json j) -> Task<bool> {
-        state.win->resize(j.value("w", 800), j.value("h", 600));
+        state.win->resize(jget(j, "w", 800), jget(j, "h", 600));
         co_return true;
     });
     win->bindJson<json>("win_opacity", [&state](json j) -> Task<bool> {
-        state.win->setOpacity(j.value("v", 1.0f));
+        state.win->setOpacity(jget(j, "v", 1.0f));
         co_return true;
     });
     win->bindJson<json>("win_title", [&state](json j) -> Task<bool> {
-        state.win->setTitle(j.value("title", std::string("HeliosView Master Demo")));
+        state.win->setTitle(jget(j, "title", std::string("HeliosView Master Demo")));
         co_return true;
     });
     win->bindJson<json>("win_progress", [&state](json j) -> Task<bool> {
-        state.win->setProgress(j.value("v", 0), 100);
+        state.win->setProgress(jget(j, "v", 0), 100);
         co_return true;
     });
     win->bindJson<json>("win_info", [&state](json) -> Task<json> { co_return windowInfo(state); });
@@ -354,19 +367,19 @@ int main()
 
     /* ================= Dialogs & System ================= */
 
-    win->bindJson<json>("dlg_message", [&state](json j) -> Task<helios::JsonResp<std::string>> {
+    win->bindJson<json>("dlg_message", [&state](json j) -> Task<boost::json::value> {
         const auto r = helios::messageBox(state.win->nativeHandle(), helios::MessageBoxType::Question,
                                           helios::MessageBoxButtons::YesNo,
-                                          j.value("title", std::string("HeliosView")).c_str(),
-                                          j.value("msg", std::string("")).c_str());
-        co_return helios::JsonResp<std::string>{"result", r == helios::MessageBoxResult::Yes ? "Yes" : "No"};
+                                          jget(j, "title", std::string("HeliosView")).c_str(),
+                                          jget(j, "msg", std::string("")).c_str());
+        co_return boost::json::value{{"result", r == helios::MessageBoxResult::Yes ? "Yes" : "No"}};
     });
-    win->bindJson<json>("dlg_folder", [&state](json) -> Task<helios::JsonResp<std::string>> {
+    win->bindJson<json>("dlg_folder", [&state](json) -> Task<boost::json::value> {
         std::string path;
         if (!helios::selectFolder(state.win->nativeHandle(), "Pick a folder", path))
             throw std::runtime_error("cancelled");
         state.lastPicked = path;
-        co_return helios::JsonResp<std::string>{"path", path};
+        co_return boost::json::value{{"path", path}};
     });
     win->bindJson<json>("dlg_openFiles", [&state](json) -> Task<json> {
         const auto files = helios::openFiles(state.win->nativeHandle(), "Pick files",
@@ -376,40 +389,40 @@ int main()
         state.lastPicked = files.front();
         co_return json{{"count", files.size()}, {"paths", files}}; /* the full list */
     });
-    win->bindJson<json>("dlg_saveFile", [&state](json) -> Task<helios::JsonResp<std::string>> {
+    win->bindJson<json>("dlg_saveFile", [&state](json) -> Task<boost::json::value> {
         std::string path;
         if (!helios::saveFile(state.win->nativeHandle(), "Save file", "Text files (*.txt)|*.txt",
                               "untitled.txt", path))
             throw std::runtime_error("cancelled");
         state.lastPicked = path;
-        co_return helios::JsonResp<std::string>{"path", path};
+        co_return boost::json::value{{"path", path}};
     });
     win->bindJson<json>("dlg_openUrl", [](json j) -> Task<bool> {
-        const bool ok = helios::openUrl(j.value("url", std::string("https://example.com")));
+        const bool ok = helios::openUrl(jget(j, "url", std::string("https://example.com")));
         co_return ok;
     });
     win->bindJson<json>("dlg_clipboardSet", [](json j) -> Task<bool> {
         const bool ok = helios::clipboardSetText(
-            j.value("text", std::string("Text from the HeliosView master demo")));
+            jget(j, "text", std::string("Text from the HeliosView master demo")));
         co_return ok;
     });
-    win->bindJson<json>("dlg_clipboardGet", [](json) -> Task<helios::JsonResp<std::string>> {
+    win->bindJson<json>("dlg_clipboardGet", [](json) -> Task<boost::json::value> {
         std::string text;
         if (!helios::clipboardGetText(text))
             throw std::runtime_error("clipboard has no text");
-        co_return helios::JsonResp<std::string>{"text", text};
+        co_return boost::json::value{{"text", text}};
     });
     win->bindJson<json>("dlg_cursor", [](json) -> Task<json> {
         int32_t x = 0, y = 0;
         helios::cursorPosition(x, y);
         co_return json{{"x", x}, {"y", y}};
     });
-    win->bindJson<json>("dlg_showInFolder", [&state](json) -> Task<helios::JsonResp<std::string>> {
+    win->bindJson<json>("dlg_showInFolder", [&state](json) -> Task<boost::json::value> {
         if (state.lastPicked.empty())
             throw std::runtime_error("pick a folder or file first");
         if (!helios::showInFolder(state.lastPicked))
             throw std::runtime_error("showInFolder failed");
-        co_return helios::JsonResp<std::string>{"path", state.lastPicked};
+        co_return boost::json::value{{"path", state.lastPicked}};
     });
     win->bindJson<json>("dlg_workareas", [](json) -> Task<json> {
         helios::Rect primary{}, atCursor{};
@@ -423,22 +436,22 @@ int main()
 
     /* ================= WebView Bridge ================= */
 
-    win->bindJson<json>("wv_navigate", [&state](json j) -> Task<helios::JsonResp<std::string>> {
-        const std::string url = j.value("url", std::string("https://example.com"));
+    win->bindJson<json>("wv_navigate", [&state](json j) -> Task<boost::json::value> {
+        const std::string url = jget(j, "url", std::string("https://example.com"));
         state.win->navigate(url.c_str());
-        co_return helios::JsonResp<std::string>{"url", url};
+        co_return boost::json::value{{"url", url}};
     });
     win->bindJson<json>("wv_home", [&state](json) -> Task<bool> {
         state.win->navigateHtml(state.page.c_str());
         co_return true;
     });
-    win->bindJson<json>("wv_eval", [&state](json j) -> Task<helios::JsonResp<std::string>> {
-        const std::string script = j.value("script", std::string("1 + 1"));
+    win->bindJson<json>("wv_eval", [&state](json j) -> Task<boost::json::value> {
+        const std::string script = jget(j, "script", std::string("1 + 1"));
         state.win->evalAsync(script.c_str(), [](int error, const char* result, void* userdata) {
             auto& s = *static_cast<DemoState*>(userdata);
             emit(s, "eval-result", {{"error", error}, {"result", result ? result : ""}});
         }, &state);
-        co_return helios::JsonResp<std::string>{"note", "evalAsync dispatched; the result comes back on the events channel"};
+        co_return boost::json::value{{"note", "evalAsync dispatched; the result comes back on the events channel"}};
     });
     win->bindJson<json>("wv_insets", [&state](json) -> Task<bool> {
         state.insets = !state.insets;
@@ -451,14 +464,14 @@ int main()
         co_return json{{"rc", rc}, {"host", "https://assets.local"}, {"folder", cwd}};
     });
     win->bindJson<json>("wv_broadcast", [&state](json j) -> Task<bool> {
-        emit(state, "native-broadcast", {{"msg", j.value("msg", std::string("hello from native"))}});
+        emit(state, "native-broadcast", {{"msg", jget(j, "msg", std::string("hello from native"))}});
         co_return true;
     });
     win->bindJson<json>("wv_add", [](json j) -> Task<int> {
-        co_return j.value("a", 0) + j.value("b", 0);
+        co_return jget(j, "a", 0) + jget(j, "b", 0);
     });
-    win->bindJson<json>("wv_fail", [](json) -> Task<helios::JsonError<std::string>> {
-        co_return helios::JsonError<std::string>{"error", "this is a deliberate reject demo"};
+    win->bindJson<json>("wv_fail", [](json) -> Task<helios::JsonError> {
+        co_return helios::JsonError{"error", "this is a deliberate reject demo"};
     });
 
     /* ================= Tray / Menu / Notifications ================= */
@@ -544,10 +557,10 @@ int main()
         state.extra.push_back(std::move(w));
         co_return json{{"n", n}, {"count", state.extra.size()}};
     });
-    win->bindJson<json>("win_closeAll", [&state](json) -> Task<helios::JsonResp<int>> {
+    win->bindJson<json>("win_closeAll", [&state](json) -> Task<boost::json::value> {
         const int n = static_cast<int>(state.extra.size());
         state.extra.clear(); /* dtors close the matching native windows */
-        co_return helios::JsonResp<int>{"closed", n};
+        co_return boost::json::value{{"closed", n}};
     });
     win->bindJson<json>("app_quit", [](json) -> Task<bool> {
         if (auto* a = helios::App::instance())

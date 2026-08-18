@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * HeliosView.Core -- WebViewJson: nlohmann auto-binding for the WebView JS <-> native bridge.
+ * HeliosView.Core -- WebViewJson: Boost.JSON auto-binding for the WebView JS <-> native bridge.
  *
  * On top of the raw C bridge (heliosview_webview_bind / resolve / reject, JSON strings)
  * this header adds type-safe, JSON-serialized bindings:
  *
- *   struct AddReq { int a; int b; };          // + NLOHMANN_DEFINE_TYPE_INTRUSIVE / NON_INTRUSIVE
+ *   struct AddReq { int a; int b; };          // + BOOST_DESCRIBE_STRUCT(AddReq, (), (a, b))
  *   helios::Async async;                      // background thread pool (asio-backed), app-scoped
  *   window->bindJson<AddReq>("add", [&async](AddReq req) -> std::execution::task<std::string> {
  *       co_await std::execution::schedule(async.get_scheduler());  // run off the UI thread
@@ -14,10 +14,11 @@
  *   });
  *
  * How a JS call round-trips:
- *   - The JS call's first argument is parsed into a Req (nlohmann::json::parse +
- *     get<Req>()); if that fails, the Promise is rejected with {"error": ...}.
+ *   - The JS call's first argument is parsed into a Req (boost::json::parse +
+ *     boost::json::value_to<Req>()); if that fails, the Promise is rejected with
+ *     {"error": ...}.
  *   - The handler runs as a detached std::execution::task. Its completion value is
- *     serialized with nlohmann::json and delivered with resolve (thread-safe in the C
+ *     serialized with boost::json and delivered with resolve (thread-safe in the C
  *     layer, so the task may complete on any thread). A thrown exception / set_error /
  *     std::exception_ptr error is converted to a reject payload {"error": what()}.
  *   - The coroutine's error channel includes std::exception_ptr by default (the
@@ -30,17 +31,21 @@
  * BroadcastChannel keeps native broadcasts (broadcast()) and the standard
  * same-origin channel working together.
  *
- * Response shapes (the task's value type):
- *   - Resp                    -> resolve with the JSON encoding of Resp
- *   - nlohmann::json          -> resolve with that JSON directly
- *   - JsonResp<T>             -> resolve with the top-level object {"<key>": value}
- *   - JsonError<T>            -> reject with the top-level object {"<key>": value}
+ * Response shapes (the task's value type) — the natural way is to return
+ * boost::json::value, built with Boost.JSON's own constructors / value_from:
+ *   - boost::json::value      -> resolve with that JSON directly
+ *   - Resp (any type boost::json::value_from can convert: DTOs, containers,
+ *     strings, numbers, ...) -> resolve with the JSON encoding of Resp
+ *   - JsonError               -> reject with the top-level object {"<key>": value}
+ *                                (the only value-channel way to reject; throwing
+ *                                from the handler rejects with {"error": what()})
  *   - void                    -> resolve with null
  *
- * Requirements: nlohmann::json (single header or FetchContent nlohmann_json),
- * HeliosViewCore/Execution.h (stdexec under C++23, std::execution under C++26)
- * and — for off-UI-thread work — HeliosViewCore/Async.h (the asio-backed
- * background pool behind `async.get_scheduler()` above).
+ * Requirements: Boost.JSON (vendored with the rest of Boost; the types any
+ * boost::json::value_to / value_from can convert, including BOOST_DESCRIBE_STRUCT-
+ * annotated DTOs), HeliosViewCore/Execution.h (stdexec under C++23, std::execution
+ * under C++26) and — for off-UI-thread work — HeliosViewCore/Async.h (the
+ * asio-backed background pool behind `async.get_scheduler()` above).
  * Lifetime: destroy the WebView only when no bindJson task is still in flight,
  * and keep any Async the handlers use alive for at least as long as the bindings.
  */
@@ -58,30 +63,23 @@
 #include <type_traits>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include <boost/json.hpp>
 
 namespace helios {
 
-/* ---------- convenience response wrappers ---------- */
-
-// Resolve the Promise with the top-level JSON object {"<key>": value}
-// (the value itself may be any JSON type, including a DTO)
-template <class T>
-struct JsonResp {
-    std::string key;
-    T value;
-
-    JsonResp(std::string k, T v) : key(std::move(k)), value(std::move(v)) {}
-};
+/* ---------- convenience reject wrapper ---------- */
 
 // Reject the Promise with the top-level JSON object {"<key>": value}
-// (value is typically a human-readable message string)
-template <class T>
+// (value is typically a human-readable message string). This is the only
+// value-channel way to reject with a custom payload: handlers normally just
+// return a boost::json::value (resolves) or throw (rejects with {"error": ...}).
 struct JsonError {
     std::string key;
-    T value;
+    boost::json::value value;
 
-    JsonError(std::string k, T v) : key(std::move(k)), value(std::move(v)) {}
+    template <class V>
+    JsonError(std::string k, V&& v)
+        : key(std::move(k)), value(boost::json::value_from(std::forward<V>(v))) {}
 };
 
 namespace detail {
@@ -140,26 +138,26 @@ void pmrRelease(pmr_box<T>* box) noexcept
 
 /* ---------- response serialization ---------- */
 
-// nlohmann::json values dump directly
-inline std::string jsonDump(const nlohmann::json& j)
+// boost::json::value values serialize directly
+inline std::string jsonDump(const boost::json::value& j)
 {
-    return j.dump();
+    return boost::json::serialize(j);
 }
 
-// Serialize any value through nlohmann::json. A std::string / const char* result that
-// is itself JSON text (e.g. built by an nlohmann::json::dump()) is parsed once and
+// Serialize any value through boost::json. A std::string / const char* result that
+// is itself JSON text (e.g. built by a boost::json::serialize()) is parsed once and
 // re-dumped so it stays a single JSON value instead of being double-encoded.
 template <class T>
 std::string jsonDumpValue(const T& value)
 {
-    nlohmann::json j = value;
+    boost::json::value j = boost::json::value_from(value);
     if constexpr (std::is_same_v<std::decay_t<T>, std::string>
                   || std::is_same_v<std::decay_t<T>, const char*>) {
         try {
-            j = nlohmann::json::parse(value);
+            j = boost::json::parse(value);
         } catch (...) { /* not JSON text: keep the plain string value */ }
     }
-    return j.dump();
+    return boost::json::serialize(j);
 }
 
 // Generic response serialization
@@ -169,28 +167,25 @@ std::string jsonDump(const Resp& resp)
     return jsonDumpValue(resp);
 }
 
-// JsonResp<T>: {"<key>": value}
-template <class T>
-std::string jsonDump(const JsonResp<T>& resp)
-{
-    return (nlohmann::json{{resp.key, resp.value}}).dump();
-}
-
 /* ---------- error payload ---------- */
 
-inline nlohmann::json errorToJson(std::exception_ptr eptr)
+inline boost::json::value errorToJson(std::exception_ptr eptr)
 {
-    if (!eptr)
-        return {{"error", "unknown error"}};
+    boost::json::object obj;
+    if (!eptr) {
+        obj["error"] = "unknown error";
+        return obj;
+    }
     try {
         std::rethrow_exception(eptr);
-    } catch (const nlohmann::json::exception& e) {
-        return {{"error", e.what()}};
+    } catch (const boost::system::system_error& e) {
+        obj["error"] = e.what();
     } catch (const std::exception& e) {
-        return {{"error", e.what()}};
+        obj["error"] = e.what();
     } catch (...) {
-        return {{"error", "unknown error"}};
+        obj["error"] = "unknown error";
     }
+    return obj;
 }
 
 /* ---------- completion delivery ---------- */
@@ -203,10 +198,11 @@ void replyJson(heliosview_webview_t* wv, uint64_t call_id, Resp&& resp)
     heliosview_webview_resolve(wv, call_id, jsonDump(resp).c_str());
 }
 
-template <class T>
-void replyJson(heliosview_webview_t* wv, uint64_t call_id, JsonError<T>&& err)
+inline void replyJson(heliosview_webview_t* wv, uint64_t call_id, JsonError&& err)
 {
-    heliosview_webview_reject(wv, call_id, (nlohmann::json{{err.key, err.value}}).dump().c_str());
+    boost::json::object obj;
+    obj[err.key] = err.value;
+    heliosview_webview_reject(wv, call_id, boost::json::serialize(obj).c_str());
 }
 
 /* ---------- the in-flight call state and its receiver ---------- */
@@ -247,7 +243,7 @@ struct JsonCallReceiver {
     {
         try {
             heliosview_webview_reject(state->wv, state->call_id,
-                                      errorToJson(std::move(eptr)).dump().c_str());
+                                      boost::json::serialize(errorToJson(std::move(eptr))).c_str());
         } catch (...) { /* never throw out of a receiver */ }
         delete state;
     }
@@ -295,19 +291,21 @@ struct JsonHandler {
         (void)name;
         auto* fn = &static_cast<pmr_box<Fn>*>(userdata)->value;
         try {
-            nlohmann::json args = (args_json && *args_json)
-                                      ? nlohmann::json::parse(args_json)
-                                      : nlohmann::json::array();
+            boost::json::value args = (args_json && *args_json)
+                                          ? boost::json::parse(args_json)
+                                          : boost::json::value(boost::json::array_kind);
 
             auto make = [&]<std::size_t... I>(std::index_sequence<I...>) {
-                return fn->operator()(args[I].template get<Args>()...);
+                return fn->operator()(boost::json::value_to<Args>(args.at(I))...);
             };
             auto coro = make(std::index_sequence_for<Args...>{});
 
             auto* state = new JsonCallState<Sender>(std::move(coro), wv, call_id);
             std::execution::start(state->op); // state may be deleted inline on sync completion
         } catch (const std::exception& e) {
-            heliosview_webview_reject(wv, call_id, (nlohmann::json{{"error", e.what()}}).dump().c_str());
+            boost::json::object obj;
+            obj["error"] = e.what();
+            heliosview_webview_reject(wv, call_id, boost::json::serialize(obj).c_str());
         } catch (...) {
             heliosview_webview_reject(wv, call_id, R"({"error":"unknown error"})");
         }
@@ -322,8 +320,10 @@ struct JsonHandler {
 // WebViewWindow::bindJson implementation (declared in WebViewWindow.h).
 //
 // Args...: the parameter types deserialized from the JS call's arguments array
-//      (args[0] -> Args[0], args[1] -> Args[1], ...), each any type nlohmann::json
-//      can construct. Handler signature: (Args...) -> std::execution::task<Resp>.
+//      (args[0] -> Args[0], args[1] -> Args[1], ...), each any type
+//      boost::json::value_to can convert (fundamentals, strings, containers,
+//      BOOST_DESCRIBE_STRUCT-annotated DTOs, boost::json::value itself, ...).
+//      Handler signature: (Args...) -> std::execution::task<Resp>.
 //      The handler may capture anything it needs (e.g. the window or an Async).
 // ---------------------------------------------------------------------------
 template <class... Args, class Fn>
@@ -367,7 +367,7 @@ void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
 // WebViewWindow::subscribeJson implementation (declared in WebViewWindow.h).
 //
 // Req: the DTO to deserialize the page's BroadcastChannel(name) postMessage value
-//      into (any type nlohmann::json can construct). Callback signature:
+//      into (any type boost::json::value_to can convert). Callback signature:
 //      (Req) -> void, invoked on the UI thread for every JS postMessage on that
 //      channel. A value that fails to parse into Req is dropped (there is no
 //      promise to reject on a broadcast).
@@ -384,10 +384,10 @@ struct SubscribeHandler {
         (void)name;
         auto* fn = &static_cast<pmr_box<Fn>*>(userdata)->value;
         try {
-            nlohmann::json data = (data_json && *data_json)
-                                      ? nlohmann::json::parse(data_json)
-                                      : nlohmann::json();
-            Req req = data.get<Req>();
+            boost::json::value data = (data_json && *data_json)
+                                          ? boost::json::parse(data_json)
+                                          : boost::json::value{};
+            Req req = boost::json::value_to<Req>(data);
             (*fn)(std::move(req));
         } catch (...) { /* unparseable broadcast: dropped (void callback has no error channel) */ }
     }

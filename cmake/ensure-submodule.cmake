@@ -9,7 +9,7 @@ if(EXISTS "${HELIOSVIEW_PROJECT_ROOT}/.gitmodules")
     if(Git_FOUND)
         # 1. 初始化直接子模块 + Boost 超级项目
         set(_cmd_list ${GIT_EXECUTABLE} submodule update --init --depth 1
-                third_party/stdexec third_party/json third_party/boost)
+                third_party/stdexec third_party/boost)
         list(JOIN _cmd_list " " _cmd_str)
         message(STATUS "HeliosView: Running: ${_cmd_str}")
         execute_process(
@@ -26,7 +26,7 @@ if(EXISTS "${HELIOSVIEW_PROJECT_ROOT}/.gitmodules")
         # 2. 初始化所需的 Boost 库子模块（无条件执行，幂等）
         set(HELIOSVIEW_BOOST_ROOT "${HELIOSVIEW_PROJECT_ROOT}/third_party/boost")
         set(HELIOSVIEW_BOOST_LIBS
-                asio beast system config core assert throw_exception static_assert
+                asio beast json container endian variant2 compat system config core assert throw_exception static_assert
                 type_traits utility detail winapi move
                 align mp11 predef optional
                 smart_ptr bind intrusive logic static_string container_hash describe io
@@ -55,9 +55,6 @@ if(EXISTS "${HELIOSVIEW_PROJECT_ROOT}/.gitmodules")
         set(still_missing "")
         if(NOT EXISTS "${HELIOSVIEW_PROJECT_ROOT}/third_party/stdexec/include/exec/asio/asio_config.hpp.in")
             list(APPEND still_missing stdexec)
-        endif()
-        if(NOT EXISTS "${HELIOSVIEW_PROJECT_ROOT}/third_party/json/single_include/nlohmann/json.hpp")
-            list(APPEND still_missing json)
         endif()
         if(still_missing)
             message(FATAL_ERROR "Direct submodules still missing: ${still_missing}.")

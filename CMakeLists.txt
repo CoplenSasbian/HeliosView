@@ -33,11 +33,11 @@ include(cmake/ensure-submodule.cmake)
 #   - Boost:       Boost superproject submodule (third_party/boost), pinned to
 #                  boost-1.92.0. Only the libraries HeliosView needs are
 #                  initialized (HELIOSVIEW_BOOST_LIBS) — Boost.Asio for the
-#                  background scheduler (Async.h) and Boost.Beast for HTTP.
+#                  background scheduler (Async.h), Boost.Beast for HTTP, and
+#                  Boost.JSON for the WebView bridge auto-binding (WebViewJson.h).
 #                  Do NOT run `git submodule update --init --recursive` on
 #                  HeliosView: it would fetch all ~160 Boost libraries; the
 #                  selective init runs automatically at configure time.
-#   - nlohmann/json (single header, exposed below as nlohmann_json::nlohmann_json).
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
 # zip of headers + the WebView2Loader loader library/dll), so consumers do not
@@ -45,13 +45,6 @@ include(cmake/ensure-submodule.cmake)
 #
 # Everything else comes from the OS: windowing, dialogs, taskbar, toasts
 # (WinRT via the Windows SDK), DWM backdrop and TLS-free by design. No vcpkg.
-
-# nlohmann/json is header-only; expose it directly instead of running its build.
-add_library(nlohmann_json INTERFACE)
-add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
-target_include_directories(nlohmann_json INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include>
-    $<INSTALL_INTERFACE:include>)
 
 # stdexec: P2300 senders/receivers reference implementation (header-only),
 # pinned to origin/main 758f41f4 (2026-08-15) — vendored, not downloaded.
@@ -82,7 +75,16 @@ endif()
 # since Boost 1.69); nothing to compile or link except ws2_32 on Windows for
 # sockets. Backs the library's background scheduler (HeliosViewCore/Async.h
 # via stdexec's exec::asio adapters) and Boost.Beast for HTTP.
+#
+# Boost.JSON is NOT header-only (parse/serialize/value live in a compiled
+# part). Its compiled part is built as a normal static library (the
+# `boost_json` target from libs/json's own CMakeLists, see below), which
+# HeliosView.Core links and the SDK installs. BOOST_ALL_NO_LIB suppresses the
+# auto-link pragmas (#pragma comment(lib)) that several vendored boost libs
+# emit (boost_json, boost_container, ...) — with our own boost_json library
+# on the link line, the linker must not also hunt for libboost_*-*.lib.
 add_library(boost INTERFACE)
+target_compile_definitions(boost INTERFACE BOOST_ALL_NO_LIB)
 foreach(lib ${HELIOSVIEW_BOOST_LIBS})
     target_include_directories(boost INTERFACE
         $<BUILD_INTERFACE:${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include>
@@ -94,6 +96,23 @@ if(WIN32)
     target_link_libraries(boost INTERFACE ws2_32 mswsock)
     target_compile_definitions(boost INTERFACE _WIN32_WINNT=0x0A00)
 endif()
+
+# Boost.JSON compiled library: built with Boost's own CMake (libs/json),
+# which compiles boost/json/src.cpp (= src.hpp: parse/serialize/value/...).
+# Its CMakeLists links Boost::<dep> targets for its dependencies; provide
+# those as INTERFACE aliases over the `boost` target above (the superproject's
+# BoostRoot.cmake would normally do this, but its tools/cmake submodule is not
+# part of the selective init). After the subdirectory is processed, the
+# dependency graph is flattened onto `boost` so the installed export only
+# references exported targets.
+foreach(_bjdep IN ITEMS assert config container container_hash core describe endian mp11 system throw_exception)
+    if(NOT TARGET Boost::${_bjdep})
+        add_library(Boost::${_bjdep} INTERFACE IMPORTED)
+        set_target_properties(Boost::${_bjdep} PROPERTIES INTERFACE_LINK_LIBRARIES boost)
+    endif()
+endforeach()
+add_subdirectory(${HELIOSVIEW_BOOST_ROOT}/libs/json)
+set_target_properties(boost_json PROPERTIES INTERFACE_LINK_LIBRARIES "boost")
 
 # OpenSSL: prebuilt x64 from the openssl.vcpkg nuget package, downloaded at
 # configure time (like the WebView2 SDK) and cached in the build dir. Needed
@@ -237,10 +256,10 @@ target_include_directories(HeliosView.Core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-# stdexec + boost + openssl + nlohmann propagate via INTERFACE: targets linking
+# stdexec + boost + boost_json + openssl propagate via INTERFACE: targets linking
 # HeliosView::Core (e.g. the examples) automatically get their include paths
 # and the C++23 requirement
-target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec boost openssl nlohmann_json::nlohmann_json)
+target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec boost boost_json openssl)
 # exported to consumers: any target linking HeliosView::Core is compiled as C++23
 target_compile_features(HeliosView.Core INTERFACE cxx_std_23)
 
@@ -263,15 +282,23 @@ install(TARGETS HeliosView
 
 # HeliosView.Core (INTERFACE) and its vendored header-only deps are exported too,
 # so C++ consumers get a working HeliosView::Core from the installed config.
-# stdexec/nlohmann keep build-tree include paths (the source is vendored under
+# stdexec keeps build-tree include paths (the source is vendored under
 # third_party/); this is a self-hosting install.
-install(TARGETS HeliosView.Core stdexec boost openssl nlohmann_json EXPORT HeliosViewTargets)
+install(TARGETS HeliosView.Core stdexec boost openssl EXPORT HeliosViewTargets)
+
+# boost_json: the compiled Boost.JSON library (static), built from Boost's own
+# CMake — exported alongside HeliosView::Core so consumers link it through the
+# package config, and installed into lib/ next to HeliosView.lib.
+install(TARGETS boost_json EXPORT HeliosViewTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosView
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/HeliosViewCore
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# Vendored header-only deps of HeliosView.Core (stdexec, boost, nlohmann/json):
+# Vendored header-only deps of HeliosView.Core (stdexec, boost):
 # install them into the same include tree so exported HeliosView::Core resolves.
 # Only the initialized Boost libs (HELIOSVIEW_BOOST_LIBS) are installed.
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stdexec/include/
@@ -281,8 +308,6 @@ foreach(lib ${HELIOSVIEW_BOOST_LIBS})
     install(DIRECTORY ${HELIOSVIEW_BOOST_ROOT}/libs/${lib}/include/
             DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endforeach()
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include/
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 # Generated stdexec asio config: installed consumers resolve
 # <exec/asio/asio_config.hpp> to this Boost-asio configuration.
 install(FILES ${STDEXEC_ASIO_CONFIG_HPP}

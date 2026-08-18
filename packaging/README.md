@@ -15,8 +15,8 @@ import library, headers, CMake package config, and the example sources.
 | path | contents |
 | --- | --- |
 | `bin/` | `HeliosView.dll` (the C API runtime), `WebView2Loader.dll`, and the prebuilt demo executables |
-| `lib/` | `HeliosView.lib` (import library) + `cmake/HeliosView/` (CMake package config for `find_package(HeliosView)`) |
-| `include/` | `HeliosView/heliosview.h` (C API), `HeliosViewCore/` (header-only C++ wrapper), and the vendored `stdexec` + `nlohmann/json` headers the wrapper needs |
+| `lib/` | `HeliosView.lib` (import library) + `libboost_json.lib` (compiled Boost.JSON static lib, linked via `HeliosView::Core`) + `cmake/HeliosView/` (CMake package config for `find_package(HeliosView)`) |
+| `include/` | `HeliosView/heliosview.h` (C API), `HeliosViewCore/` (header-only C++ wrapper), and the vendored `stdexec` + `Boost` headers the wrapper needs |
 | `examples/` | the demo **sources** — build them standalone against this SDK (see below) |
 | `README.md` | this file |
 
@@ -143,8 +143,8 @@ CMake 包配置和示例源码。
 | 路径 | 内容 |
 | --- | --- |
 | `bin/` | `HeliosView.dll`（C API 运行时）、`WebView2Loader.dll` 和预编译的示例 exe |
-| `lib/` | `HeliosView.lib`（导入库）+ `cmake/HeliosView/`（`find_package(HeliosView)` 用的 CMake 包配置） |
-| `include/` | `HeliosView/heliosview.h`（C API）、`HeliosViewCore/`（纯头文件的 C++ 封装）、以及它依赖的 `stdexec` + `nlohmann/json` 头文件 |
+| `lib/` | `HeliosView.lib`（导入库）+ `libboost_json.lib`（编译好的 Boost.JSON 静态库，经 `HeliosView::Core` 链接）+ `cmake/HeliosView/`（`find_package(HeliosView)` 用的 CMake 包配置） |
+| `include/` | `HeliosView/heliosview.h`（C API）、`HeliosViewCore/`（纯头文件的 C++ 封装）、以及它依赖的 `stdexec` + `Boost` 头文件 |
 | `examples/` | 示例**源码**——可独立针对本 SDK 构建（见下） |
 | `README.md` | 本文件 |
 

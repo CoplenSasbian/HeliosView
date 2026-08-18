@@ -8,6 +8,8 @@
 //     through a bindJson handler
 #include <HeliosViewCore/HeliosView.h>
 
+#include <boost/describe.hpp>
+
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -16,7 +18,7 @@
 #include <string>
 
 struct BrowseReq { std::string title; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(BrowseReq, title)
+BOOST_DESCRIBE_STRUCT(BrowseReq, (), (title))
 
 int main()
 {
@@ -79,13 +81,13 @@ int main()
 
     /* ---- native folder dialog exposed to the page through the bridge ---- */
     window->bindJson<BrowseReq>("browseFolder",
-                                [win = window.get()](BrowseReq req) -> std::execution::task<helios::JsonResp<std::string>> {
+                                [win = window.get()](BrowseReq req) -> std::execution::task<boost::json::value> {
                                     std::string path;
                                     const bool ok = helios::selectFolder(win->nativeHandle(),
                                                                           req.title.c_str(), path);
                                     std::println("[native] browseFolder(\"{}\") -> {} '{}'",
                                                  req.title, ok ? "OK" : "cancel", path);
-                                    co_return helios::JsonResp<std::string>{ok ? "path" : "cancelled", ok ? path : ""};
+                                    co_return boost::json::value{{ok ? "path" : "cancelled", ok ? path : ""}};
                                 });
 
     /* ---- a page that uses all of the above ---- */

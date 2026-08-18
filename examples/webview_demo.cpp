@@ -1,7 +1,7 @@
 // HeliosView.Core example: WebView window (WebView2 under the hood on win32).
-// Demonstrates the JS <-> native bridge with nlohmann auto-binding:
+// Demonstrates the JS <-> native bridge with Boost.JSON auto-binding:
 //   - bindJson<Req>(): native functions callable from JS via window.helios.call(...) -> Promise
-//     the JS call's first argument is deserialized into a Req DTO (nlohmann), and the
+//     the JS call's first argument is deserialized into a Req DTO (Boost.JSON), and the
 //     handler's task<Resp> result is serialized back automatically (resolve / reject)
 //   - each native function prints its arguments and return value with std::println (C++23)
 //   - a log panel on the page shows the same round-trip
@@ -19,20 +19,32 @@
 #include <string>
 #include <thread>
 
-#include <nlohmann/json.hpp>
+#include <boost/describe.hpp>
+#include <boost/json.hpp>
 
-// Request DTOs: the JS call's first argument is deserialized into these (nlohmann)
+// Request DTOs: the JS call's first argument is deserialized into these (Boost.JSON via Boost.Describe)
 struct AddReq { int a; int b; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AddReq, a, b)
+BOOST_DESCRIBE_STRUCT(AddReq, (), (a, b))
 
 struct GreetReq { std::string name; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GreetReq, name)
+BOOST_DESCRIBE_STRUCT(GreetReq, (), (name))
 
 struct MsgReq { std::string from; int n; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MsgReq, from, n)
+BOOST_DESCRIBE_STRUCT(MsgReq, (), (from, n))
 
 struct RepeatReq { std::string s; int times; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RepeatReq, s, times)
+BOOST_DESCRIBE_STRUCT(RepeatReq, (), (s, times))
+
+// boost::json::value has no j.value("key", default) accessor (nlohmann::json did);
+// jget provides the equivalent: value_to<T>(j["key"]) or `fallback` when missing.
+template <class T>
+T jget(const boost::json::value& j, std::string_view key, T fallback)
+{
+    if (const auto* obj = j.if_object())
+        if (const auto* it = obj->if_contains(key))
+            return boost::json::value_to<T>(*it);
+    return fallback;
+}
 
 // A class whose member functions are bound to the JS bridge (member-function overload).
 struct Service {
@@ -79,7 +91,7 @@ int main()
     window->show();
     window->createWebView();
 
-    /* ---- auto-bound native functions (nlohmann deserializes arguments, serializes return values) ---- */
+    /* ---- auto-bound native functions (Boost.JSON deserializes arguments, serializes return values) ---- */
 
     // add({a, b}) -> a + b
     window->bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<int> {
@@ -89,61 +101,65 @@ int main()
     });
 
     // echo(obj) -> returns the whole argument object back (round-trips any JSON)
-    window->bindJson<nlohmann::json>("echo", [](nlohmann::json req) -> std::execution::task<nlohmann::json> {
-        std::println("[native] echo({}) -> {}", req.dump(), req.dump());
+    window->bindJson<boost::json::value>("echo", [](boost::json::value req) -> std::execution::task<boost::json::value> {
+        std::println("[native] echo({}) -> {}", boost::json::serialize(req), boost::json::serialize(req));
         co_return req;
     });
 
     // greet({name}) -> {"msg":"hello, name"}
-    window->bindJson<GreetReq>("greet", [](GreetReq req) -> std::execution::task<helios::JsonResp<std::string>> {
+    window->bindJson<GreetReq>("greet", [](GreetReq req) -> std::execution::task<boost::json::value> {
         const std::string msg = std::format("hello, {}", req.name);
         std::println("[native] greet(\"{}\") -> {{\"msg\":\"{}\"}}", req.name, msg);
-        co_return helios::JsonResp<std::string>{"msg", msg};
+        co_return boost::json::value{{"msg", msg}};
     });
 
     // fail() -> the Promise rejects with {"error":"nope"}
-    window->bindJson<nlohmann::json>("fail", [](nlohmann::json) -> std::execution::task<helios::JsonError<std::string>> {
+    window->bindJson<boost::json::value>("fail", [](boost::json::value) -> std::execution::task<helios::JsonError> {
         std::println("[native] fail() -> reject");
-        co_return helios::JsonError<std::string>{"error", "nope"};
+        co_return helios::JsonError{"error", "nope"};
     });
 
     // spin({a,b}) -> hops off the UI thread onto the asio worker pool, does some
     // busy work there, and resolves from the pool thread (resolve/reject is
     // thread-safe in the C bridge, so no marshalling back is needed).
-    window->bindJson<AddReq>("spin", [&async](AddReq req) -> std::execution::task<helios::JsonResp<std::string>> {
+    window->bindJson<AddReq>("spin", [&async](AddReq req) -> std::execution::task<boost::json::value> {
         co_await std::execution::schedule(async.get_scheduler()); // UI thread -> pool worker
         std::this_thread::sleep_for(std::chrono::milliseconds(200)); // simulated work
         const std::string msg = std::format("{} + {} = {} on worker thread {}",
                                             req.a, req.b, req.a + req.b, std::this_thread::get_id());
         std::println("[native] spin: computed on pool thread {}", std::this_thread::get_id());
-        co_return helios::JsonResp<std::string>{"msg", msg};
+        co_return boost::json::value{{"msg", msg}};
     });
 
     // fetch({url}) -> HTTP GET through helios::http::Client on the Async pool:
     // the response (status/headers/body) is serialized back to JS. Network or
     // timeout errors reject the Promise with {"error": ...}.
-    window->bindJson<nlohmann::json>("fetch", [&client](nlohmann::json j) -> std::execution::task<helios::JsonResp<nlohmann::json>> {
-        const std::string url = j.value("url", "http://example.com/");
+    window->bindJson<boost::json::value>("fetch", [&client](boost::json::value j) -> std::execution::task<boost::json::value> {
+        const std::string url = jget(j, "url", std::string("http://example.com/"));
         std::println("[native] fetch: GET {}", url);
         auto resp = co_await client.get(url);
-        nlohmann::json headers = nlohmann::json::array();
-        for (const auto& [k, v] : resp.headers)
-            headers.push_back({{k, v}});
-        nlohmann::json out = {{"status", resp.status},
-                              {"reason", resp.reason},
-                              {"headers", headers},
-                              {"body", resp.body}};
+        boost::json::object out;
+        boost::json::array headers;
+        for (const auto& [k, v] : resp.headers) {
+            boost::json::object h;
+            h[k] = v;
+            headers.push_back(std::move(h));
+        }
+        out["status"] = resp.status;
+        out["reason"] = resp.reason;
+        out["headers"] = std::move(headers);
+        out["body"] = resp.body;
         std::println("[native] fetch: -> {} {} ({} body bytes)", resp.status, resp.reason,
                      resp.body.size());
-        co_return helios::JsonResp<nlohmann::json>{"resp", std::move(out)};
+        co_return boost::json::value{{"resp", std::move(out)}};
     });
 
     // emit() -> resolves {"ok":true}, then pushes a native broadcast to the "status" channel
     // (raw pointer capture is safe: the binding lives exactly as long as the window)
-    window->bindJson<nlohmann::json>("emit", [win = window.get()](nlohmann::json) -> std::execution::task<helios::JsonResp<bool>> {
+    window->bindJson<boost::json::value>("emit", [win = window.get()](boost::json::value) -> std::execution::task<boost::json::value> {
         std::println("[native] emit() -> {{ok:true}}, broadcast 'status'");
         win->broadcast("status", R"({"from":"native","n":1})");
-        co_return helios::JsonResp<bool>{"ok", true};
+        co_return boost::json::value{{"ok", true}};
     });
 
     // Subscribe to the page's BroadcastChannel("status").postMessage (JS -> native).
@@ -173,7 +189,7 @@ int main()
         "<helios-window-title-bar style='padding:0 16px;padding-right:150px;"
         "box-sizing:border-box;background:#24243a;border-bottom:1px solid #3a3a55;"
         "color:#cdd6f4;white-space:nowrap;overflow:hidden'>"
-        "<span style='font-weight:600;font-size:14px'>HeliosView WebView Bridge Demo (nlohmann auto-binding)</span>"
+        "<span style='font-weight:600;font-size:14px'>HeliosView WebView Bridge Demo (Boost.JSON auto-binding)</span>"
         "<helios-window-controls></helios-window-controls>"
         "</helios-window-title-bar>"
         "<div style='padding:12px;flex:0 0 auto'>"

@@ -8,9 +8,11 @@
  *   helios::Async async;                     // app-scoped member
  *   helios::http::Client client{async};      // lightweight handle; must not outlive async
  *
- *   window->bindJson<Req>("api", [&client](Req r) -> std::execution::task<helios::JsonResp<helios::http::Response>> {
+ *   window->bindJson<Req>("api", [&client](Req r) -> std::execution::task<boost::json::value> {
  *       auto resp = co_await client.get(r.url);
- *       co_return helios::JsonResp<helios::http::Response>{"data", std::move(resp)};
+ *       co_return boost::json::value{{"status", resp.status},
+ *                                    {"reason", resp.reason},
+ *                                    {"body", resp.body}};
  *   });
  *
  * Every request is one complete exchange on the pool: DNS resolve -> connect

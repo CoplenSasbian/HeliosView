@@ -12,7 +12,7 @@ notifications, taskbar progress, system integrations. Two layers:
   lives in per-platform backends (currently `src/win32/`: Win32 window/message
   loop, WebView2, IFileDialog, WinRT toasts).
 - **`HeliosView.Core`** — a **header-only C++ wrapper** built on the C API:
-  a WebView bridge with **nlohmann auto-binding** (`bindJson`), signals/slots,
+  a WebView bridge with **Boost.JSON auto-binding** (`bindJson`), signals/slots,
   a `std::execution` scheduler for the message loop, and thin wrappers for
   every C API.
 
@@ -118,10 +118,9 @@ install**:
 
 | dependency | version | source | used for |
 | --- | --- | --- | --- |
-| `nlohmann/json` | 3.12 | vendored (`third_party/json/`) | WebView bridge auto-binding (`bindJson`) |
 | WebView2 SDK | 1.0.4129.50 | downloaded from NuGet at configure time | embedded WebView (win32) |
 | `stdexec` | pinned commit 758f41f4 (origin/main, 2026-08-15, 0.11.0+) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
-| `Boost` (Asio/Beast) | 1.92.0 (superproject submodule, needed libs auto-initialized) | vendored (`third_party/boost/`) | background thread pool (`Async`) + HTTP via Boost.Beast |
+| `Boost` (Asio/Beast/JSON) | 1.92.0 (superproject submodule, needed libs auto-initialized) | vendored (`third_party/boost/`) | background thread pool (`Async`), HTTP via Boost.Beast, WebView bridge auto-binding via Boost.JSON |
 
 Everything else comes from the OS: windowing, dialogs, toasts (WinRT via the
 Windows SDK), DWM backdrop. The WebView2 SDK is the only thing fetched at
@@ -161,8 +160,8 @@ library themselves:
 
 ```
 bin/        HeliosView.dll + WebView2Loader.dll + prebuilt demos (runnable as-is)
-lib/        HeliosView.lib (import library) + CMake package config (find_package)
-include/    C API header (HeliosView/), C++ wrapper (HeliosViewCore/), vendored stdexec + nlohmann
+lib/        HeliosView.lib + libboost_json.lib + CMake package config (find_package)
+include/    C API header (HeliosView/), C++ wrapper (HeliosViewCore/), vendored stdexec + Boost
 examples/   demo sources — build standalone against the SDK
 README.md   usage instructions (also shipped inside the zip)
 ```
@@ -363,16 +362,16 @@ the app can save state; returning non-zero vetoes the shutdown.
 that embeds a WebView2 browser; `createWebView()` attaches it (initialization
 is asynchronous, navigation requests made meanwhile are queued). On top of it,
 **`bindJson<Args...>`** is the star feature: each of the JS call's arguments is
-deserialized into the corresponding `Args` type (nlohmann), the handler runs as
+deserialized into the corresponding `Args` type (Boost.JSON), the handler runs as
 a detached `std::execution::task<Resp>` coroutine, and the result is serialized
 back to resolve the JS `Promise`:
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
-#include <nlohmann/json.hpp>
+#include <boost/describe.hpp>   // BOOST_DESCRIBE_STRUCT (DTO annotations)
 
 struct AddReq { int a; int b; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AddReq, a, b)
+BOOST_DESCRIBE_STRUCT(AddReq, (), (a, b))
 
 int main()
 {
@@ -582,7 +581,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Menu.h                              popup / context menu + signals
   Execution.h                         schedulers/senders (stdexec, P2300)
   WebViewWindow.h                     window embedding a WebView
-  WebViewJson.h                       bindJson / subscribeJson (nlohmann auto-binding)
+  WebViewJson.h                       bindJson / subscribeJson (Boost.JSON auto-binding)
 src/heliosview.cpp                    platform-independent core
 src/heliosview_internal.h             state shared across implementation files
 src/win32/                            win32 backend (windows, WebView2, dialogs, toasts)

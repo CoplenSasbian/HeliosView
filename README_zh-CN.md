@@ -5,7 +5,7 @@
 一个 C++ **WebView** 窗口库：嵌入一个 webview，从 C++ 或 C 驱动它，并围绕它构建桌面壳 —— 窗口、托盘图标、菜单、对话框、通知、任务栏进度、系统集成。分两层：
 
 - **`HeliosView.dll`** — 纯 **C API**（ABI 稳定）。窗口与事件、WebView 桥接、托盘/菜单、原生对话框与系统辅助（剪贴板、打开 URL、toast 通知、任务栏进度、DWM 背景材质）。平台相关代码放在各平台的 backend（当前为 `src/win32/`：Win32 窗口/消息循环、WebView2、IFileDialog、WinRT toast）。
-- **`HeliosView.Core`** — 构建在 C API 之上的**纯头文件 C++ 封装**：带 **nlohmann 自动绑定**（`bindJson`）的 WebView 桥接、信号/槽、`std::execution` 消息循环 scheduler，以及每个 C API 的薄封装。
+- **`HeliosView.Core`** — 构建在 C API 之上的**纯头文件 C++ 封装**：带 **Boost.JSON 自动绑定**（`bindJson`）的 WebView 桥接、信号/槽、`std::execution` 消息循环 scheduler，以及每个 C API 的薄封装。
 
 只需包含一个头文件、链接一个 CMake target：
 
@@ -91,10 +91,9 @@ HeliosView 把**所有分配都路由到一个可配置的分配器**，因此�
 
 | 依赖 | 版本 | 来源 | 用途 |
 | --- | --- | --- | --- |
-| `nlohmann/json` | 3.12 | vendored（`third_party/json/`） | WebView 桥接的自动绑定（`bindJson`） |
 | WebView2 SDK | 1.0.4129.50 | 配置时从 NuGet 下载 | 内嵌 WebView（win32） |
 | `stdexec` | 固定 commit 758f41f4（origin/main，2026-08-15，0.11.0+） | vendored（`third_party/stdexec/`） | C++23 协程（sender/receiver） |
-| `Boost`（Asio/Beast） | 1.92.0（超项目 submodule，所需库配置时自动按需初始化） | vendored（`third_party/boost/`） | 后台线程池（`Async`）+ HTTP（Boost.Beast） |
+| `Boost`（Asio/Beast/JSON） | 1.92.0（超项目 submodule，所需库配置时自动按需初始化） | vendored（`third_party/boost/`） | 后台线程池（`Async`）、HTTP（Boost.Beast）、WebView 桥接自动绑定（Boost.JSON） |
 
 其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。Boost 库在配置时按需初始化（在 `third_party/boost/` 里执行 `git submodule update --init --depth 1`）——不要对整个 HeliosView 执行 `git submodule update --init --recursive`，那会拉取全部约 160 个 Boost 库。
 
@@ -127,8 +126,8 @@ GitHub Release 资产是面向 Windows x64 的完整 **SDK zip**
 
 ```
 bin/        HeliosView.dll + WebView2Loader.dll + 预编译示例（解压即用）
-lib/        HeliosView.lib（导入库）+ CMake 包配置（find_package）
-include/    C API 头文件（HeliosView/）、C++ 封装头文件（HeliosViewCore/）、vendored 的 stdexec + nlohmann
+lib/        HeliosView.lib + libboost_json.lib + CMake 包配置（find_package）
+include/    C API 头文件（HeliosView/）、C++ 封装头文件（HeliosViewCore/）、vendored 的 stdexec + Boost
 examples/   示例源码——可独立针对 SDK 构建
 README.md   使用说明（zip 内已附带）
 ```
@@ -261,14 +260,14 @@ win->createWebView();
 
 ### 4. WebView —— 核心：JS ↔ 原生桥接
 
-**这是库的核心。** `WebViewWindow` 是嵌入了 WebView2 浏览器的 `Window` 子类；`createWebView()` 负责挂载（初始化是异步的，期间的导航请求会被排队）。在它之上，**`bindJson<Args...>`** 是主打特性：JS 调用的每个参数都被反序列化为对应的 `Args` 类型（nlohmann），处理器以分离的 `std::execution::task<Resp>` 协程运行，结果再序列化回去 resolve 对应的 JS `Promise`：
+**这是库的核心。** `WebViewWindow` 是嵌入了 WebView2 浏览器的 `Window` 子类；`createWebView()` 负责挂载（初始化是异步的，期间的导航请求会被排队）。在它之上，**`bindJson<Args...>`** 是主打特性：JS 调用的每个参数都被反序列化为对应的 `Args` 类型（Boost.JSON），处理器以分离的 `std::execution::task<Resp>` 协程运行，结果再序列化回去 resolve 对应的 JS `Promise`：
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
-#include <nlohmann/json.hpp>
+#include <boost/describe.hpp>   // BOOST_DESCRIBE_STRUCT（DTO 注解）
 
 struct AddReq { int a; int b; };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AddReq, a, b)
+BOOST_DESCRIBE_STRUCT(AddReq, (), (a, b))
 
 int main()
 {
@@ -449,7 +448,7 @@ include/HeliosViewCore/               纯头文件 C++ 封装
   Menu.h                              弹出 / 右键菜单 + 信号
   Execution.h                         scheduler/sender（stdexec，P2300）
   WebViewWindow.h                     内嵌 WebView 的窗口
-  WebViewJson.h                       bindJson / subscribeJson（nlohmann 自动绑定）
+  WebViewJson.h                       bindJson / subscribeJson（Boost.JSON 自动绑定）
 src/heliosview.cpp                    平台无关核心
 src/heliosview_internal.h             实现文件间共享的状态
 src/win32/                            win32 后端（窗口、WebView2、对话框、toast）
