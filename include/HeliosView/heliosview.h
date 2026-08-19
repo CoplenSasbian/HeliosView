@@ -949,6 +949,7 @@ typedef enum heliosview_message_buttons {
     HELIOSVIEW_MESSAGE_YES_NO,
     HELIOSVIEW_MESSAGE_YES_NO_CANCEL,
     HELIOSVIEW_MESSAGE_RETRY_CANCEL,
+    HELIOSVIEW_MESSAGE_ABORT_RETRY_IGNORE,
 } heliosview_message_buttons_t;
 
 typedef enum heliosview_message_result {
@@ -958,6 +959,8 @@ typedef enum heliosview_message_result {
     HELIOSVIEW_MESSAGE_RESULT_YES,
     HELIOSVIEW_MESSAGE_RESULT_NO,
     HELIOSVIEW_MESSAGE_RESULT_RETRY,
+    HELIOSVIEW_MESSAGE_RESULT_ABORT,
+    HELIOSVIEW_MESSAGE_RESULT_IGNORE,
 } heliosview_message_result_t;
 
 /* Show a modal message box. Returns the button the user pressed

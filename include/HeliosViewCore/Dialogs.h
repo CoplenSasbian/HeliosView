@@ -34,6 +34,7 @@ enum class MessageBoxButtons : int32_t {
     YesNo = HELIOSVIEW_MESSAGE_YES_NO,
     YesNoCancel = HELIOSVIEW_MESSAGE_YES_NO_CANCEL,
     RetryCancel = HELIOSVIEW_MESSAGE_RETRY_CANCEL,
+    AbortRetryIgnore = HELIOSVIEW_MESSAGE_ABORT_RETRY_IGNORE,
 };
 
 // Which button the user pressed (mirrors heliosview_message_result_t)
@@ -44,6 +45,8 @@ enum class MessageBoxResult : int32_t {
     Yes = HELIOSVIEW_MESSAGE_RESULT_YES,
     No = HELIOSVIEW_MESSAGE_RESULT_NO,
     Retry = HELIOSVIEW_MESSAGE_RESULT_RETRY,
+    Abort = HELIOSVIEW_MESSAGE_RESULT_ABORT,
+    Ignore = HELIOSVIEW_MESSAGE_RESULT_IGNORE,
 };
 
 // Show a modal message box; returns the button the user pressed.

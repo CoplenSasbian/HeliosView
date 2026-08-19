@@ -3155,6 +3155,7 @@ int heliosview_message_box(heliosview_window_t* window, heliosview_message_type_
     case HELIOSVIEW_MESSAGE_YES_NO:      flags |= MB_YESNO; break;
     case HELIOSVIEW_MESSAGE_YES_NO_CANCEL: flags |= MB_YESNOCANCEL; break;
     case HELIOSVIEW_MESSAGE_RETRY_CANCEL: flags |= MB_RETRYCANCEL; break;
+    case HELIOSVIEW_MESSAGE_ABORT_RETRY_IGNORE: flags |= MB_ABORTRETRYIGNORE; break;
     default:                             flags |= MB_OK; break;
     }
     const HWND hwnd = window && window->hwnd ? window->hwnd : nullptr;
@@ -3167,6 +3168,8 @@ int heliosview_message_box(heliosview_window_t* window, heliosview_message_type_
     case IDYES:   return HELIOSVIEW_MESSAGE_RESULT_YES;
     case IDNO:    return HELIOSVIEW_MESSAGE_RESULT_NO;
     case IDRETRY: return HELIOSVIEW_MESSAGE_RESULT_RETRY;
+    case IDABORT: return HELIOSVIEW_MESSAGE_RESULT_ABORT;
+    case IDIGNORE: return HELIOSVIEW_MESSAGE_RESULT_IGNORE;
     default:      return HELIOSVIEW_MESSAGE_RESULT_NONE;
     }
 }
