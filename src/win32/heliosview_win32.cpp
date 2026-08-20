@@ -145,6 +145,10 @@ struct heliosview_webview {
     bool pending_html = false;  /* true = NavigateToString, false = Navigate */
     std::string pending_text;   /* UTF-8 */
 
+    /* virtual-host folder mappings queued before init completes (applied when
+     * the core becomes ready, before the queued navigation runs) */
+    std::vector<std::pair<std::string, std::string>> pending_mappings;
+
     /* WebView placement within the parent client area (client pixels); set via
      * heliosview_webview_set_insets. The WebView fills the client area minus
      * these insets, so a strip (e.g. a title bar with the DWM caption buttons)
@@ -2656,6 +2660,17 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                     hv_bind_builtin(webview, "__hv.state", hv_state_bind_cb);
                     hv_bind_builtin(webview, "__hv.drag", hv_drag_bind_cb);
 
+                    /* apply virtual-host folder mappings queued before init completes
+                     * (they must exist before the queued navigation) */
+                    for (const auto& [host, folder] : webview->pending_mappings) {
+                        Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
+                        if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview3))))
+                            webview3->SetVirtualHostNameToFolderMapping(
+                                utf8_to_wide(host).c_str(), utf8_to_wide(folder).c_str(),
+                                COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+                    }
+                    webview->pending_mappings.clear();
+
                     /* run the navigation queued during initialization */
                     if (webview->has_pending) {
                         const std::wstring text = utf8_to_wide(webview->pending_text);
@@ -3023,7 +3038,7 @@ int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
                                         const char* host_name,
                                         const char* folder_path)
 {
-    if (!webview || !host_name || !folder_path || !webview->webview)
+    if (!webview || !host_name || !folder_path)
         return -1;
     /* virtual host mappings are owned by the UI thread (require the controller) */
     if (GetCurrentThreadId() != webview->ui_thread) {
@@ -3031,6 +3046,12 @@ int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
                         folder = std::string(folder_path)] {
             heliosview_webview_map_local_folder(wv, host.c_str(), folder.c_str());
         });
+        return 0;
+    }
+    /* Not initialized yet: queue the mapping, applied when the core becomes
+     * ready (before the queued navigation runs), like navigate() does. */
+    if (!webview->webview) {
+        webview->pending_mappings.emplace_back(host_name, folder_path);
         return 0;
     }
     /* SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3 (WebView2 SDK
