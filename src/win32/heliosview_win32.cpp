@@ -152,6 +152,19 @@ struct heliosview_webview {
     bool has_insets = false;
     int32_t inset_top = 0, inset_right = 0, inset_bottom = 0, inset_left = 0;
 
+    /* WebView2 status bar (hovered-link target URL, bottom-left); off by
+     * default, toggleable at runtime via heliosview_webview_set_status_bar. */
+    bool status_bar_enabled = false;
+
+    /* WebView2 default right-click context menu; on by default, toggleable at
+     * runtime via heliosview_webview_set_context_menu. */
+    bool context_menu_enabled = true;
+    EventRegistrationToken context_menu_token{}; /* ContextMenuRequested handler (ICoreWebView2_11) */
+
+    /* WebView2 DevTools access (F12 / right-click Inspect); on by default,
+     * toggleable at runtime via heliosview_webview_set_devtools. */
+    bool devtools_enabled = true;
+
     /* JS <-> native bridge */
     DWORD ui_thread = GetCurrentThreadId();            /* thread that created the webview */
     EventRegistrationToken message_token{};            /* JS -> native messages */
@@ -457,6 +470,18 @@ struct title_changed_handler : com_callback_base<ICoreWebView2DocumentTitleChang
     {
         (void)args;
         return m_fn(sender);
+    }
+    Fn m_fn;
+};
+
+/* Right-click context menu requested (requires ICoreWebView2_11): the default
+ * menu is suppressed by marking the event handled while the app has disabled it */
+struct context_menu_requested_handler : com_callback_base<ICoreWebView2ContextMenuRequestedEventHandler> {
+    using Fn = std::function<HRESULT(ICoreWebView2*, ICoreWebView2ContextMenuRequestedEventArgs*)>;
+    explicit context_menu_requested_handler(Fn fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP Invoke(ICoreWebView2* sender, ICoreWebView2ContextMenuRequestedEventArgs* args) noexcept override
+    {
+        return m_fn(sender, args);
     }
     Fn m_fn;
 };
@@ -2589,9 +2614,37 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                      * opts its buttons out with app-region:no-drag. */
                     Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
                     if (SUCCEEDED(webview->webview->get_Settings(&settings))) {
+                        /* The WebView2 status bar shows the hovered link's
+                         * target URL bottom-left; off by default, toggleable
+                         * at runtime via heliosview_webview_set_status_bar. */
+                        settings->put_IsStatusBarEnabled(webview->status_bar_enabled ? TRUE : FALSE);
+
+                        /* DevTools (F12 / right-click Inspect): off while the
+                         * app disabled it via heliosview_webview_set_devtools
+                         * (an open DevTools window closes as well). */
+                        settings->put_AreDevToolsEnabled(webview->devtools_enabled ? TRUE : FALSE);
+
                         Microsoft::WRL::ComPtr<ICoreWebView2Settings9> settings9;
                         if (SUCCEEDED(settings.As(&settings9)))
                             settings9->put_IsNonClientRegionSupportEnabled(TRUE);
+                    }
+
+                    /* Default right-click context menu: an always-registered
+                     * handler suppresses it (put_Handled) while the app turned
+                     * it off via heliosview_webview_set_context_menu. Requires
+                     * ICoreWebView2_11 (SDK 1.0.1418.22+, runtime 100+); on
+                     * older runtimes the toggle has no effect and the menu
+                     * always shows. */
+                    Microsoft::WRL::ComPtr<ICoreWebView2_11> webview11;
+                    if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview11)))) {
+                        auto* ctx_handler = hv::hv_alloc<context_menu_requested_handler>(
+                            [webview](ICoreWebView2*, ICoreWebView2ContextMenuRequestedEventArgs* args) -> HRESULT {
+                                if (!webview->context_menu_enabled)
+                                    args->put_Handled(TRUE);
+                                return S_OK;
+                            });
+                        webview11->add_ContextMenuRequested(ctx_handler, &webview->context_menu_token);
+                        ctx_handler->Release();
                     }
 
                     /* Built-in window-control bridge for the injected
@@ -2672,6 +2725,11 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
     if (webview->title_dtor)
         webview->title_dtor(webview->title_userdata);
     webview->title_dtor = nullptr;
+    if (webview->webview && webview->context_menu_token.value != 0) {
+        Microsoft::WRL::ComPtr<ICoreWebView2_11> webview11;
+        if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview11))))
+            webview11->remove_ContextMenuRequested(webview->context_menu_token);
+    }
     for (const auto& [name, binding] : webview->bindings)
         if (binding.dtor)
             binding.dtor(binding.userdata);
@@ -3008,6 +3066,69 @@ int heliosview_webview_set_insets(heliosview_webview_t* webview,
     webview->has_insets = true;
     if (auto* controller = webview->controller.Get())
         controller->put_Bounds(hv_webview_rect(webview));
+    return 0;
+}
+
+int heliosview_webview_set_status_bar(heliosview_webview_t* webview, int enabled)
+{
+    if (!webview)
+        return -1;
+    /* ICoreWebView2Settings is UI-thread bound; follow the same marshalling
+     * contract as the other webview APIs. */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, enabled] {
+            heliosview_webview_set_status_bar(wv, enabled);
+        });
+        return 0;
+    }
+    webview->status_bar_enabled = enabled != 0;
+    /* Settings are only reachable once the core is initialized; the create
+     * path applies the stored value when it becomes ready. */
+    if (webview->webview) {
+        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+        if (FAILED(webview->webview->get_Settings(&settings)))
+            return -1;
+        settings->put_IsStatusBarEnabled(webview->status_bar_enabled ? TRUE : FALSE);
+    }
+    return 0;
+}
+
+int heliosview_webview_set_context_menu(heliosview_webview_t* webview, int enabled)
+{
+    if (!webview)
+        return -1;
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, enabled] {
+            heliosview_webview_set_context_menu(wv, enabled);
+        });
+        return 0;
+    }
+    webview->context_menu_enabled = enabled != 0;
+    /* No WebView2 call needed: the always-registered ContextMenuRequested
+     * handler consults the flag whenever the menu is about to open. */
+    return 0;
+}
+
+int heliosview_webview_set_devtools(heliosview_webview_t* webview, int enabled)
+{
+    if (!webview)
+        return -1;
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, enabled] {
+            heliosview_webview_set_devtools(wv, enabled);
+        });
+        return 0;
+    }
+    webview->devtools_enabled = enabled != 0;
+    /* Settings are only reachable once the core is initialized; the create
+     * path applies the stored value when it becomes ready. Disabling also
+     * closes an already-open DevTools window. */
+    if (webview->webview) {
+        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+        if (FAILED(webview->webview->get_Settings(&settings)))
+            return -1;
+        settings->put_AreDevToolsEnabled(webview->devtools_enabled ? TRUE : FALSE);
+    }
     return 0;
 }
 

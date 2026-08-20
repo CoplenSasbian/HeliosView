@@ -964,6 +964,32 @@ HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
                                                  int32_t top, int32_t right,
                                                  int32_t bottom, int32_t left);
 
+/* Show (enabled != 0) or hide the WebView2 status bar, which displays the
+ * target URL of a hovered link at the bottom-left corner of the WebView.
+ * Disabled by default. Applies immediately when the WebView is initialized;
+ * when called during initialization the setting is applied when it becomes
+ * ready. Message-loop thread. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_status_bar(heliosview_webview_t* webview,
+                                                     int enabled);
+
+/* Enable (enabled != 0) or disable the WebView2 default right-click context
+ * menu (copy/paste/inspect etc.). Enabled by default. Applies immediately
+ * when the WebView is initialized; when called during initialization the
+ * setting is applied when it becomes ready. On WebView2 runtimes older than
+ * 100 the toggle has no effect and the menu always shows. Message-loop
+ * thread. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_context_menu(heliosview_webview_t* webview,
+                                                       int enabled);
+
+/* Enable (enabled != 0) or disable WebView2 DevTools (F12, right-click
+ * Inspect). When disabled, DevTools cannot be opened and an already-open
+ * DevTools window is closed. Enabled by default. Applies immediately when
+ * the WebView is initialized; when called during initialization the setting
+ * is applied when it becomes ready. Message-loop thread. 0 = success,
+ * negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview,
+                                                   int enabled);
+
 /* ================= Native dialogs =================
  *
  * All dialogs are modal and must be called on the message-loop thread. They take

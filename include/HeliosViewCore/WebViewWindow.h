@@ -139,6 +139,32 @@ public:
         heliosview_webview_set_insets(m_webview, top, right, bottom, left);
     }
 
+    // Show (enabled) or hide the WebView2 status bar, which displays the target
+    // URL of a hovered link at the bottom-left corner of the WebView. Disabled
+    // by default. Applies immediately when initialized; otherwise when it
+    // becomes ready. Returns 0 = success, negative = error.
+    int setStatusBarEnabled(bool enabled)
+    {
+        return heliosview_webview_set_status_bar(m_webview, enabled ? 1 : 0);
+    }
+
+    // Enable (enabled) or disable the WebView2 default right-click context
+    // menu (copy/paste/inspect etc.). Enabled by default. On WebView2 runtimes
+    // older than 100 the toggle has no effect. Returns 0 = success,
+    // negative = error.
+    int setContextMenuEnabled(bool enabled)
+    {
+        return heliosview_webview_set_context_menu(m_webview, enabled ? 1 : 0);
+    }
+
+    // Enable (enabled) or disable WebView2 DevTools (F12, right-click Inspect).
+    // When disabled, DevTools cannot be opened and an already-open DevTools
+    // window is closed. Enabled by default. Returns 0 = success, negative = error.
+    int setDevToolsEnabled(bool enabled)
+    {
+        return heliosview_webview_set_devtools(m_webview, enabled ? 1 : 0);
+    }
+
     // ---- local resources ----
 
     // Map a local folder to a virtual host name so the page can load files from
