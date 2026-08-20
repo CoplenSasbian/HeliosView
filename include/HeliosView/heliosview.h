@@ -139,7 +139,8 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK, /* tray icon left double click */
     HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK,       /* tray icon right click (context menu) */
     HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK,      /* tray icon middle click */
-    HELIOSVIEW_EVENT_MENU_SELECT             /* a menu item was chosen (menu_item = item id) */
+    HELIOSVIEW_EVENT_MENU_SELECT,            /* a menu item was chosen (menu_item = item id) */
+    HELIOSVIEW_EVENT_WINDOW_READY            /* window created & first shown — ready (window_id = native handle) */
 } heliosview_event_type_t;
 
 /* Platform-independent keycodes (native keycodes are mapped in the C layer) */
@@ -294,10 +295,10 @@ typedef enum heliosview_window_style {
     HELIOSVIEW_WINDOW_FRAMELESS,  /* Fully frameless: no title bar / caption buttons; resizable via the edges; the app draws all chrome (e.g. the injected <helios-window-controls> web component for the buttons) */
 } heliosview_window_style_t;
 
-/* Create a window with a preset style and user data (parameters are only
- * registered; the native window is created on show()). userdata is owned by the
- * caller (the C++ wrapper stores an object pointer) and retrieved via
- * heliosview_window_userdata. Returns NULL on failure. */
+/* Create a window with a preset style and user data. The native window is
+ * created immediately (not shown); show() makes it visible. userdata is owned
+ * by the caller (the C++ wrapper stores an object pointer) and retrieved via
+ * heliosview_window_userdata. Returns NULL on failure. Message-loop thread. */
 HELIOSVIEW_API heliosview_window_t* heliosview_window_create_ex(int width, int height,
                                                                 const char* title, /* UTF-8 */
                                                                 heliosview_window_style_t style,
@@ -321,7 +322,9 @@ HELIOSVIEW_API int heliosview_window_count(void);
 
 HELIOSVIEW_API void heliosview_window_destroy(heliosview_window_t* window);
 
-/* Create and show the native window: 0 = success, negative = error code */
+/* Show the native window (created by heliosview_window_create / _create_ex;
+ * the first show fires a WINDOW_READY event — the window is created and
+ * visible). 0 = success, -1 = window not created. */
 HELIOSVIEW_API int heliosview_window_show(heliosview_window_t* window);
 
 /* Hide the native window (keeps it alive; show()/show_state bring it back). 0 = success. */
@@ -491,7 +494,7 @@ HELIOSVIEW_API int heliosview_set_session_end_callback(heliosview_session_end_cb
 HELIOSVIEW_API int heliosview_set_dpi_awareness(void);
 
 /* Native window handle (HWND on Windows) — the window_id carried in events;
- * 0 until the window is shown (the native window is created on show()). */
+ * valid from creation (heliosview_window_create / _create_ex). */
 HELIOSVIEW_API uintptr_t heliosview_window_id(const heliosview_window_t* window);
 
 /* ================= Screen / monitor geometry =================

@@ -28,6 +28,7 @@ enum class EventType : int32_t {
     WindowBlur = HELIOSVIEW_EVENT_WINDOW_BLUR,
     WindowEnabled = HELIOSVIEW_EVENT_WINDOW_ENABLED,
     WindowDisabled = HELIOSVIEW_EVENT_WINDOW_DISABLED,
+    WindowReady = HELIOSVIEW_EVENT_WINDOW_READY,  // native window created & first shown (fires once)
     KeyDown = HELIOSVIEW_EVENT_KEY_DOWN,
     KeyUp = HELIOSVIEW_EVENT_KEY_UP,
     MouseMove = HELIOSVIEW_EVENT_MOUSE_MOVE,

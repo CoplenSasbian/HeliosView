@@ -283,10 +283,12 @@ int main()
     state.win = std::make_shared<helios::WebViewWindow>(1024, 700, "HeliosView Master Demo",
                                                         helios::WindowStyle::Frameless);
     auto* win = state.win.get();
-    win->show();
     win->createWebView();
+    win->ready.connect([&state] { emit(state, "window-ready"); std::println("window ready"); });
+    win->show();
 
     /* ---- native events -> page (BroadcastChannel "events") ---- */
+
     win->resized.connect([&state](int32_t w, int32_t h) { emit(state, "window-resized", {{"w", w}, {"h", h}}); });
     win->moved.connect([&state](int32_t x, int32_t y) { emit(state, "window-moved", {{"x", x}, {"y", y}}); });
     win->focused.connect([&state] { emit(state, "window-focused"); });
@@ -300,6 +302,7 @@ int main()
     win->urlChanged.connect([&state](std::string u, bool newDoc) {
         emit(state, "webview-url-changed", {{"url", u}, {"newDocument", newDoc}});
     });
+
 
     /* ---- page -> native: BroadcastChannel("status") posts ---- */
     win->subscribeJson<BcMsg>("status", [&state](BcMsg m) {

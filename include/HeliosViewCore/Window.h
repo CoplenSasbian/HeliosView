@@ -13,6 +13,7 @@
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
 namespace helios {
@@ -36,15 +37,19 @@ enum class Backdrop : int32_t {
 class Window {
 public:
     // Construct a window with the given client size, title (UTF-8) and preset
-    // style. The native window is created lazily on the first show(). This
-    // object is stored as userdata on the C-layer window, which dispatches
-    // events through it.
+    // style. The native window is created synchronously here (message-loop
+    // thread), so id()/nativeHandle() are valid immediately; show() only makes
+    // it visible. Throws std::runtime_error if the native window cannot be
+    // created. This object is stored as userdata on the C-layer window, which
+    // dispatches events through it.
     Window(int width, int height, const char* title,
            WindowStyle style = WindowStyle::Normal)
         : m_window(heliosview_window_create_ex(width, height, title,
                                                static_cast<heliosview_window_style_t>(style),
                                                this))
     {
+        if (!m_window)
+            throw std::runtime_error("heliosview: window creation failed");
     }
 
     // Destroy the window (closes the native window if it was shown)
@@ -72,9 +77,9 @@ public:
         return *this;
     }
 
-    // Create (if not yet created) and show the native window.
-    // The underlying C call reports errors as a return code (0 = success);
-    // use heliosview_window_show directly if you need to inspect it.
+    // Show the native window (created in the constructor; this only makes it
+    // visible). The underlying C call reports errors as a return code (0 =
+    // success); use heliosview_window_show directly if you need to inspect it.
     void show() { heliosview_window_show(m_window); }
 
     // Hide the native window (keeps it alive; show()/showState() bring it back).
@@ -290,7 +295,7 @@ public:
     }
 
     // The window's native handle (HWND on Windows) — the windowId field of
-    // events targeting this window; 0 until the window is shown
+    // events targeting this window; 0 until the native window is created
     uintptr_t id() const { return heliosview_window_id(m_window); }
 
     // The raw C window handle (nullptr if not created/closed). Exposed so the
@@ -299,6 +304,7 @@ public:
 
     /* ===== signals (window.keyPressed.connect(...)) ===== */
 
+    Signal<> ready;                                        // window created & first shown (fires once, on the first show(); connect before show())
     Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
     Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
@@ -342,6 +348,9 @@ public:
             return true;
         case EventType::WindowDisabled:
             enabledChanged(false);
+            return true;
+        case EventType::WindowReady:
+            ready();
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

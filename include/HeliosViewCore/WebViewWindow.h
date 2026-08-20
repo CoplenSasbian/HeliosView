@@ -11,9 +11,9 @@
  *
  * Usage:
  *   helios::WebViewWindow win(900, 640, "title");
- *   win.show();
- *   win.createWebView();      // async initialization
+ *   win.createWebView();      // async initialization (the native window exists from construction)
  *   win.navigateHtml("<h1>hi</h1>");   // queued automatically if called before init finishes
+ *   win.show();
  */
 
 #include <HeliosViewCore/Window.h>

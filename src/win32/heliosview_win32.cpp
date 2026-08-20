@@ -62,6 +62,7 @@ struct heliosview_window {
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
     bool resizable = true;    /* whether the user can resize / maximize the window */
+    bool shown = false;       /* first show happened (the WINDOW_READY event fired once) */
     int32_t min_w = 0, min_h = 0; /* minimum client size (0 = unconstrained) */
     int32_t max_w = 0, max_h = 0; /* maximum client size (0 = unconstrained) */
     bool fullscreen = false;       /* whether the window covers the whole monitor */
@@ -763,6 +764,19 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
                                 : HELIOSVIEW_EVENT_WINDOW_DISABLED;
         out->timestamp_ms = ts;
         return 1;
+    case WM_SHOWWINDOW:
+        /* The first show of a window is the ready event (the C++ wrapper turns
+         * it into the Window::ready signal) — fired from the message pipeline
+         * like every other window event, once per window. Later shows/hides
+         * (already shown, or wParam = FALSE while hiding) fall through to
+         * DefWindowProc. */
+        if (msg->wParam && win && !win->shown) {
+            win->shown = true;
+            out->type = HELIOSVIEW_EVENT_WINDOW_READY;
+            out->timestamp_ms = ts;
+            return 1;
+        }
+        return -1;
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
@@ -843,6 +857,18 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
             DWORD corner = DWMWCP_ROUND;
             DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
         }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    /* WM_DESTROY — DefWindowProc's default posts WM_QUIT here, ending the
+     * message loop. Windows are now created in the constructor, so a never-
+     * shown window can be destroyed while others are alive; only the last
+     * window's destruction may quit the loop. (heliosview_window_destroy
+     * decrements the count before DestroyWindow, so WM_DESTROY sees the
+     * remaining live windows.) */
+    if (message == WM_DESTROY) {
+        if (g_ui_state.window_count > 0)
+            return 0; /* more windows alive: swallow DefWindowProc's WM_QUIT */
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
@@ -1049,6 +1075,71 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
     window->title = title;
     window->style = style;
     window->userdata = userdata;
+
+    /* create the native window immediately (the constructor-created model: the
+     * window exists as a native window from creation; show() only makes it
+     * visible). Message-loop thread. */
+    hv_ensure_common_controls_ctx(); /* v6 theming for this window's controls */
+
+    /* Pick the window class + procedure for this style. Each style gets its own
+     * class (distinct lpfnWndProc instantiation, see the template above). */
+    const wchar_t* class_name = L"HeliosViewWindow";
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        class_name = L"HeliosViewWindowBorderless";
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        class_name = L"HeliosViewWindowFrameless";
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        class_name = L"HeliosViewWindow";
+        break;
+    }
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    wc.lpszClassName = class_name;
+    switch (window->style) {
+    case HELIOSVIEW_WINDOW_BORDERLESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>;
+        break;
+    case HELIOSVIEW_WINDOW_FRAMELESS:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>;
+        break;
+    case HELIOSVIEW_WINDOW_NORMAL:
+    default:
+        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>;
+        break;
+    }
+    RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
+
+    const std::wstring title_w = utf8_to_wide(window->title);
+
+    /* compute the window size for the preset style: NORMAL uses AdjustWindowRect
+     * (client + caption + frame); BORDERLESS and FRAMELESS are entirely client
+     * area (WM_NCCALCSIZE), so the requested client size is the window size. */
+    const DWORD win_style = map_win32_style(window);
+    RECT rect{0, 0, window->width, window->height};
+    if (window->style == HELIOSVIEW_WINDOW_NORMAL)
+        AdjustWindowRect(&rect, win_style, FALSE);
+
+    window->hwnd = CreateWindowExW(0, class_name, title_w.c_str(), win_style,
+                                   CW_USEDEFAULT, CW_USEDEFAULT,
+                                   rect.right - rect.left, rect.bottom - rect.top,
+                                   nullptr, nullptr, GetModuleHandleW(nullptr), window);
+    if (!window->hwnd) {
+        hv::hv_dealloc(window);
+        return nullptr;
+    }
+
+    /* already registered in WM_CREATE; fall back here if that did not happen */
+    if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
+        SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
+
     g_ui_state.window_count++;
     return window;
 }
@@ -1107,76 +1198,14 @@ void heliosview_window_destroy(heliosview_window_t* window)
 
 int heliosview_window_show(heliosview_window_t* window)
 {
-    if (!window)
+    if (!window || !window->hwnd)
         return -1;
-    hv_ensure_common_controls_ctx(); /* v6 theming for this window's controls */
-    if (window->hwnd) {
-        ShowWindow(window->hwnd, SW_SHOW);
-        return 0;
-    }
-
-    /* Pick the window class + procedure for this style. Each style gets its own
-     * class (distinct lpfnWndProc instantiation, see the template above). */
-    const wchar_t* class_name = L"HeliosViewWindow";
-    switch (window->style) {
-    case HELIOSVIEW_WINDOW_BORDERLESS:
-        class_name = L"HeliosViewWindowBorderless";
-        break;
-    case HELIOSVIEW_WINDOW_FRAMELESS:
-        class_name = L"HeliosViewWindowFrameless";
-        break;
-    case HELIOSVIEW_WINDOW_NORMAL:
-    default:
-        class_name = L"HeliosViewWindow";
-        break;
-    }
-
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-    wc.lpszClassName = class_name;
-    switch (window->style) {
-    case HELIOSVIEW_WINDOW_BORDERLESS:
-        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_BORDERLESS>;
-        break;
-    case HELIOSVIEW_WINDOW_FRAMELESS:
-        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_FRAMELESS>;
-        break;
-    case HELIOSVIEW_WINDOW_NORMAL:
-    default:
-        wc.lpfnWndProc = &heliosview_wndproc_t<HELIOSVIEW_WINDOW_NORMAL>;
-        break;
-    }
-    RegisterClassExW(&wc); /* re-registering is harmless (silently fails if the class exists) */
-
-    const std::wstring title = utf8_to_wide(window->title);
-
-    /* compute the window size for the preset style: NORMAL uses AdjustWindowRect
-     * (client + caption + frame); BORDERLESS and FRAMELESS are entirely client
-     * area (WM_NCCALCSIZE), so the requested client size is the window size. */
-    const DWORD style = map_win32_style(window);
-    RECT rect{0, 0, window->width, window->height};
-    if (window->style == HELIOSVIEW_WINDOW_NORMAL)
-        AdjustWindowRect(&rect, style, FALSE);
-
-    window->hwnd = CreateWindowExW(0, class_name, title.c_str(), style,
-                                   CW_USEDEFAULT, CW_USEDEFAULT,
-                                   rect.right - rect.left, rect.bottom - rect.top,
-                                   nullptr, nullptr, GetModuleHandleW(nullptr), window);
-    if (!window->hwnd)
-        return -2;
-
-    /* already registered in WM_CREATE; fall back here if that did not happen */
-    if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
-        SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
     ShowWindow(window->hwnd, SW_SHOW);
     return 0;
 }
 
 /* The window's native handle (HWND) — the window_id its events carry. 0 until
- * the window is shown (the native window is created on show()). */
+ * the native window is created (heliosview_window_create_ex). */
 uintptr_t heliosview_window_id(const heliosview_window_t* window)
 {
     return window ? reinterpret_cast<uintptr_t>(window->hwnd) : 0;
@@ -2268,6 +2297,17 @@ void hv_bind_builtin(heliosview_webview_t* wv, const char* name,
 heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
 {
     if (!parent || !parent->hwnd)
+        return nullptr;
+
+    /* WebView2 requires a COM STA apartment on the calling thread (the UI
+     * thread): the environment/controller completion callbacks are dispatched
+     * on this thread's message loop. Initialize once and keep the apartment
+     * for the process lifetime (WebView objects outlive this call; repeated
+     * calls return S_FALSE = already initialized). */
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (co == RPC_E_CHANGED_MODE)
+        return nullptr; /* the thread is already MTA: WebView2 needs STA */
+    if (FAILED(co))
         return nullptr;
 
     auto* webview = hv::hv_alloc<heliosview_webview>();
