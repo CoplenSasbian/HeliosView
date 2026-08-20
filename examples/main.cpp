@@ -521,9 +521,11 @@ int main()
                 state.win->maximize();
                 emit(state, "menu-item", {{"item", "maximize"}});
             });
-            menu->addItem("Toggle Topmost")->triggered.connect([&state] {
+            auto* topmost = menu->addCheckItem("Toggle Topmost", state.topmost);
+            topmost->triggered.connect([&state, topmost] {
                 state.topmost = !state.topmost;
                 state.win->setTopmost(state.topmost);
+                topmost->setChecked(state.topmost); // keep the checkmark in sync
                 emit(state, "menu-item", {{"item", "topmost"}});
             });
             menu->addSeparator();

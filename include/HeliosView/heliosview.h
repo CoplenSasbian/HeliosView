@@ -659,13 +659,25 @@ HELIOSVIEW_API int heliosview_tray_notify(heliosview_tray_t* tray, const char* t
  * window_id = the owner window), which flows through the normal event queue.
  *
  * Items are added with heliosview_menu_add_item; the caller receives the item's
- * id via out_id (used to match the event). Submenus are added by handle: the
- * parent menu takes ownership of them (destroying the parent destroys its
- * submenus). heliosview_menu_show tracks the menu at the current cursor
- * position, attached to `window` (which must already be created).
+ * id via out_id (used to match the event). Item state flags (checkmark,
+ * disabled, radio-style checkmark, default) are set at creation with
+ * heliosview_menu_add_item_ex and toggled afterwards with the
+ * heliosview_menu_set_*_item_* helpers (checked / enabled / default).
+ * Submenus are added by handle: the parent menu takes ownership of them
+ * (destroying the parent destroys its submenus). heliosview_menu_show tracks
+ * the menu at the current cursor position, attached to `window` (which must
+ * already be created).
  */
 
 typedef struct heliosview_menu heliosview_menu_t;
+
+/* Item flags for heliosview_menu_add_item_ex (OR-able). */
+enum {
+    HELIOSVIEW_MENU_ITEM_CHECKED    = 1 << 0, /* show a checkmark next to the text */
+    HELIOSVIEW_MENU_ITEM_DISABLED   = 1 << 1, /* grayed out and not selectable */
+    HELIOSVIEW_MENU_ITEM_RADIOCHECK = 1 << 2, /* bullet (radio) instead of a checkmark */
+    HELIOSVIEW_MENU_ITEM_DEFAULT    = 1 << 3  /* default item: bold, Enter / double-click activates */
+};
 
 /* Create an empty popup menu attached to `window`. The window owns the menu:
  * its items are registered on the window so MENU_SELECT events can be routed
@@ -681,6 +693,49 @@ HELIOSVIEW_API void heliosview_menu_destroy(heliosview_menu_t* menu);
  * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_add_item(heliosview_menu_t* menu, const char* text,
                                             uint32_t* out_id);
+
+/* Add a text item with initial state flags (HELIOSVIEW_MENU_ITEM_*); its
+ * unique id is written to out_id (NULL = ignore). The flags are applied once
+ * at creation; change them later with heliosview_menu_set_item_checked /
+ * _enabled / _default. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_add_item_ex(heliosview_menu_t* menu, const char* text,
+                                               uint32_t flags, uint32_t* out_id);
+
+/* Convenience wrapper: heliosview_menu_add_item_ex with HELIOSVIEW_MENU_ITEM_CHECKED
+ * (or 0) when `checked` is non-zero. See heliosview_menu_set_item_checked. */
+HELIOSVIEW_API int heliosview_menu_add_checkable_item(heliosview_menu_t* menu, const char* text,
+                                                      int checked, uint32_t* out_id);
+
+/* Set (checked != 0) or clear the checkmark of the item with the given id.
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_item_checked(heliosview_menu_t* menu, uint32_t id,
+                                                    int checked);
+
+/* Read whether the item with the given id is checked; 1/0 is written to
+ * out_checked (NULL = ignore). 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_is_item_checked(heliosview_menu_t* menu, uint32_t id,
+                                                   int* out_checked);
+
+/* Enable (enabled != 0) or disable (grayed out, not selectable) the item with
+ * the given id. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_item_enabled(heliosview_menu_t* menu, uint32_t id,
+                                                    int enabled);
+
+/* Read whether the item with the given id is enabled; 1/0 is written to
+ * out_enabled (NULL = ignore). 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_is_item_enabled(heliosview_menu_t* menu, uint32_t id,
+                                                   int* out_enabled);
+
+/* Make (is_default != 0) or unmake the item with the given id the menu's
+ * default item (shown bold; activated by Enter / double-click; one per menu).
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_item_default(heliosview_menu_t* menu, uint32_t id,
+                                                    int is_default);
+
+/* Read whether the item with the given id is the default item; 1/0 is written
+ * to out_default (NULL = ignore). 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_is_item_default(heliosview_menu_t* menu, uint32_t id,
+                                                   int* out_default);
 
 /* Add a separator. 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);

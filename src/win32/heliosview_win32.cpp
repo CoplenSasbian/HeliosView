@@ -2024,6 +2024,101 @@ int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
     return 0;
 }
 
+int heliosview_menu_add_item_ex(heliosview_menu_t* menu, const char* text,
+                                uint32_t flags, uint32_t* out_id)
+{
+    if (!menu || !menu->hmenu || !menu->window)
+        return -1;
+    const UINT id = heliosview_window_add_item(menu->window, menu->userdata);
+    if (id == 0)
+        return -1;
+    const std::wstring wtext = utf8_to_wide(text ? text : "");
+    UINT mf = MF_STRING;
+    if (flags & HELIOSVIEW_MENU_ITEM_CHECKED)
+        mf |= MF_CHECKED;
+    if (flags & HELIOSVIEW_MENU_ITEM_DISABLED)
+        mf |= MF_GRAYED; /* disabled + grayed (the standard "disabled" look) */
+    if (flags & HELIOSVIEW_MENU_ITEM_RADIOCHECK)
+        mf |= MFT_RADIOCHECK; /* bullet instead of a checkmark */
+    if (flags & HELIOSVIEW_MENU_ITEM_DEFAULT)
+        mf |= MF_DEFAULT; /* default item: bold, Enter / double-click activates */
+    if (!AppendMenuW(menu->hmenu, mf, id, wtext.c_str())) {
+        heliosview_window_remove_item(menu->window, id);
+        return -1;
+    }
+    if (out_id)
+        *out_id = id;
+    return 0;
+}
+
+int heliosview_menu_add_checkable_item(heliosview_menu_t* menu, const char* text,
+                                       int checked, uint32_t* out_id)
+{
+    return heliosview_menu_add_item_ex(menu, text,
+                                       checked ? HELIOSVIEW_MENU_ITEM_CHECKED : 0, out_id);
+}
+
+int heliosview_menu_set_item_checked(heliosview_menu_t* menu, uint32_t id, int checked)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    const UINT flags = MF_BYCOMMAND | (checked ? MF_CHECKED : MF_UNCHECKED);
+    return CheckMenuItem(menu->hmenu, id, flags) != -1 ? 0 : -1;
+}
+
+int heliosview_menu_is_item_checked(heliosview_menu_t* menu, uint32_t id, int* out_checked)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    const UINT state = GetMenuState(menu->hmenu, id, MF_BYCOMMAND);
+    if (state == UINT_MAX)
+        return -1;
+    if (out_checked)
+        *out_checked = (state & MF_CHECKED) ? 1 : 0;
+    return 0;
+}
+
+int heliosview_menu_set_item_enabled(heliosview_menu_t* menu, uint32_t id, int enabled)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    const UINT flags = MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED);
+    return EnableMenuItem(menu->hmenu, id, flags) != -1 ? 0 : -1;
+}
+
+int heliosview_menu_is_item_enabled(heliosview_menu_t* menu, uint32_t id, int* out_enabled)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    const UINT state = GetMenuState(menu->hmenu, id, MF_BYCOMMAND);
+    if (state == UINT_MAX)
+        return -1;
+    if (out_enabled)
+        *out_enabled = (state & (MF_DISABLED | MF_GRAYED)) ? 0 : 1;
+    return 0;
+}
+
+int heliosview_menu_set_item_default(heliosview_menu_t* menu, uint32_t id, int is_default)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    /* (UINT)-1 + MF_BYCOMMAND clears the default item */
+    return SetMenuDefaultItem(menu->hmenu, is_default ? id : static_cast<UINT>(-1),
+                              MF_BYCOMMAND)
+               ? 0
+               : -1;
+}
+
+int heliosview_menu_is_item_default(heliosview_menu_t* menu, uint32_t id, int* out_default)
+{
+    if (!menu || !menu->hmenu)
+        return -1;
+    const int def = static_cast<int>(GetMenuDefaultItem(menu->hmenu, FALSE, 0));
+    if (out_default)
+        *out_default = (def >= 0 && static_cast<UINT>(def) == id) ? 1 : 0;
+    return 0;
+}
+
 int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window)
 {
     if (!menu || !menu->hmenu || !window || !window->hwnd)

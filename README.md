@@ -505,9 +505,17 @@ respond through signals:
 helios::Menu menu(window.nativeHandle());
 helios::Menu::Item* show = menu.addItem("Show / Restore");
 helios::Menu::Item* quit = menu.addItem("Quit");
+helios::Menu::Item* top = menu.addCheckItem("Toggle Topmost"); // checkable
+helios::Menu::Item* off = menu.addItem("Unavailable");
+off->setEnabled(false);                              // grayed out, not selectable
 menu.addSeparator();
+show->setDefault(true);                              // bold default item
 show->triggered.connect([&] { window.showNormal(); });
 quit->triggered.connect([&] { app.quit(); });
+top->triggered.connect([&] {                    // toggle the checkmark
+    top->setChecked(!top->checked());
+    /* ... apply the state ... */
+});
 
 helios::Tray tray(window.nativeHandle(), "Tray Demo");
 tray.leftClicked.connect([] { /* ... */ });

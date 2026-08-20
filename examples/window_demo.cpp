@@ -35,6 +35,9 @@ int main()
     helios::Menu::Item* resizableItem = menu.addItem("Toggle Resizable");
     menu.addSeparator();
     helios::Menu::Item* quitItem = menu.addItem("Quit");
+    menu.addSeparator();
+    helios::Menu::Item* disabledItem = menu.addItem("Disabled (grey)");
+    disabledItem->setEnabled(false); // grayed out, not selectable
     showItem->triggered.connect([&window] {
         std::printf("[win] menu: show/restore\n");
         window.showNormal();
@@ -56,6 +59,7 @@ int main()
         std::printf("[win] menu: quit\n");
         app.quit();
     });
+    showItem->setDefault(true); // bold default item (Enter / double-click)
 
     // Tray icon (notification area). The native window must exist first, so this
     // runs after show(). Connect signals to respond to clicks on the icon.
