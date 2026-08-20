@@ -302,6 +302,14 @@ int main()
 - **`mapLocalFolder(host, folder)`** — 通过虚拟 `https://<host>/` 主机服务本地文件夹，供前端之外的资源使用。
 - **`helios::selectFolder`** 等 — 通过 `bindJson` 处理器暴露给页面的原生对话框。
 
+**WebView2 窗口 chrome 开关** — 调整 WebView 原生外观的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setStatusBarEnabled`、`setContextMenuEnabled`、`setDevToolsEnabled`；C：`heliosview_webview_set_status_bar` / `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`）：
+
+- **状态栏** — 悬停链接时左下角显示的 URL 提示；**默认关闭**，用 `setStatusBarEnabled(true)` 重新开启。
+- **右键菜单** — WebView2 默认右键菜单（复制 / 粘贴 / 检查）；默认开启，用 `setContextMenuEnabled(false)` 关闭（通过 `ContextMenuRequested` 事件抑制；需要 WebView2 运行时 ≥ 100）。
+- **DevTools** — F12 / 右键“检查”；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。
+
+每个开关在 WebView 初始化完成后立即生效；初始化期间调用则在其就绪时应用。
+
 原始 C 风格桥接（`bind` / `resolve` / `reject` / `eval` / `evalAsync` / `broadcast` / `subscribe`）也可用；`resolve`/`reject`/`broadcast` 线程安全。
 
 > **生命周期：** 只在没有 `bindJson` task 或 `evalAsync` 调用仍在执行时销毁 `WebViewWindow`。WebView 必须在它的父窗口之前销毁。

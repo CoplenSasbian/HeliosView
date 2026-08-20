@@ -418,6 +418,24 @@ them and can never shadow the built-in components.
 - **`helios::selectFolder`** and friends — native dialogs exposed to the page
   through a `bindJson` handler.
 
+**WebView2 window-chrome settings** — small toggles that shape the WebView's
+native chrome, each available on `WebViewWindow` (C++: `setStatusBarEnabled`,
+`setContextMenuEnabled`, `setDevToolsEnabled`; C: `heliosview_webview_set_status_bar`
+/ `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`):
+
+- **Status bar** — the hovered-link URL hint at the bottom-left; **disabled by
+  default**, re-enable with `setStatusBarEnabled(true)`.
+- **Right-click context menu** — the WebView2 default menu (copy / paste /
+  inspect); enabled by default, disable with `setContextMenuEnabled(false)`
+  (suppressed via the `ContextMenuRequested` event; requires WebView2 runtime
+  ≥ 100).
+- **DevTools** — F12 / right-click Inspect; enabled by default, disable with
+  `setDevToolsEnabled(false)` (disabling closes an already-open DevTools
+  window).
+
+Each applies immediately once the WebView is initialized; calls made during
+initialization take effect when it becomes ready.
+
 The raw C-style bridge (`bind` / `resolve` / `reject` / `eval` / `evalAsync` /
 `broadcast` / `subscribe`) is also available; `resolve`/`reject`/`broadcast`
 are thread-safe.
