@@ -9,10 +9,21 @@
  *
  * Also acts as a std::execution::scheduler: senders from get_scheduler()
  * complete on the UI thread while the loop is idle.
+ *
+ * Owns the app-wide exec::async_scope that tracks Signal async slots
+ * (scope(), stdexec implementation path): the scope outlives every window,
+ * so App must be constructed first and destroyed last. App::~App stops it
+ * (cancels in-flight slots); wait for stragglers with
+ *   app.scope().request_stop(); std::execution::sync_wait(app.scope().on_empty());
+ * before destroying the App.
  */
 
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Types.h>
+
+#if !(defined(HELIOSVIEW_HAVE_STD_EXECUTION) && HELIOSVIEW_HAVE_STD_EXECUTION)
+#  include <exec/async_scope.hpp>
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +48,16 @@ public:
     // (exactly one App is expected per process)
     App() { s_instance = this; }
     // Destroy the application; clears the current instance if it is this object.
-    virtual ~App() { if (s_instance == this) s_instance = nullptr; }
+    // Stops the async-slot scope: in-flight Signal async slots are canceled
+    // (see Signal.h). The App must be destroyed last — after all windows and
+    // after any scope().on_empty() wait.
+    virtual ~App()
+    {
+#if !(defined(HELIOSVIEW_HAVE_STD_EXECUTION) && HELIOSVIEW_HAVE_STD_EXECUTION)
+        m_scope.request_stop();
+#endif
+        if (s_instance == this) s_instance = nullptr;
+    }
     // Non-copyable: a process owns a single App
     App(const App&) = delete;
     App& operator=(const App&) = delete;
@@ -121,6 +141,14 @@ public:
     // on the UI thread while the loop is idle (see app_scheduler).
     app_scheduler get_scheduler() noexcept;
 
+#if !(defined(HELIOSVIEW_HAVE_STD_EXECUTION) && HELIOSVIEW_HAVE_STD_EXECUTION)
+    // The app-wide async_scope that tracks Signal async slots (stdexec
+    // implementation path, see Signal.h). request_stop() cancels in-flight
+    // slots; sync_wait(scope().on_empty()) waits for them to finish (call it
+    // after request_stop, before destroying the App).
+    exec::async_scope& scope() noexcept { return m_scope; }
+#endif
+
 private:
     // Run queued scheduler tasks while idle (UI thread only)
     void drainTasks()
@@ -139,6 +167,9 @@ private:
 
     std::mutex m_task_mutex;
     std::deque<std::function<void()>> m_tasks;
+#if !(defined(HELIOSVIEW_HAVE_STD_EXECUTION) && HELIOSVIEW_HAVE_STD_EXECUTION)
+    exec::async_scope m_scope; // Signal async-slot task tracking (see scope())
+#endif
     static inline App* s_instance = nullptr;
 
     /* ---- extension event sinks (see Tray.h / Menu.h) ----
