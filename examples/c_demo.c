@@ -30,6 +30,10 @@ static int frame(void* userdata)
             printf("[c] tray right click -> menu\n");
             heliosview_menu_show(g_menu, g_win);
             break;
+        case HELIOSVIEW_EVENT_WINDOW_CLOSE:
+            printf("[c] close requested -> closing\n");
+            heliosview_window_close(g_win);
+            break;
         case HELIOSVIEW_EVENT_MENU_SELECT:
             printf("[c] menu item %u\n", (unsigned)ev.menu_item);
             heliosview_quit();

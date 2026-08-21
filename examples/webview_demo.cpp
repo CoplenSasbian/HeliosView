@@ -244,6 +244,12 @@ int main()
         std::println("[evalAsync] error={} result={}", error, result ? result : "(null)");
     });
 
+    // close button does NOT auto-close; connect to closeRequested and call close()
+    window->closeRequested.connect([window] {
+        std::println("[main] close requested -> closing");
+        window->close();
+    });
+
     std::println("[main] entering UI loop (Esc to close)...");
     return app->exec();
 }

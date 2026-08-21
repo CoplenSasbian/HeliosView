@@ -65,7 +65,6 @@
 #include <exec/asio/asio_thread_pool.hpp>
 #include <exec/asio/use_sender.hpp>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -87,7 +86,9 @@ class Async {
 public:
     // One worker thread per hardware thread.
     Async()
-        : Async(std::max(1u, std::thread::hardware_concurrency()))
+        : Async(std::thread::hardware_concurrency() > 1u
+                    ? std::thread::hardware_concurrency()
+                    : 1u)
     {
     }
 

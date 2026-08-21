@@ -1,5 +1,5 @@
 // HeliosView.Core window-feature example (signal/slot usage).
-// Interact: move the mouse / press keys (Esc closes the window) / click the X
+// Interact: move the mouse / press keys (Esc closes the window) / click the X (connected to close())
 #include <HeliosViewCore/HeliosView.h>
 
 #include <cstdio>
@@ -136,10 +136,9 @@ int main()
 
     });
 
-    window.closed.connect([] {
-        std::printf("[win] close requested\n");
-        // Default: Window::event destroys the window after emitting closed;
-        // App::exec exits once the last window is closed
+    window.closeRequested.connect([&window] {
+        std::printf("[win] close requested -> closing\n");
+        window.close();  // close button does NOT auto-close; must call close() here
     });
 
     return app.exec();

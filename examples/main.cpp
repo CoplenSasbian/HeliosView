@@ -558,7 +558,10 @@ int main()
         w->keyPressed.connect([&state, n](helios::KeyCode k) {
             emit(state, "subwindow-key", {{"n", n}, {"key", static_cast<int>(k)}});
         });
-        w->closed.connect([&state, n] { emit(state, "subwindow-closed", {{"n", n}}); });
+        w->closeRequested.connect([&state, n, raw = w.get()] {
+            emit(state, "subwindow-closed", {{"n", n}});
+            raw->close();  // close button does NOT auto-close; call close() here
+        });
         state.extra.push_back(std::move(w));
         co_return json{{"n", n}, {"count", state.extra.size()}};
     });
@@ -571,6 +574,12 @@ int main()
         if (auto* a = helios::App::instance())
             a->quit();
         co_return true;
+    });
+
+    // close button does NOT auto-close; connect to closeRequested and call close()
+    win->closeRequested.connect([win] {
+        std::println("[main] close requested -> closing");
+        win->close();
     });
 
     /* ---- load the demo page ---- */

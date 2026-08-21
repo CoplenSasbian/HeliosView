@@ -204,12 +204,19 @@ int main()
         if (key == helios::KeyCode::Escape)
             window.close();          // 最后一个窗口关闭 -> 循环退出
     });
+    window.closeRequested.connect(&Window::close, &window);  // 关闭按钮（×）触发此信号
 
     return app.exec();
 }
 ```
 
 `Window` 还提供 `showMinimized/Maximized/Normal`（以及便捷的 `minimize`/`maximize`/`restore`/`toggleMaximize`）、`move/resize`、`position/size/geometry`、`setTitle`、`center`、`setOpacity`、`focus`、`hide`、`setTopmost`、`setIcon`、`requestClose`、`setResizable`、`setProgress`（任务栏）、`setBackdrop(Mica/Acrylic)` + `setDarkMode`（Win11）、`dpi`，以及 `WindowStyle::{Normal, Borderless, Frameless}`。`focused`/`blurred` 信号上报窗口激活状态变化。标题与字符串均为 UTF-8。
+
+**关闭按钮行为。** 点击关闭按钮（×）或按 Alt+F4 **不会**销毁窗口——它只发出 `closeRequested` 信号。需要连接该信号并调用 `close()` 才能真正关闭：
+
+```cpp
+window.closeRequested.connect(&Window::close, &window);  // 点击 × → 关闭
+```
 
 **无边框窗口拖拽。** 无边框 / 无标题栏窗口没有系统标题栏，因此把自定义标题栏条带注册为拖拽区域即可 —— 在区域内按下并拖动会像原生标题栏一样移动窗口（`WM_NCHITTEST → HTCAPTION`）：
 
@@ -411,6 +418,8 @@ static int frame(void* userdata)
     heliosview_event_t ev;
     while (heliosview_poll(&ev)) {
         if (ev.type == HELIOSVIEW_EVENT_KEY_DOWN && ev.key == HELIOSVIEW_KEY_ESCAPE)
+            heliosview_window_close(heliosview_window_from_id(ev.window_id));
+        if (ev.type == HELIOSVIEW_EVENT_WINDOW_CLOSE)
             heliosview_window_close(heliosview_window_from_id(ev.window_id));
     }
     return 0;

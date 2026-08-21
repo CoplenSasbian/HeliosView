@@ -305,7 +305,8 @@ public:
     /* ===== signals (window.keyPressed.connect(...)) ===== */
 
     Signal<> ready;                                        // window created & first shown (fires once, on the first show(); connect before show())
-    Signal<> closed;                                       // close requested (user clicked X); default handling destroys the window
+    Signal<> closeRequested;                                // close requested (user clicked X / Alt+F4); the window does NOT close
+                                                           // automatically — connect to this signal and call close() to actually close.
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
     Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
     Signal<int32_t, int32_t> moving;                       // move drag in progress (x, y)
@@ -321,7 +322,11 @@ public:
 
     // Window event handler. The default implementation emits signals from events.
     // Return true if handled; unhandled events go to App::event().
-    // To veto a close, override this function, intercept WindowClose, and return true.
+    // Closing: when the user clicks the close button (X) or presses Alt+F4,
+    // WindowClose is dispatched and the closeRequested signal is emitted, but
+    // the window is NOT destroyed. Connect to closeRequested and call close()
+    // to actually close:
+    //   window.closeRequested.connect(&Window::close, &window);
     virtual bool event(const Event& e)
     {
         switch (e.type) {
@@ -368,7 +373,7 @@ public:
             mouseButtonReleased(e.x, e.y, e.mouseButton);
             return true;
         case EventType::WindowClose:
-            closed();
+            closeRequested();   /* emit signal; call close() in the handler to actually close */
             return true;
         default:
             return false; /* Quit and other non-window events */

@@ -126,6 +126,12 @@ int main()
         "</script>"
         "</body></html>");
 
+    // close button does NOT auto-close; connect to closeRequested and call close()
+    window->closeRequested.connect([window] {
+        std::println("[main] close requested -> closing");
+        window->close();
+    });
+
     std::println("[main] entering UI loop...");
     return app->exec();
 }

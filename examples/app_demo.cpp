@@ -20,7 +20,7 @@ public:
         keyPressed.connect(&MyWindow::onKeyPressed, this);
         mouseButtonPressed.connect(&MyWindow::onMousePressed, this);
         resized.connect(&MyWindow::onResized, this);
-        closed.connect(&MyWindow::onClosed, this);
+        closeRequested.connect(&MyWindow::onCloseRequested, this);
     }
 
 private:
@@ -86,9 +86,10 @@ private:
                      std::this_thread::get_id());
     }
 
-    void onClosed()
+    void onCloseRequested()
     {
-        std::println("[app] closed (thread {})", std::this_thread::get_id());
+        std::println("[app] close requested (thread {}) -> closing", std::this_thread::get_id());
+        close();  // close button does NOT auto-close; must call close() here
     }
 
 public:

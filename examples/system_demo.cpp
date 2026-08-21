@@ -71,6 +71,12 @@ int main()
         }
     });
 
+    // close button does NOT auto-close; connect to closeRequested and call close()
+    window.closeRequested.connect([&window] {
+        std::println("[demo] close requested -> closing");
+        window.close();
+    });
+
     std::println("[demo] F1 folder | F2 files | F3 save | F4 msg box | F5 open URL | "
                  "F6 show in folder | F7 clipboard | F8 toast | F9/F10 taskbar progress");
     return app->exec();

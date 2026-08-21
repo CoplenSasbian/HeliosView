@@ -250,6 +250,7 @@ int main()
         if (key == helios::KeyCode::Escape)
             window.close();          // last window closes -> loop exits
     });
+    window.closeRequested.connect(&Window::close, &window);  // close button (×) triggers this
 
     return app.exec();
 }
@@ -262,6 +263,14 @@ int main()
 (taskbar), `setBackdrop(Mica/Acrylic)` + `setDarkMode` (Win11), `dpi`, and
 `WindowStyle::{Normal, Borderless, Frameless}`. `focused`/`blurred` signals
 report activation changes. Titles and strings are UTF-8.
+
+**Close button behavior.** Clicking the close button (×) or pressing Alt+F4
+does **not** destroy the window — it only emits the `closeRequested` signal.
+Connect to it and call `close()` to actually close:
+
+```cpp
+window.closeRequested.connect(&Window::close, &window);  // click × → closes
+```
 
 **Frameless dragging.** A frameless/borderless window has no OS title bar, so
 register the custom title-bar strips as drag regions — a mouse-down + drag
@@ -558,6 +567,8 @@ static int frame(void* userdata)
     heliosview_event_t ev;
     while (heliosview_poll(&ev)) {
         if (ev.type == HELIOSVIEW_EVENT_KEY_DOWN && ev.key == HELIOSVIEW_KEY_ESCAPE)
+            heliosview_window_close(heliosview_window_from_id(ev.window_id));
+        if (ev.type == HELIOSVIEW_EVENT_WINDOW_CLOSE)
             heliosview_window_close(heliosview_window_from_id(ev.window_id));
     }
     return 0;
