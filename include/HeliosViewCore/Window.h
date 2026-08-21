@@ -369,7 +369,6 @@ public:
             return true;
         case EventType::WindowClose:
             closed();
-            close(); /* default: a close request destroys the window (App exits after the last one closes) */
             return true;
         default:
             return false; /* Quit and other non-window events */
