@@ -284,7 +284,7 @@ int main()
                                                         helios::WindowStyle::Frameless);
     auto* win = state.win.get();
     win->createWebView();
-    win->ready.connect([&state] { emit(state, "window-ready"); std::println("window ready"); });
+    win->firstShown.connect([&state] { emit(state, "window-first-shown"); std::println("window first shown"); });
     win->show();
 
     /* ---- native events -> page (BroadcastChannel "events") ---- */

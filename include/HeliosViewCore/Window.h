@@ -80,6 +80,8 @@ public:
     // Show the native window (created in the constructor; this only makes it
     // visible). The underlying C call reports errors as a return code (0 =
     // success); use heliosview_window_show directly if you need to inspect it.
+    // The first show fires the firstShown signal (once, from the message
+    // pipeline) — connect before show().
     void show() { heliosview_window_show(m_window); }
 
     // Hide the native window (keeps it alive; show()/showState() bring it back).
@@ -304,7 +306,7 @@ public:
 
     /* ===== signals (window.keyPressed.connect(...)) ===== */
 
-    Signal<> ready;                                        // window created & first shown (fires once, on the first show(); connect before show())
+    Signal<> firstShown;                                   // first show: fires once, from the message pipeline, when the OS first displays the window (the first WM_SHOWWINDOW); connect before the first show
     Signal<> closeRequested;                                // close requested (user clicked X / Alt+F4); the window does NOT close
                                                            // automatically — connect to this signal and call close() to actually close.
     Signal<int32_t, int32_t> resized;                      // size changed (w, h)
@@ -354,8 +356,8 @@ public:
         case EventType::WindowDisabled:
             enabledChanged(false);
             return true;
-        case EventType::WindowReady:
-            ready();
+        case EventType::WindowFirstShown:
+            firstShown();   /* the native window was displayed for the first time */
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

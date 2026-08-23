@@ -62,7 +62,7 @@ struct heliosview_window {
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
     bool resizable = true;    /* whether the user can resize / maximize the window */
-    bool shown = false;       /* first show happened (the WINDOW_READY event fired once) */
+    bool shown = false;       /* first show happened (the WINDOW_FIRST_SHOWN event fired once) */
     int32_t min_w = 0, min_h = 0; /* minimum client size (0 = unconstrained) */
     int32_t max_w = 0, max_h = 0; /* maximum client size (0 = unconstrained) */
     bool fullscreen = false;       /* whether the window covers the whole monitor */
@@ -794,14 +794,14 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         out->timestamp_ms = ts;
         return 1;
     case WM_SHOWWINDOW:
-        /* The first show of a window is the ready event (the C++ wrapper turns
-         * it into the Window::ready signal) — fired from the message pipeline
-         * like every other window event, once per window. Later shows/hides
-         * (already shown, or wParam = FALSE while hiding) fall through to
-         * DefWindowProc. */
+        /* The first show of a window produces a WINDOW_FIRST_SHOWN event (the
+         * C++ wrapper maps it to Window::firstShown) — dispatched from the
+         * message pipeline like every other window event, once per window.
+         * Later shows/hides (already shown, or wParam = FALSE while hiding)
+         * fall through to DefWindowProc. */
         if (msg->wParam && win && !win->shown) {
             win->shown = true;
-            out->type = HELIOSVIEW_EVENT_WINDOW_READY;
+            out->type = HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN;
             out->timestamp_ms = ts;
             return 1;
         }

@@ -140,7 +140,7 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK,       /* tray icon right click (context menu) */
     HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK,      /* tray icon middle click */
     HELIOSVIEW_EVENT_MENU_SELECT,            /* a menu item was chosen (menu_item = item id) */
-    HELIOSVIEW_EVENT_WINDOW_READY            /* window created & first shown — ready (window_id = native handle) */
+    HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN      /* window first actually shown (window_id = native handle) — the C++ wrapper maps it to Window::firstShown */
 } heliosview_event_type_t;
 
 /* Platform-independent keycodes (native keycodes are mapped in the C layer) */
@@ -323,8 +323,8 @@ HELIOSVIEW_API int heliosview_window_count(void);
 HELIOSVIEW_API void heliosview_window_destroy(heliosview_window_t* window);
 
 /* Show the native window (created by heliosview_window_create / _create_ex;
- * the first show fires a WINDOW_READY event — the window is created and
- * visible). 0 = success, -1 = window not created. */
+ * the first show fires a WINDOW_FIRST_SHOWN event — the window is created and
+ * visible; the C++ wrapper maps it to Window::firstShown). 0 = success, -1 = window not created. */
 HELIOSVIEW_API int heliosview_window_show(heliosview_window_t* window);
 
 /* Hide the native window (keeps it alive; show()/show_state bring it back). 0 = success. */
