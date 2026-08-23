@@ -169,6 +169,17 @@ struct heliosview_webview {
      * toggleable at runtime via heliosview_webview_set_devtools. */
     bool devtools_enabled = true;
 
+    /* low-footprint mode (WebView2 TrySuspend / Resume): requested/applied
+     * state, plus the completion callback of a suspend requested before the
+     * core was ready (applied at ready, after queued navigation/scripts). */
+    bool suspended = false;
+    heliosview_webview_suspend_cb suspend_cb = nullptr;
+    void* suspend_userdata = nullptr;
+
+    /* WebView2 default background color (COREWEBVIEW2_COLOR: alpha, red,
+     * green, blue); applied when the core becomes ready. Default: opaque white. */
+    COREWEBVIEW2_COLOR background_color{255, 255, 255, 255};
+
     /* JS <-> native bridge */
     DWORD ui_thread = GetCurrentThreadId();            /* thread that created the webview */
     EventRegistrationToken message_token{};            /* JS -> native messages */
@@ -511,6 +522,42 @@ struct execute_script_completed_handler : com_callback_base<ICoreWebView2Execute
     }
     Fn m_fn;
 };
+
+/* TrySuspend completed (WebView2 low-footprint mode): report whether the
+ * suspension actually happened (result = BOOL isSuspended) */
+struct try_suspend_completed_handler : com_callback_base<ICoreWebView2TrySuspendCompletedHandler> {
+    using Fn = std::function<HRESULT(HRESULT, BOOL)>;
+    explicit try_suspend_completed_handler(Fn fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP Invoke(HRESULT errorCode, BOOL is_suspended) noexcept override
+    {
+        return m_fn(errorCode, is_suspended);
+    }
+    Fn m_fn;
+};
+
+/* Apply a low-footprint suspend (TrySuspend) on the UI thread; the core must
+ * be initialized. callback/userdata deliver the async completion (may be NULL). */
+int hv_webview_try_suspend(heliosview_webview_t* webview,
+                           heliosview_webview_suspend_cb callback, void* userdata)
+{
+    Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
+    if (FAILED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview3))))
+        return -1;
+    auto* handler = hv::hv_alloc<try_suspend_completed_handler>(
+        [webview, callback, userdata](HRESULT result, BOOL is_suspended) -> HRESULT {
+            /* the tracked state follows the completed attempt */
+            webview->suspended = is_suspended ? true : webview->suspended;
+            if (callback)
+                callback(SUCCEEDED(result) ? 0 : -static_cast<int>(result),
+                         is_suspended ? 1 : 0, userdata);
+            return S_OK;
+        });
+    if (!handler)
+        return -1;
+    const HRESULT hr = webview3->TrySuspend(handler);
+    handler->Release();
+    return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
+}
 
 /* Preset style → Win32 window style (honors the window's resizable flag) */
 DWORD map_win32_style(const heliosview_window_t* window)
@@ -1215,8 +1262,6 @@ void heliosview_window_destroy(heliosview_window_t* window)
         return;
     g_ui_state.window_count--;
     if (window->hwnd) {
-        /* The window is a passive registry only: it does not own trays/menus.
-         * Their C++ wrappers (Tray/Menu) must be destroyed before the window. */
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */
     }
@@ -2510,6 +2555,15 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                                 }
                             }
                             webview->pending_ops.clear();
+                            /* a low-footprint suspend requested before init
+                             * applies as soon as the core is ready (after the
+                             * queued navigation/scripts have run) */
+                            if (webview->suspended) {
+                                hv_webview_try_suspend(webview, webview->suspend_cb,
+                                                       webview->suspend_userdata);
+                                webview->suspend_cb = nullptr;
+                                webview->suspend_userdata = nullptr;
+                            }
                             return S_OK;
                         });
                     webview->webview->AddScriptToExecuteOnDocumentCreated(
@@ -2632,6 +2686,14 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
                         if (SUCCEEDED(settings.As(&settings9)))
                             settings9->put_IsNonClientRegionSupportEnabled(TRUE);
                     }
+
+                    /* Default background color (ICoreWebView2Controller2):
+                     * applied from the stored value (e.g. set before init)
+                     * when the core becomes ready; a transparent color
+                     * (alpha 0) lets the parent window show through. */
+                    Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+                    if (SUCCEEDED(webview->controller.As(&controller2)))
+                        controller2->put_DefaultBackgroundColor(webview->background_color);
 
                     /* Default right-click context menu: an always-registered
                      * handler suppresses it (put_Handled) while the app turned
@@ -3151,6 +3213,95 @@ int heliosview_webview_set_devtools(heliosview_webview_t* webview, int enabled)
         settings->put_AreDevToolsEnabled(webview->devtools_enabled ? TRUE : FALSE);
     }
     return 0;
+}
+
+int heliosview_webview_suspend(heliosview_webview_t* webview,
+                               heliosview_webview_suspend_cb callback, void* userdata)
+{
+    if (!webview)
+        return -1;
+    /* the controller is UI-thread bound; follow the marshalling contract */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, callback, userdata] {
+            heliosview_webview_suspend(wv, callback, userdata);
+        });
+        return 0;
+    }
+    webview->suspended = true;
+    if (!webview->webview) {
+        /* not initialized yet: record the request (and the completion
+         * callback, last one wins); applied when the core becomes ready */
+        if (callback) {
+            webview->suspend_cb = callback;
+            webview->suspend_userdata = userdata;
+        }
+        return 0;
+    }
+    return hv_webview_try_suspend(webview, callback, userdata);
+}
+
+int heliosview_webview_resume(heliosview_webview_t* webview)
+{
+    if (!webview)
+        return -1;
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview] { heliosview_webview_resume(wv); });
+        return 0;
+    }
+    webview->suspended = false;
+    /* drop a pending pre-init suspend request (and its completion callback) */
+    webview->suspend_cb = nullptr;
+    webview->suspend_userdata = nullptr;
+    if (!webview->webview)
+        return 0; /* nothing initialized yet: nothing to resume */
+    Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
+    if (FAILED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview3))))
+        return -1;
+    const HRESULT hr = webview3->Resume();
+    return SUCCEEDED(hr) ? 0 : -static_cast<int>(hr);
+}
+
+int heliosview_webview_is_suspended(heliosview_webview_t* webview, int* out_suspended)
+{
+    if (!webview || !out_suspended)
+        return -1;
+    /* tracked state: true from the moment a suspend is requested, confirmed
+     * when the TrySuspend attempt completes; false again after resume() */
+    *out_suspended = webview->suspended ? 1 : 0;
+    return 0;
+}
+
+int heliosview_webview_set_background_color(heliosview_webview_t* webview,
+                                            uint8_t red, uint8_t green,
+                                            uint8_t blue, uint8_t alpha)
+{
+    if (!webview)
+        return -1;
+    /* the controller is UI-thread bound; follow the marshalling contract */
+    if (GetCurrentThreadId() != webview->ui_thread) {
+        hv_ui(webview, [wv = webview, red, green, blue, alpha] {
+            heliosview_webview_set_background_color(wv, red, green, blue, alpha);
+        });
+        return 0;
+    }
+    /* COREWEBVIEW2_COLOR stores channels as (alpha, red, green, blue) */
+    webview->background_color = COREWEBVIEW2_COLOR{alpha, red, green, blue};
+    if (!webview->controller.Get())
+        return 0; /* applied when the core becomes ready */
+    Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+    if (FAILED(webview->controller.As(&controller2)))
+        return -1;
+    return SUCCEEDED(controller2->put_DefaultBackgroundColor(webview->background_color))
+               ? 0 : -1;
+}
+
+int heliosview_webview_set_transparent_background(heliosview_webview_t* webview, int transparent)
+{
+    if (!webview)
+        return -1;
+    if (transparent)
+        return heliosview_webview_set_background_color(webview, 0, 0, 0, 0);
+    return heliosview_webview_set_background_color(webview, 255, 255, 255, 255);
 }
 
 /* ================= Native dialogs & system helpers ================= */

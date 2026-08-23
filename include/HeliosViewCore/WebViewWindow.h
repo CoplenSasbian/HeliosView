@@ -139,6 +139,57 @@ public:
         heliosview_webview_set_insets(m_webview, top, right, bottom, left);
     }
 
+    // ---- low-footprint mode (webview suspend / resume) ----
+
+    // Suspend the WebView (WebView2 TrySuspend): rendering stops and most of
+    // the browser process's resources are released while the page stays alive —
+    // the low-footprint mode for a hidden/background window. webviewResume()
+    // restores it where it left off. Typical use: webviewSuspend() when the
+    // window is hidden, webviewResume() when it is shown again.
+    // Completion is asynchronous: callback(error, suspended, userdata) fires on
+    // the UI thread (nullptr = fire-and-forget). suspended is 1 if the WebView
+    // actually suspended (TrySuspend can decline, e.g. while audio is playing).
+    // A suspend requested before initialization is recorded and applied when
+    // the core becomes ready.
+    void webviewSuspend(heliosview_webview_suspend_cb callback = nullptr, void* userdata = nullptr)
+    {
+        heliosview_webview_suspend(m_webview, callback, userdata);
+    }
+
+    // Resume a suspended WebView (synchronous; no-op if not suspended).
+    // Returns 0 = success.
+    int webviewResume() { return heliosview_webview_resume(m_webview); }
+
+    // Whether the WebView is currently suspended (true once a suspend request
+    // is made/completed; false after webviewResume()).
+    bool webviewIsSuspended() const
+    {
+        int s = 0;
+        heliosview_webview_is_suspended(m_webview, &s);
+        return s != 0;
+    }
+
+    // ---- webview background color ----
+
+    // Set the WebView's default background color (WebView2
+    // DefaultBackgroundColor): the color painted behind the page content
+    // (default: opaque white). (r, g, b, a) are 0-255; alpha 0 = transparent —
+    // the parent window's own content shows through the WebView (for the
+    // desktop to show through, the parent window must itself be transparent,
+    // e.g. a layered window). Applies immediately when initialized, otherwise
+    // when it becomes ready. Returns 0 = success.
+    int webviewSetBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        return heliosview_webview_set_background_color(m_webview, r, g, b, a);
+    }
+
+    // Convenience: make the WebView background transparent (true) or restore
+    // the default opaque white (false). Returns 0 = success.
+    int webviewSetTransparentBackground(bool transparent)
+    {
+        return heliosview_webview_set_transparent_background(m_webview, transparent ? 1 : 0);
+    }
+
     // Show (enabled) or hide the WebView2 status bar, which displays the target
     // URL of a hovered link at the bottom-left corner of the WebView. Disabled
     // by default. Applies immediately when initialized; otherwise when it

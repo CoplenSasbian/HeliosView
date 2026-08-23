@@ -775,6 +775,58 @@ HELIOSVIEW_API int heliosview_webview_navigate(heliosview_webview_t* webview, co
 
 HELIOSVIEW_API int heliosview_webview_navigate_html(heliosview_webview_t* webview, const char* html);
 
+/* ================= WebView low-footprint mode (suspend / resume) =================
+ *
+ * WebView2 TrySuspend / Resume: suspending stops rendering and releases most of
+ * the browser process's resources while the page stays alive; resume() restores
+ * it where it left off. The typical use: suspend when the window is hidden (or
+ * the app goes to the background), resume when it is shown again.
+ */
+
+/* Completion callback for heliosview_webview_suspend: error is 0 on success,
+ * suspended is 1 if the WebView actually suspended (TrySuspend can decline,
+ * e.g. while audio is playing). Runs on the UI thread. */
+typedef void (*heliosview_webview_suspend_cb)(int error, int suspended, void* userdata);
+
+/* Suspend the WebView (async; completion via callback, may be NULL for
+ * fire-and-forget). A request made before initialization is recorded and
+ * applied when the core becomes ready (after any queued navigation/scripts).
+ * 0 = success (request accepted), negative = error code. */
+HELIOSVIEW_API int heliosview_webview_suspend(heliosview_webview_t* webview,
+                                              heliosview_webview_suspend_cb callback,
+                                              void* userdata);
+
+/* Resume a suspended WebView (synchronous; no-op if not suspended).
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_webview_resume(heliosview_webview_t* webview);
+
+/* Read whether the WebView is currently suspended; 1/0 is written to
+ * out_suspended. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_webview_is_suspended(heliosview_webview_t* webview,
+                                                   int* out_suspended);
+
+/* ================= WebView background color =================
+ *
+ * WebView2 DefaultBackgroundColor (ICoreWebView2Controller2): the color the
+ * WebView paints behind the page content (default: opaque white). An alpha of
+ * 0 makes the background transparent — the parent window's own content shows
+ * through the WebView (to see the desktop through it, the parent window must
+ * itself be transparent, e.g. a layered window). Channels are (red, green,
+ * blue, alpha), each 0-255.
+ */
+
+/* Set the WebView's default background color. Applies immediately when the
+ * core is initialized, otherwise when it becomes ready. 0 = success,
+ * negative = error code. */
+HELIOSVIEW_API int heliosview_webview_set_background_color(heliosview_webview_t* webview,
+                                                           uint8_t red, uint8_t green,
+                                                           uint8_t blue, uint8_t alpha);
+
+/* Convenience: make the WebView background transparent (transparent != 0) or
+ * restore the default opaque white. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_webview_set_transparent_background(heliosview_webview_t* webview,
+                                                                 int transparent);
+
 /* ================= WebView native bindings (JS <-> native bridge) =================
  *
  * Each WebView runs a small shim (injected automatically) that exposes:
