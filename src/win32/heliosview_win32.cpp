@@ -2468,18 +2468,26 @@ void hv_bind_builtin(heliosview_webview_t* wv, const char* name,
 }
 
 /* Build the WebView2 environment options object from the creation-time struct;
- * returns nullptr when every field is at its default (CreateCoreWebView2-
+ * returns nullptr when no option field is set (CreateCoreWebView2-
  * EnvironmentWithOptions treats a null options object as the runtime default).
- * The SDK options class pins TargetCompatibleBrowserVersion to its own SDK
- * version, so it is always set explicitly (empty string = latest compatible,
- * the runtime default). */
+ *
+ * The user data folder is deliberately NOT part of this object: it is passed
+ * as its own CreateCoreWebView2EnvironmentWithOptions parameter (see
+ * heliosview_webview_create_ex), so a WebView created with only a user data
+ * folder keeps every runtime default — no options object is needed at all.
+ *
+ * TargetCompatibleBrowserVersion is only set when explicitly given: the SDK
+ * options class pins it to its own concrete product version by default, and
+ * the WebView2 runtime rejects an explicitly-set empty string ("Target-
+ * CompatibleBrowserVersion is invalid: version="), so an unset version must
+ * stay unset (the class default is then used — valid and effectively
+ * "the runtime's latest"). */
 Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions>
 hv_build_env_options(const heliosview_webview_env_opts_t* opts)
 {
     if (!opts)
         return nullptr;
     const bool has_any =
-        (opts->user_data_folder && *opts->user_data_folder) ||
         (opts->browser_executable_folder && *opts->browser_executable_folder) ||
         (opts->language && *opts->language) ||
         (opts->additional_browser_arguments && *opts->additional_browser_arguments) ||
@@ -2498,10 +2506,9 @@ hv_build_env_options(const heliosview_webview_env_opts_t* opts)
         eo->put_Language(utf8_to_wide(opts->language).c_str());
     if (opts->additional_browser_arguments && *opts->additional_browser_arguments)
         eo->put_AdditionalBrowserArguments(utf8_to_wide(opts->additional_browser_arguments).c_str());
-    eo->put_TargetCompatibleBrowserVersion(
-        (opts->target_compatible_browser_version && *opts->target_compatible_browser_version)
-            ? utf8_to_wide(opts->target_compatible_browser_version).c_str()
-            : L"");
+    if (opts->target_compatible_browser_version && *opts->target_compatible_browser_version)
+        eo->put_TargetCompatibleBrowserVersion(
+            utf8_to_wide(opts->target_compatible_browser_version).c_str());
     if (opts->allow_sso_with_os_primary_account)
         eo->put_AllowSingleSignOnUsingOSPrimaryAccount(TRUE);
     if (opts->exclusive_user_data_folder_access)
