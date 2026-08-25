@@ -764,7 +764,52 @@ HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_wind
 
 typedef struct heliosview_webview heliosview_webview_t;
 
-/* Create a WebView in the parent window's client area (async initialization). Returns NULL on failure. */
+/* Creation-time WebView2 environment options: the fields below are read when
+ * the WebView2 environment is created and cannot be changed afterwards, so they
+ * are only honored via heliosview_webview_create_ex. Zero-initialize the struct
+ * (or pass NULL) for the pure runtime defaults and set only what you need.
+ * String fields are UTF-8 and copied by the library; they may point at
+ * temporary storage. Boolean fields are 0/1: 0 (the zero-initialized default)
+ * = leave at the runtime default, 1 = enable. */
+typedef struct heliosview_webview_env_opts {
+    /* WebView2 browser data folder (profile, cache, cookies — the
+     * <exe>.WebView2 folder). UTF-8 absolute path; NULL/"" = the default next
+     * to the executable. Created by WebView2 if missing. */
+    const char* user_data_folder;
+    /* Folder of a fixed WebView2 runtime (the directory that holds
+     * msedgewebview2.exe). UTF-8; NULL = the system WebView2 Runtime. */
+    const char* browser_executable_folder;
+    /* Default page language / Accept-Language, e.g. "zh-CN". UTF-8;
+     * NULL = the system default. */
+    const char* language;
+    /* Extra Chromium command-line switches, e.g. "--disable-gpu". UTF-8;
+     * NULL = none. */
+    const char* additional_browser_arguments;
+    /* Target compatible browser version (used with browser_executable_folder),
+     * e.g. "95.*"; NULL/"" = the latest available on that runtime. UTF-8. */
+    const char* target_compatible_browser_version;
+    /* Use the OS primary account for single sign-on (0/1). */
+    int allow_sso_with_os_primary_account;
+    /* Exclusive access to the user data folder, so no other process can share
+     * it (0/1). */
+    int exclusive_user_data_folder_access;
+    /* Tracking prevention (on by default in WebView2): 1 = turn it off,
+     * 0 = keep it enabled. */
+    int disable_tracking_prevention;
+    /* Browser extensions (e.g. ad blockers) enabled in the WebView (0/1). */
+    int are_browser_extensions_enabled;
+} heliosview_webview_env_opts_t;
+
+/* Create a WebView in the parent window's client area (async initialization)
+ * with creation-time WebView2 environment options (see
+ * heliosview_webview_env_opts_t; NULL = all runtime defaults).
+ * Returns NULL on failure. */
+HELIOSVIEW_API heliosview_webview_t* heliosview_webview_create_ex(
+    heliosview_window_t* parent, const heliosview_webview_env_opts_t* opts);
+
+/* Create a WebView in the parent window's client area (async initialization;
+ * all WebView2 environment options at their runtime defaults).
+ * Returns NULL on failure. */
 HELIOSVIEW_API heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent);
 
 /* Destroy the WebView (must be called before destroying the parent window) */

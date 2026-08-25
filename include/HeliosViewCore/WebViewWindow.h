@@ -73,12 +73,28 @@ public:
     // Initialization is asynchronous: navigation requests made before it finishes
     // are queued automatically (the last one wins).
     // The window must stay alive until initialization completes (usually a few ms).
-    void createWebView()
+    // opts: creation-time WebView2 environment options (see
+    // heliosview_webview_env_opts_t). They are read when the WebView2 environment
+    // is created and cannot be changed afterwards, so pass them here at creation.
+    // Zero-initialize the struct and set only what you need (a zeroed struct or
+    // nullptr = the runtime defaults).
+    void createWebView(const heliosview_webview_env_opts_t& opts)
     {
         if (!m_webview) {
-            m_webview = heliosview_webview_create(nativeHandle());
+            m_webview = heliosview_webview_create_ex(nativeHandle(), &opts);
             wireWebViewEvents();
         }
+    }
+
+    // Convenience: create the WebView with just an explicit WebView2 user data
+    // folder (UTF-8 absolute path; nullptr/empty = the default next to the
+    // executable; the folder is created by WebView2 if missing). Everything
+    // else stays at the runtime default.
+    void createWebView(const char* user_data_folder = nullptr)
+    {
+        heliosview_webview_env_opts_t opts{};   /* zero = runtime defaults */
+        opts.user_data_folder = user_data_folder;
+        createWebView(opts);
     }
 
     // Navigate to a URL (queued automatically if the WebView is still initializing)

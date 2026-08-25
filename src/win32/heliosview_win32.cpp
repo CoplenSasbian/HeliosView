@@ -23,6 +23,7 @@
 
 #include <wrl/client.h> /* ComPtr */
 #include <WebView2.h>
+#include <WebView2EnvironmentOptions.h> /* CoreWebView2EnvironmentOptions (env options impl) */
 
 #include <algorithm>
 #include <atomic>
@@ -144,6 +145,11 @@ struct heliosview_webview {
     bool has_pending = false;   /* navigation queued before init completes (only the last one runs) */
     bool pending_html = false;  /* true = NavigateToString, false = Navigate */
     std::string pending_text;   /* UTF-8 */
+
+    /* WebView2 user data folder (UTF-16; empty = runtime default next to the
+     * executable). Set at creation via heliosview_webview_create_ex; read once
+     * when the WebView2 environment is created. */
+    std::wstring user_data_folder;
 
     /* virtual-host folder mappings queued before init completes (applied when
      * the core becomes ready, before the queued navigation runs) */
@@ -2461,9 +2467,57 @@ void hv_bind_builtin(heliosview_webview_t* wv, const char* name,
     wv->bindings[name] = hv_webview_binding{cb, nullptr, nullptr};
 }
 
+/* Build the WebView2 environment options object from the creation-time struct;
+ * returns nullptr when every field is at its default (CreateCoreWebView2-
+ * EnvironmentWithOptions treats a null options object as the runtime default).
+ * The SDK options class pins TargetCompatibleBrowserVersion to its own SDK
+ * version, so it is always set explicitly (empty string = latest compatible,
+ * the runtime default). */
+Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions>
+hv_build_env_options(const heliosview_webview_env_opts_t* opts)
+{
+    if (!opts)
+        return nullptr;
+    const bool has_any =
+        (opts->user_data_folder && *opts->user_data_folder) ||
+        (opts->browser_executable_folder && *opts->browser_executable_folder) ||
+        (opts->language && *opts->language) ||
+        (opts->additional_browser_arguments && *opts->additional_browser_arguments) ||
+        (opts->target_compatible_browser_version && *opts->target_compatible_browser_version) ||
+        opts->allow_sso_with_os_primary_account != 0 ||
+        opts->exclusive_user_data_folder_access != 0 ||
+        opts->disable_tracking_prevention != 0 ||
+        opts->are_browser_extensions_enabled != 0;
+    if (!has_any)
+        return nullptr;
+
+    auto eo = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+    if (!eo)
+        return nullptr;
+    if (opts->language && *opts->language)
+        eo->put_Language(utf8_to_wide(opts->language).c_str());
+    if (opts->additional_browser_arguments && *opts->additional_browser_arguments)
+        eo->put_AdditionalBrowserArguments(utf8_to_wide(opts->additional_browser_arguments).c_str());
+    eo->put_TargetCompatibleBrowserVersion(
+        (opts->target_compatible_browser_version && *opts->target_compatible_browser_version)
+            ? utf8_to_wide(opts->target_compatible_browser_version).c_str()
+            : L"");
+    if (opts->allow_sso_with_os_primary_account)
+        eo->put_AllowSingleSignOnUsingOSPrimaryAccount(TRUE);
+    if (opts->exclusive_user_data_folder_access)
+        eo->put_ExclusiveUserDataFolderAccess(TRUE);
+    if (opts->disable_tracking_prevention)
+        eo->put_EnableTrackingPrevention(FALSE);
+    if (opts->are_browser_extensions_enabled)
+        eo->put_AreBrowserExtensionsEnabled(TRUE);
+    Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions> base;
+    return SUCCEEDED(eo.As(&base)) ? base : nullptr;
+}
+
 } // namespace
 
-heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
+heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
+                                                   const heliosview_webview_env_opts_t* opts)
 {
     if (!parent || !parent->hwnd)
         return nullptr;
@@ -2483,6 +2537,14 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
     webview->parent = parent->hwnd;
     parent->webviews.push_back(webview); /* attached: WM_SIZE resizes it, WM_HV_WEBVIEW_MSG dispatches to it */
     webview->creating = true;
+    /* Creation-locked environment options: captured here (before the WebView2
+     * environment is created); they cannot be changed afterwards. */
+    if (opts && opts->user_data_folder && *opts->user_data_folder)
+        webview->user_data_folder = utf8_to_wide(opts->user_data_folder);
+    const std::wstring browser_folder =
+        (opts && opts->browser_executable_folder && *opts->browser_executable_folder)
+            ? utf8_to_wide(opts->browser_executable_folder)
+            : std::wstring();
 
     /* hv_alloc + Release: hand the initial reference to the API (Release to zero deletes it when done) */
     auto* env_handler = hv::hv_alloc<env_completed_handler>(
@@ -2748,7 +2810,12 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
             controller_handler->Release();
             return hr;
         });
-    const HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr, env_handler);
+    const Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions> env_options =
+        hv_build_env_options(opts);
+    const HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
+        browser_folder.empty() ? nullptr : browser_folder.c_str(),
+        webview->user_data_folder.empty() ? nullptr : webview->user_data_folder.c_str(),
+        env_options.Get(), env_handler);
     env_handler->Release();
 
     if (FAILED(hr)) {
@@ -2757,6 +2824,11 @@ heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
         return nullptr;
     }
     return webview;
+}
+
+heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
+{
+    return heliosview_webview_create_ex(parent, nullptr);
 }
 
 void heliosview_webview_destroy(heliosview_webview_t* webview)
