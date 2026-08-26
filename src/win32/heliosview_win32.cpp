@@ -2562,6 +2562,90 @@ hv_build_env_options(const heliosview_webview_env_opts_t* opts)
 
 } // namespace
 
+/* ================= WebView instance registry =================
+ *
+ * The thread-safe bridge calls (heliosview_webview_resolve / _reject /
+ * _broadcast) may be called from any thread — including AFTER the WebView was
+ * destroyed. Calling them with a destroyed WebView is the developer's mistake
+ * (the lifetime contract: destroy only when no asynchronous call is in flight),
+ * but it must fail with a clear message, not an opaque access violation.
+ *
+ * The registry tracks every WebView's liveness by POINTER VALUE only (the
+ * pointer is never dereferenced here, so a stale lookup is memory-safe):
+ *   - heliosview_webview_create_ex registers the instance as live;
+ *   - heliosview_webview_destroy transitions it to destroyed (and keeps the
+ *     entry, so the address still identifies the dead instance);
+ *   - resolve/reject/broadcast check the state BEFORE touching the instance:
+ *     a destroyed (or unknown) instance fails with the documented error code
+ *     HELIOSVIEW_WEBVIEW_DESTROYED (-3) and never dereferences the freed
+ *     pointer, so the misuse surfaces as a clear error instead of a crash.
+ * If a new WebView reuses the address of a destroyed one, create re-registers
+ * it as live and calls on the real instance keep working.
+ *
+ * Best-effort, like the contract itself: a genuinely concurrent
+ * (destroy while resolve is executing on another thread) call can still race —
+ * that is outside the API contract. The sequential misuse (resolve/reject/
+ * broadcast AFTER destroy) is caught reliably. */
+
+namespace {
+
+enum class hv_webview_slot_state : uint8_t { live, destroyed };
+
+struct hv_webview_slot {
+    heliosview_webview_t* wv; /* pointer value only — never dereferenced */
+    hv_webview_slot_state state;
+};
+
+std::mutex g_webview_registry_mutex;
+std::vector<hv_webview_slot> g_webview_registry;
+
+hv_webview_slot_state hv_webview_state(const heliosview_webview_t* wv)
+{
+    std::lock_guard<std::mutex> lock(g_webview_registry_mutex);
+    for (const auto& s : g_webview_registry)
+        if (s.wv == wv)
+            return s.state;
+    return hv_webview_slot_state::destroyed; /* unknown instance: treat as gone (defensive) */
+}
+
+void hv_webview_register_live(heliosview_webview_t* wv)
+{
+    std::lock_guard<std::mutex> lock(g_webview_registry_mutex);
+    for (auto& s : g_webview_registry) {
+        if (s.wv == wv) { /* address reused by a new instance: back to live */
+            s.state = hv_webview_slot_state::live;
+            return;
+        }
+    }
+    g_webview_registry.push_back({wv, hv_webview_slot_state::live});
+}
+
+/* Transition live -> destroyed. Returns true when the instance was live (the
+ * first destroy), false for a double destroy / never-registered instance. */
+bool hv_webview_mark_destroyed(heliosview_webview_t* wv)
+{
+    std::lock_guard<std::mutex> lock(g_webview_registry_mutex);
+    for (auto& s : g_webview_registry) {
+        if (s.wv == wv) {
+            if (s.state == hv_webview_slot_state::destroyed)
+                return false;
+            s.state = hv_webview_slot_state::destroyed;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Stale-instance error for a bridge call that targets a destroyed WebView.
+ * Returns a distinct, documented error code (HELIOSVIEW_WEBVIEW_DESTROYED,
+ * -3) instead of touching the freed instance: the caller can see exactly why
+ * the call failed (its instance was destroyed — e.g. destroyWebView ran while
+ * this asynchronous resolve/reject/broadcast was still in flight) and react,
+ * instead of the process crashing with an access violation. */
+constexpr int kWebviewDestroyedError = -3;
+
+} // namespace
+
 heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
                                                    const heliosview_webview_env_opts_t* opts)
 {
@@ -2869,6 +2953,7 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
         hv::hv_dealloc(webview);
         return nullptr;
     }
+    hv_webview_register_live(webview); /* track the instance for stale-call detection */
     return webview;
 }
 
@@ -2883,6 +2968,12 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
      * the WebView2 controller and the bound userdata dtors are released here. */
     if (!webview)
         return;
+    /* Transition the instance to destroyed FIRST: from here on, any late
+     * resolve/reject/broadcast on this pointer returns kWebviewDestroyedError
+     * instead of dereferencing freed memory. A second destroy is also caught
+     * here (the instance is no longer live): it becomes a safe no-op. */
+    if (!hv_webview_mark_destroyed(webview))
+        return; /* double destroy or never-registered instance: nothing to tear down */
     /* Detach from the owner window first, so queued WM_HV_WEBVIEW_MSG / WM_SIZE
      * messages no longer find it. If the window is already gone (the app
      * destroyed it before this WebView, contrary to the documented order), the
@@ -2996,6 +3087,12 @@ int heliosview_webview_resolve(heliosview_webview_t* webview, uint64_t call_id, 
 {
     if (!webview)
         return -1;
+    /* The WebView may already be destroyed (e.g. destroyWebView() ran while this
+     * asynchronous call was in flight). Detect that BEFORE touching the (freed)
+     * instance and return the documented stale-instance error instead of an
+     * access violation — the caller learns exactly what went wrong. */
+    if (hv_webview_state(webview) != hv_webview_slot_state::live)
+        return kWebviewDestroyedError;
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, call_id, result = std::string(result_json ? result_json : "null")] {
             heliosview_webview_resolve(wv, call_id, result.c_str());
@@ -3012,6 +3109,10 @@ int heliosview_webview_reject(heliosview_webview_t* webview, uint64_t call_id, c
 {
     if (!webview)
         return -1;
+    /* Same stale-instance guard as resolve: reject must never touch a destroyed
+     * WebView (returns kWebviewDestroyedError, see heliosview_webview_resolve). */
+    if (hv_webview_state(webview) != hv_webview_slot_state::live)
+        return kWebviewDestroyedError;
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, call_id, err = std::string(error_json ? error_json : "{}")] {
             heliosview_webview_reject(wv, call_id, err.c_str());
@@ -3066,6 +3167,11 @@ int heliosview_webview_broadcast(heliosview_webview_t* webview, const char* name
         return -1;
     if (!hv_valid_name(name))
         return -2; /* would break the wire header */
+    /* Same stale-instance guard as resolve: broadcast must never touch a
+     * destroyed WebView (returns kWebviewDestroyedError, see
+     * heliosview_webview_resolve). */
+    if (hv_webview_state(webview) != hv_webview_slot_state::live)
+        return kWebviewDestroyedError;
     if (GetCurrentThreadId() != webview->ui_thread) {
         hv_ui(webview, [wv = webview, name = std::string(name),
                         data = std::string(data_json ? data_json : "null")] {

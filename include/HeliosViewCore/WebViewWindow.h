@@ -97,6 +97,22 @@ public:
         createWebView(opts);
     }
 
+    // Destroy the WebView (releasing WebView2's controller, event handlers,
+    // bindings and subscriptions), keeping the window itself alive — the window
+    // stays usable and createWebView() can be called again later (e.g. to unload
+    // the page and reload a fresh WebView). Runs the userdata dtors of the
+    // registered bindings/subscriptions; navigation signals (navigationStarting,
+    // urlChanged, titleChanged, navigationCompleted) no longer fire after this.
+    // Idempotent: no-op when no WebView exists (also called automatically by the
+    // destructor). Message-loop thread, like the other WebView APIs.
+    void destroyWebView()
+    {
+        if (m_webview) {
+            heliosview_webview_destroy(m_webview);
+            m_webview = nullptr;
+        }
+    }
+
     // Navigate to a URL (queued automatically if the WebView is still initializing)
     void navigate(const char* url)
     {

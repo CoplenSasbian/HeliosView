@@ -158,6 +158,7 @@ button:active{background:#585b70}
   <div class='btnrow'><button onclick="run('win_move',{x:+sx.value,y:+sy.value})">Move</button></div>
   <div class='row'><span class='lab'>Op</span><input type='range' id='sop' min='0' max='100' step='5' value='100'><span class='val' id='sopv'>100</span></div>
   <div class='btnrow'>
+    <button onclick="run('win_recreate_webview',{})">Restart webview</button>
     <button onclick="run('win_minimize',{})">Minimize</button>
     <button onclick="run('win_maximize',{})">Maximize</button>
     <button onclick="run('win_restore',{})">Restore</button>
@@ -303,6 +304,18 @@ int main()
         emit(state, "webview-url-changed", {{"url", u}, {"newDocument", newDoc}});
     });
 
+    /* All page <-> native registrations (bindJson / subscribeJson) are made
+     * through this lambda so they can be re-applied after a WebView recreate:
+     * bindings/subscriptions live on the C-layer webview instance
+     * (heliosview_webview::bindings / ::subscriptions) and are dropped when
+     * destroyWebView() tears it down — the C++ wrapper does not keep a copy.
+     * setupBridge is invoked after the initial createWebView() and again inside
+     * the "Restart webview" handler. */
+    /* std::function instead of auto: the lambda body calls setupBridge()
+     * recursively (the Restart handler re-registers the bridge), which requires
+     * the name to be declared before the lambda that calls it. */
+    std::function<void(helios::WebViewWindow*)> setupBridge;
+    setupBridge = [&](helios::WebViewWindow* win) {
 
     /* ---- page -> native: BroadcastChannel("status") posts ---- */
     win->subscribeJson<BcMsg>("status", [&state](BcMsg m) {
@@ -310,7 +323,27 @@ int main()
     });
 
     /* ================= Window ================= */
-
+    bindAction(win, "win_recreate_webview", [&state, &setupBridge] {
+        /* destroyWebView() must not run from inside its own JS bridge call: the
+         * C layer's lifetime contract (heliosview.h) requires destroying a WebView
+         * only when no asynchronous call is in flight — this call's own
+         * resolve/reject would target the freed WebView. Defer the destroy+create
+         * to the next UI idle turn (the async handling is the caller's job).
+         * A recreated WebView comes back empty: its bindings/subscriptions died
+         * with the old instance (they are stored on the C-layer webview, not in
+         * the C++ wrapper), so setupBridge re-registers them and the demo page
+         * is loaded again. */
+        auto recreate = [&] {
+            state.win->destroyWebView();
+            state.win->createWebView();
+            setupBridge(state.win.get()); /* re-register the page <-> native bridge */
+            state.win->navigateHtml(state.page.c_str());
+        };
+        if (auto* app = helios::App::instance())
+            app->postTask(recreate);
+        else
+            recreate();
+    });
     bindAction(win, "win_minimize", [&state] { state.win->minimize(); });
     bindAction(win, "win_maximize", [&state] { state.win->maximize(); });
     bindAction(win, "win_restore", [&state] { state.win->restore(); });
@@ -575,6 +608,10 @@ int main()
             a->quit();
         co_return true;
     });
+    }; /* setupBridge */
+
+    /* register all page <-> native bindings on the initial webview */
+    setupBridge(win);
 
     // close button does NOT auto-close; connect to closeRequested and call close()
     win->closeRequested.connect([win] {

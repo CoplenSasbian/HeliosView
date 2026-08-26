@@ -946,11 +946,24 @@ HELIOSVIEW_API int heliosview_webview_bind(heliosview_webview_t* webview, const 
                                            heliosview_webview_bind_cb callback, void* userdata,
                                            heliosview_webview_userdata_dtor dtor);
 
-/* Resolve a pending JS Promise: result_json is any valid JSON value. Thread-safe. */
+/* The WebView instance no longer exists: returned by the thread-safe bridge
+ * calls (heliosview_webview_resolve / _reject / _broadcast) when the WebView
+ * was already destroyed — e.g. destroyWebView/heliosview_webview_destroy ran
+ * while this asynchronous call was still in flight. The call then never touches
+ * the freed instance. */
+#define HELIOSVIEW_WEBVIEW_DESTROYED (-3)
+
+/* Resolve a pending JS Promise: result_json is any valid JSON value. Thread-safe.
+ * Returns -3 (HELIOSVIEW_WEBVIEW_DESTROYED) when the WebView instance no longer
+ * exists — e.g. destroyWebView/heliosview_webview_destroy ran while this
+ * asynchronous call was still in flight. The call then never touches the freed
+ * instance, so the misuse fails with a clear error code instead of a crash. */
 HELIOSVIEW_API int heliosview_webview_resolve(heliosview_webview_t* webview,
                                               uint64_t call_id, const char* result_json);
 
-/* Reject a pending JS Promise: error_json is any valid JSON value. Thread-safe. */
+/* Reject a pending JS Promise: error_json is any valid JSON value. Thread-safe.
+ * Same stale-instance guard as resolve: returns -3 when the WebView was already
+ * destroyed. */
 HELIOSVIEW_API int heliosview_webview_reject(heliosview_webview_t* webview,
                                              uint64_t call_id, const char* error_json);
 
@@ -964,7 +977,9 @@ HELIOSVIEW_API int heliosview_webview_eval_async(heliosview_webview_t* webview, 
                                                  heliosview_webview_eval_cb callback, void* userdata);
 
 /* Broadcast a JSON value to the JS page's BroadcastChannel(name) instances; the
- * page receives it as a standard 'message' event. Thread-safe. */
+ * page receives it as a standard 'message' event. Thread-safe. Same
+ * stale-instance guard as resolve: returns -3 when the WebView was already
+ * destroyed. */
 HELIOSVIEW_API int heliosview_webview_broadcast(heliosview_webview_t* webview,
                                                 const char* name, const char* data_json);
 
