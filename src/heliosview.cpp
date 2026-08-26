@@ -46,10 +46,10 @@ int heliosview_poll(heliosview_event_t* out_event)
 {
     if (!out_event)
         return 0;
-    if (hv::g_queue.empty())
+    if (hv::tls_event_queue.empty())
         return 0;
-    *out_event = hv::g_queue.front();
-    hv::g_queue.pop_front();
+    *out_event = hv::tls_event_queue.front();
+    hv::tls_event_queue.pop_front();
     return 1;
 }
 
@@ -57,12 +57,12 @@ int heliosview_wait(heliosview_event_t* out_event)
 {
     if (!out_event)
         return 0;
-    while (hv::g_queue.empty() && !hv::g_quit.load())
+    while (hv::tls_event_queue.empty() && !hv::g_quit.load())
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    if (hv::g_queue.empty())
+    if (hv::tls_event_queue.empty())
         return -1; /* quit requested and queue empty */
-    *out_event = hv::g_queue.front();
-    hv::g_queue.pop_front();
+    *out_event = hv::tls_event_queue.front();
+    hv::tls_event_queue.pop_front();
     return 1;
 }
 
@@ -70,10 +70,11 @@ void heliosview_post_event(const heliosview_event_t* event)
 {
     if (!event)
         return;
-    heliosview_event_t copy = *event;
-    if (copy.timestamp_ms == 0)
-        copy.timestamp_ms = hv::now_ms();
-    hv::queue_push(copy);
+    /* Public entry: forward straight into the queue — queue_push makes exactly
+     * one copy (the deque slot) and normalizes timestamp_ms. No separate copy
+     * is needed here: the pointer is read only synchronously within this call,
+     * and the queued element never aliases caller storage. */
+    hv::queue_push(*event);
 }
 
 void heliosview_quit(void)

@@ -64,6 +64,7 @@ struct heliosview_window {
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
     bool resizable = true;    /* whether the user can resize / maximize the window */
     bool shown = false;       /* first show happened (the WINDOW_FIRST_SHOWN event fired once) */
+    heliosview_show_state_t last_state = HELIOSVIEW_SHOW_NORMAL; /* last reported show state (WM_SIZE transition tracking: RESTORED fires only on a real restore) */
     int32_t min_w = 0, min_h = 0; /* minimum client size (0 = unconstrained) */
     int32_t max_w = 0, max_h = 0; /* maximum client size (0 = unconstrained) */
     bool fullscreen = false;       /* whether the window covers the whole monitor */
@@ -676,7 +677,7 @@ const bool g_common_controls_initialized = [] {
 const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_event); }, true);
 
 /* Per-thread library state. The win32 implementation is single-UI-thread by
- * design — the same model as the cross-platform event queue (hv::g_queue in
+ * design — the same model as the cross-platform event queue (hv::tls_event_queue in
  * heliosview_internal.h): windows are created, looked up and destroyed on the
  * thread that runs the message loop, so the live-window count is thread-local
  * state, not a process-global variable. There is no id → window registry at
@@ -686,7 +687,7 @@ const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_eve
 struct hv_ui_state {
     int32_t window_count = 0; /* live windows on this thread (create/destroy) */
 };
-thread_local hv_ui_state g_ui_state;
+thread_local hv_ui_state tls_ui_state;
 
 /* Session-end (WM_QUERYENDSESSION) callback: runs synchronously on the message-loop
  * thread before shutdown/logoff; return non-zero to veto. */
@@ -721,7 +722,7 @@ heliosview_keycode_t map_vk(UINT vk)
     }
 }
 
-int default_native_convert(void* native_msg, heliosview_event_t* out)
+int default_native_convert(void* native_msg, uintptr_t window_id)
 {
     const MSG* msg = static_cast<const MSG*>(native_msg);
     const int64_t ts = hv::now_ms();
@@ -729,23 +730,36 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
     /* The owning window: tray / menu routing ids live on it (the registry). */
     auto* win = reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(msg->hwnd, GWLP_USERDATA));
 
+    /* Every event this message produces is queued via hv::queue_push — the shared
+     * primitive heliosview_post_event also routes through. One copy is inherent
+     * (the queue is a value container); the emitter owns its event, so that is
+     * the only copy on this path. window_id comes from the caller (the
+     * WndProc), so routing never depends on the converter knowing the platform
+     * handle. `emit` queues the scratch event and reports "handled". */
+    heliosview_event_t ev{};
+    ev.window_id = window_id;
+    auto emit = [&]() {
+        ev.timestamp_ms = ts;
+        hv::queue_push(ev);
+        return 1;
+    };
+
     /* Tray icon callback messages (posted by Shell_NotifyIcon when an icon is
      * clicked). The message id IS the per-window WM_APP callback id (>= WM_APP),
      * which also keys the registry entry. */
     if (win && msg->message >= WM_APP) {
         if (auto it = win->registry.find(msg->message); it != win->registry.end()) {
             switch (msg->lParam) {
-            case WM_LBUTTONUP:       out->type = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK; break;
-            case WM_LBUTTONDBLCLK:   out->type = HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK; break;
+            case WM_LBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK; break;
+            case WM_LBUTTONDBLCLK:   ev.type = HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK; break;
             case WM_RBUTTONUP:
-            case WM_CONTEXTMENU:     out->type = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK; break;
-            case WM_MBUTTONUP:       out->type = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK; break;
+            case WM_CONTEXTMENU:     ev.type = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK; break;
+            case WM_MBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK; break;
             default:
                 return 0; /* consume; not a click we translate */
             }
-            out->userdata = it->second;
-            out->timestamp_ms = ts;
-            return 1;
+            ev.userdata = it->second;
+            return emit();
         }
     }
 
@@ -778,16 +792,14 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         }
         if (!ud)
             return -1; /* not one of ours → hand off to DefWindowProc */
-        out->type = HELIOSVIEW_EVENT_MENU_SELECT;
-        out->menu_item = id;
-        out->userdata = ud;
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = HELIOSVIEW_EVENT_MENU_SELECT;
+        ev.menu_item = id;
+        ev.userdata = ud;
+        return emit();
     }
     case WM_CLOSE:
-        out->type = HELIOSVIEW_EVENT_WINDOW_CLOSE;
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = HELIOSVIEW_EVENT_WINDOW_CLOSE;
+        return emit();
     case WM_SIZE: {
         /* WebViews attached to this window resize along with it (honoring any
          * registered insets, so e.g. a title-bar strip stays uncovered) */
@@ -795,36 +807,65 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
             for (auto* wv : win->webviews)
                 if (auto* controller = wv->controller.Get())
                     controller->put_Bounds(hv_webview_rect(wv));
-        out->type = HELIOSVIEW_EVENT_WINDOW_RESIZE;
-        out->width = static_cast<int32_t>(LOWORD(msg->lParam));
-        out->height = static_cast<int32_t>(HIWORD(msg->lParam));
-        out->timestamp_ms = ts;
-        return 1;
+
+        /* WM_SIZE conflates several things and must be split by wParam:
+         *   - minimize / maximize / restore are STATE changes, reported as
+         *     discrete events (WINDOW_MINIMIZED / _MAXIMIZED / _RESTORED);
+         *   - SIZE_MAXHIDE / SIZE_MAXSHOW notify owned windows that ANOTHER
+         *     window was maximized/restored — not a change of this window;
+         *   - everything else (plain resizes, the end of a resize drag) is a
+         *     real size change (WINDOW_RESIZE).
+         * Restores arrive as SIZE_RESTORED — the same code path that closes
+         * every ordinary resize drag and fullscreen toggle — so last_state
+         * tracks the reported state and RESTORED fires only on a real
+         * transition from minimized/maximized. */
+        if (msg->wParam == SIZE_MAXHIDE || msg->wParam == SIZE_MAXSHOW)
+            return -1; /* another window's maximize/restore; not ours */
+
+        if (win) {
+            const heliosview_show_state_t new_state =
+                msg->wParam == SIZE_MINIMIZED ? HELIOSVIEW_SHOW_MINIMIZED
+                : msg->wParam == SIZE_MAXIMIZED ? HELIOSVIEW_SHOW_MAXIMIZED
+                : HELIOSVIEW_SHOW_NORMAL; /* SIZE_RESTORED */
+            if (new_state != win->last_state) {
+                win->last_state = new_state;
+                heliosview_event_t st{};
+                st.type = new_state == HELIOSVIEW_SHOW_MINIMIZED ? HELIOSVIEW_EVENT_WINDOW_MINIMIZED
+                        : new_state == HELIOSVIEW_SHOW_MAXIMIZED ? HELIOSVIEW_EVENT_WINDOW_MAXIMIZED
+                        : HELIOSVIEW_EVENT_WINDOW_RESTORED;
+                st.window_id = window_id;
+                st.timestamp_ms = ts;
+                hv::queue_push(st); /* queued before the RESIZE below */
+            }
+            if (msg->wParam == SIZE_MINIMIZED)
+                return 0; /* consumed: lParam is the icon size, no RESIZE event */
+        }
+
+        ev.type = HELIOSVIEW_EVENT_WINDOW_RESIZE;
+        ev.width = static_cast<int32_t>(LOWORD(msg->lParam));
+        ev.height = static_cast<int32_t>(HIWORD(msg->lParam));
+        return emit();
     }
-    case WM_ACTIVATE: {
+    case WM_ACTIVATE:
         /* WA_INACTIVE (0) = lost focus, everything else = gained focus */
-        out->type = LOWORD(msg->wParam) == WA_INACTIVE
+        ev.type = LOWORD(msg->wParam) == WA_INACTIVE
                         ? HELIOSVIEW_EVENT_WINDOW_BLUR
                         : HELIOSVIEW_EVENT_WINDOW_FOCUS;
-        out->timestamp_ms = ts;
-        return 1;
-    }
+        return emit();
     case WM_MOVE:
         /* final position (screen coords of the top-left corner) */
-        out->type = HELIOSVIEW_EVENT_WINDOW_MOVED;
-        out->x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
-        out->y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = HELIOSVIEW_EVENT_WINDOW_MOVED;
+        ev.x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
+        ev.y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
+        return emit();
     case WM_MOVING: {
         /* drag in progress: lParam points at the current window rect */
         const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
         if (rc) {
-            out->type = HELIOSVIEW_EVENT_WINDOW_MOVING;
-            out->x = rc->left;
-            out->y = rc->top;
-            out->timestamp_ms = ts;
-            return 1;
+            ev.type = HELIOSVIEW_EVENT_WINDOW_MOVING;
+            ev.x = rc->left;
+            ev.y = rc->top;
+            return emit();
         }
         return 0;
     }
@@ -832,62 +873,65 @@ int default_native_convert(void* native_msg, heliosview_event_t* out)
         /* resize drag in progress: lParam points at the proposed window rect */
         const RECT* rc = reinterpret_cast<const RECT*>(msg->lParam);
         if (rc) {
-            out->type = HELIOSVIEW_EVENT_WINDOW_SIZING;
-            out->width = rc->right - rc->left;
-            out->height = rc->bottom - rc->top;
-            out->timestamp_ms = ts;
-            return 1;
+            ev.type = HELIOSVIEW_EVENT_WINDOW_SIZING;
+            ev.width = rc->right - rc->left;
+            ev.height = rc->bottom - rc->top;
+            return emit();
         }
         return 0;
     }
     case WM_ENABLE:
         /* wParam: TRUE = being enabled, FALSE = being disabled */
-        out->type = msg->wParam ? HELIOSVIEW_EVENT_WINDOW_ENABLED
-                                : HELIOSVIEW_EVENT_WINDOW_DISABLED;
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = msg->wParam ? HELIOSVIEW_EVENT_WINDOW_ENABLED
+                              : HELIOSVIEW_EVENT_WINDOW_DISABLED;
+        return emit();
     case WM_SHOWWINDOW:
         /* The first show of a window produces a WINDOW_FIRST_SHOWN event (the
          * C++ wrapper maps it to Window::firstShown) — dispatched from the
          * message pipeline like every other window event, once per window.
-         * Later shows/hides (already shown, or wParam = FALSE while hiding)
-         * fall through to DefWindowProc. */
-        if (msg->wParam && win && !win->shown) {
+         * Every later show/hide (wParam = fShown) becomes WINDOW_SHOWN /
+         * WINDOW_HIDDEN — the WS_VISIBLE bit is exactly what these report.
+         * Minimize/maximize do NOT change WS_VISIBLE, so they never reach this
+         * branch: they are state changes reported from WM_SIZE. */
+        if (win && !win->shown) {
+            if (!msg->wParam)
+                return -1; /* hidden before ever shown (show() not called yet) */
             win->shown = true;
-            out->type = HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN;
-            out->timestamp_ms = ts;
-            return 1;
+            ev.type = HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN;
+            return emit();
+        }
+        if (win) {
+            ev.type = msg->wParam ? HELIOSVIEW_EVENT_WINDOW_SHOWN
+                                  : HELIOSVIEW_EVENT_WINDOW_HIDDEN;
+            return emit();
         }
         return -1;
     case WM_KEYDOWN:
         if ((msg->lParam & 0x40000000) != 0)
             return 0; /* filter keyboard auto-repeat */
-        out->type = HELIOSVIEW_EVENT_KEY_DOWN;
-        out->key = map_vk(static_cast<UINT>(msg->wParam));
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = HELIOSVIEW_EVENT_KEY_DOWN;
+        ev.key = map_vk(static_cast<UINT>(msg->wParam));
+        return emit();
     case WM_KEYUP:
-        out->type = HELIOSVIEW_EVENT_KEY_UP;
-        out->key = map_vk(static_cast<UINT>(msg->wParam));
-        out->timestamp_ms = ts;
-        return 1;
+        ev.type = HELIOSVIEW_EVENT_KEY_UP;
+        ev.key = map_vk(static_cast<UINT>(msg->wParam));
+        return emit();
     case WM_MOUSEMOVE:
-        out->type = HELIOSVIEW_EVENT_MOUSE_MOVE;
+        ev.type = HELIOSVIEW_EVENT_MOUSE_MOVE;
         break;
-    case WM_LBUTTONDOWN: out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; out->mouse_button = HELIOSVIEW_MOUSE_LEFT; break;
-    case WM_RBUTTONDOWN: out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; out->mouse_button = HELIOSVIEW_MOUSE_RIGHT; break;
-    case WM_MBUTTONDOWN: out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; out->mouse_button = HELIOSVIEW_MOUSE_MIDDLE; break;
-    case WM_LBUTTONUP:   out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   out->mouse_button = HELIOSVIEW_MOUSE_LEFT; break;
-    case WM_RBUTTONUP:   out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   out->mouse_button = HELIOSVIEW_MOUSE_RIGHT; break;
-    case WM_MBUTTONUP:   out->type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   out->mouse_button = HELIOSVIEW_MOUSE_MIDDLE; break;
+    case WM_LBUTTONDOWN: ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; ev.mouse_button = HELIOSVIEW_MOUSE_LEFT; break;
+    case WM_RBUTTONDOWN: ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; ev.mouse_button = HELIOSVIEW_MOUSE_RIGHT; break;
+    case WM_MBUTTONDOWN: ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN; ev.mouse_button = HELIOSVIEW_MOUSE_MIDDLE; break;
+    case WM_LBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_LEFT; break;
+    case WM_RBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_RIGHT; break;
+    case WM_MBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_MIDDLE; break;
     default:
         return -1; /* unhandled → hand off to DefWindowProc */
     }
 
-    out->x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
-    out->y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
-    out->timestamp_ms = ts;
-    return 1;
+    ev.x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
+    ev.y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
+    return emit();
 }
 
 /* ================= Title-bar strip metric =================
@@ -949,7 +993,7 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
      * decrements the count before DestroyWindow, so WM_DESTROY sees the
      * remaining live windows.) */
     if (message == WM_DESTROY) {
-        if (g_ui_state.window_count > 0)
+        if (tls_ui_state.window_count > 0)
             return 0; /* more windows alive: swallow DefWindowProc's WM_QUIT */
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
@@ -1072,26 +1116,21 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
     /* The library's built-in conversion always runs first (tray/menu/webview
      * side effects, window/keyboard/mouse). If it does not handle the message
      * (-1), try each registered converter in order; the first that returns 1
-     * (queued) or 0 (consumed) wins. Otherwise fall through to DefWindowProc. */
-    heliosview_event_t event{};
-    int handled = default_native_convert(&native, &event);
+     * (posted events via heliosview_post_event) or 0 (consumed) wins.
+     * Otherwise fall through to DefWindowProc. The native handle IS the
+     * window_id: it is passed to every converter, which stamps it on the
+     * events it posts, so routing needs no id registry here. */
+    const uintptr_t window_id = reinterpret_cast<uintptr_t>(hwnd);
+    int handled = default_native_convert(&native, window_id);
     if (handled == -1) {
         for (const auto& [id, h] : hv::g_native_handlers) {
             (void)id;
             if (!h)
                 continue;
-            handled = h(&native, &event);
+            handled = h(&native, window_id);
             if (handled != -1)
                 break;
         }
-    }
-
-    if (handled == 1) {
-        /* The native handle IS the window id: events carry it, and the consumer
-         * looks the window back up via heliosview_window_from_id (IsWindow +
-         * GWLP_USERDATA), so no id registry is involved. */
-        event.window_id = reinterpret_cast<uintptr_t>(hwnd);
-        hv::queue_push(event);
     }
     return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
 }
@@ -1222,7 +1261,7 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
 
-    g_ui_state.window_count++;
+    tls_ui_state.window_count++;
     return window;
 }
 
@@ -1259,14 +1298,14 @@ heliosview_window_t* heliosview_window_from_id(uintptr_t window_id)
 
 int heliosview_window_count(void)
 {
-    return static_cast<int>(g_ui_state.window_count);
+    return static_cast<int>(tls_ui_state.window_count);
 }
 
 void heliosview_window_destroy(heliosview_window_t* window)
 {
     if (!window)
         return;
-    g_ui_state.window_count--;
+    tls_ui_state.window_count--;
     if (window->hwnd) {
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */

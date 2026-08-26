@@ -18,6 +18,10 @@
 
 namespace hv {
 
+/* Naming convention: g_* = process/loop-wide state (shared; use atomics where
+ * several threads may touch it); tls_* = thread-local state — each thread has
+ * its own instance (e.g. the event queue lives per-thread by design). */
+
 /* ---------- Configurable allocator ----------
  * The library routes its object allocations through this. Defaults to the
  * standard allocator (alloc/free null → malloc/free). Set via the public
@@ -54,12 +58,13 @@ void hv_dealloc(T* p)
  * Cross-thread event/window access is not supported, so the queue lives on the thread
  * that runs the loop; the WndProc (same thread) and post_event both touch this one. ---------- */
 
-inline thread_local std::deque<heliosview_event_t> g_queue;
+inline thread_local std::deque<heliosview_event_t> tls_event_queue;
 inline std::atomic<bool> g_quit{false}; /* process/loop-wide control flag; may be set from any thread */
 
 /* Native-message -> event converters. Registered handlers are tried in id order
  * after the library's built-in default_native_convert (which always runs first);
- * the first converter to return 1 (queued) or 0 (consumed) wins. Only ever touched
+ * the first converter to return 1 (handled: it posted events via
+ * heliosview_post_event) or 0 (consumed, no events) wins. Only ever touched
  * on the message-loop thread (add/remove happen during app setup, iteration in the
  * WndProc), so no locking is needed. */
 inline std::atomic<uint32_t> g_next_handler_id{1};
@@ -78,7 +83,13 @@ inline int64_t now_ms()
 
 inline void queue_push(const heliosview_event_t& event)
 {
-    g_queue.push_back(event);
+    /* The deque stores events by value: this emplace IS the one copy every
+     * event pays — public posting and internal emission both land here, and
+     * neither does a copy before this point. */
+    const bool fill_timestamp = event.timestamp_ms == 0;
+    heliosview_event_t& slot = tls_event_queue.emplace_back(event); /* one copy: caller/emitter → queue */
+    if (fill_timestamp)
+        slot.timestamp_ms = now_ms(); /* the element just inserted; no back() lookup */
     if (g_platform_wake)
         g_platform_wake();
 }

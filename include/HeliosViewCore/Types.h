@@ -29,6 +29,11 @@ enum class EventType : int32_t {
     WindowEnabled = HELIOSVIEW_EVENT_WINDOW_ENABLED,
     WindowDisabled = HELIOSVIEW_EVENT_WINDOW_DISABLED,
     WindowFirstShown = HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN,  // native window first displayed (fires once; Window::event maps it to the firstShown signal)
+    WindowMinimized = HELIOSVIEW_EVENT_WINDOW_MINIMIZED,     // window minimized (no resize event is emitted for it)
+    WindowMaximized = HELIOSVIEW_EVENT_WINDOW_MAXIMIZED,     // window maximized (a resize event follows)
+    WindowRestored = HELIOSVIEW_EVENT_WINDOW_RESTORED,       // window restored to normal from minimized/maximized (a resize event follows)
+    WindowShown = HELIOSVIEW_EVENT_WINDOW_SHOWN,             // window became visible (show/hide only)
+    WindowHidden = HELIOSVIEW_EVENT_WINDOW_HIDDEN,           // window became hidden (minimize is NOT a hide)
     KeyDown = HELIOSVIEW_EVENT_KEY_DOWN,
     KeyUp = HELIOSVIEW_EVENT_KEY_UP,
     MouseMove = HELIOSVIEW_EVENT_MOUSE_MOVE,

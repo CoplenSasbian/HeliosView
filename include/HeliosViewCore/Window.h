@@ -313,6 +313,11 @@ public:
     Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
     Signal<int32_t, int32_t> moving;                       // move drag in progress (x, y)
     Signal<int32_t, int32_t> sizing;                       // resize drag in progress (w, h)
+    Signal<> minimized;                                    // window was minimized (no resized event is emitted for it)
+    Signal<> maximized;                                    // window was maximized (resized fires too, with the new size)
+    Signal<> restored;                                     // window restored to normal from minimized/maximized (resized fires too); plain resizing / fullscreen toggles don't fire it
+    Signal<> shown;                                        // window became visible again (after firstShown; show/hide only)
+    Signal<> hidden;                                       // window became hidden (minimize is NOT a hide)
     Signal<> focused;                                      // window gained focus (activated)
     Signal<> blurred;                                      // window lost focus (deactivated)
     Signal<bool> enabledChanged;                           // enabled (true) / disabled (false)
@@ -358,6 +363,21 @@ public:
             return true;
         case EventType::WindowFirstShown:
             firstShown();   /* the native window was displayed for the first time */
+            return true;
+        case EventType::WindowMinimized:
+            minimized();
+            return true;
+        case EventType::WindowMaximized:
+            maximized();
+            return true;
+        case EventType::WindowRestored:
+            restored();
+            return true;
+        case EventType::WindowShown:
+            shown();
+            return true;
+        case EventType::WindowHidden:
+            hidden();
             return true;
         case EventType::KeyDown:
             keyPressed(e.key);

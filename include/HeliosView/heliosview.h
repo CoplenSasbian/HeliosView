@@ -122,7 +122,7 @@ HELIOSVIEW_API size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_l
 typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_QUIT = 1,          /* Quit request (posted via heliosview_post_event) */
     HELIOSVIEW_EVENT_WINDOW_CLOSE,      /* Window close request (user clicked X) */
-    HELIOSVIEW_EVENT_WINDOW_RESIZE,
+    HELIOSVIEW_EVENT_WINDOW_RESIZE,     /* Window resized (width/height); NOT emitted when minimized (that is WINDOW_MINIMIZED) */
     HELIOSVIEW_EVENT_WINDOW_MOVED,      /* Window moved (x/y = new top-left position) */
     HELIOSVIEW_EVENT_WINDOW_MOVING,     /* Drag in progress (x/y = current position) */
     HELIOSVIEW_EVENT_WINDOW_SIZING,     /* Resize drag in progress (width/height) */
@@ -140,7 +140,12 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK,       /* tray icon right click (context menu) */
     HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK,      /* tray icon middle click */
     HELIOSVIEW_EVENT_MENU_SELECT,            /* a menu item was chosen (menu_item = item id) */
-    HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN      /* window first actually shown (window_id = native handle) — the C++ wrapper maps it to Window::firstShown */
+    HELIOSVIEW_EVENT_WINDOW_FIRST_SHOWN,      /* window first actually shown (window_id = native handle) — the C++ wrapper maps it to Window::firstShown */
+    HELIOSVIEW_EVENT_WINDOW_MINIMIZED,         /* window minimized. No RESIZE is emitted: the OS reports the icon size, which is NOT a real size. */
+    HELIOSVIEW_EVENT_WINDOW_MAXIMIZED,         /* window maximized. A RESIZE with the new client size follows. */
+    HELIOSVIEW_EVENT_WINDOW_RESTORED,          /* window restored to normal from minimized/maximized. A RESIZE with the real size follows; plain resizes and fullscreen toggles never produce this. */
+    HELIOSVIEW_EVENT_WINDOW_SHOWN,             /* window became visible (show/hide only; the first show stays WINDOW_FIRST_SHOWN) */
+    HELIOSVIEW_EVENT_WINDOW_HIDDEN,            /* window became hidden. Minimize is NOT a hide: a minimized window keeps WS_VISIBLE, so it reports WINDOW_MINIMIZED instead. */
 } heliosview_event_type_t;
 
 /* Platform-independent keycodes (native keycodes are mapped in the C layer) */
@@ -209,6 +214,8 @@ typedef enum heliosview_mouse_button {
     HELIOSVIEW_MOUSE_MIDDLE
 } heliosview_mouse_button_t;
 
+
+
 /* Event: flat POD, safe to pass across the DLL boundary. The struct layout is
  * fixed for the 1.x series: new event data is added only at a major version. */
 typedef struct heliosview_event {
@@ -254,14 +261,18 @@ HELIOSVIEW_API void heliosview_wake_loop(void);
 
 /* Conversion delegate: native_msg is a platform native message pointer, valid
  * only during the callback; on Windows it is const MSG* (callback runs on the
- * message-dispatch thread). Return value:
- *   1  -> converted to an event written to out_event (queued)
- *   0  -> consumed, not queued
+ * message-dispatch thread). window_id is the native window handle of the
+ * message's window (0 = none; the HWND on Windows) — set it on every event you
+ * post, so the event routes back to that window (see heliosview_event_t).
+ * Return value:
+ *   1  -> handled: the delegate posted the resulting event(s) via
+ *         heliosview_post_event (post only when returning 1)
+ *   0  -> consumed, no events posted
  *  -1  -> not handled; the next converter is tried
  * The library's built-in conversion always runs first; registered converters are
  * then tried in registration order, and the first that returns 1 or 0 wins. If no
  * converter returns 1 or 0, the message falls through to the platform (DefWindowProc). */
-typedef int (*heliosview_native_handler_fn)(void* native_msg, heliosview_event_t* out_event);
+typedef int (*heliosview_native_handler_fn)(void* native_msg, uintptr_t window_id);
 
 /* Register a converter (see above). Returns an id used by
  * heliosview_remove_native_handler (0 = failure, e.g. null handler). */
