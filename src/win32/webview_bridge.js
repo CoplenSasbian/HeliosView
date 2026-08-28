@@ -1,9 +1,10 @@
 // HeliosView bridge shim — injected into every document via
-// AddScriptToExecuteOnDocumentCreated (embedded into HeliosView.dll from this
-// file with C++23 #embed, see kWebView2BridgeScript in heliosview_win32.cpp).
+// AddScriptToExecuteOnDocumentCreated. CMake wraps this file into a generated
+// webview_bridge.inc (kWebView2BridgeScript), which heliosview_webview2_win32.cpp
+// #includes (C++23 #embed is not supported by MSVC yet).
 //
 // Wire format (shared with the C side — see the comment near hv_valid_name in
-// heliosview_win32.cpp): a "HV" magic + tab-separated kind and fields, then a
+// heliosview_webview2_win32.cpp): a "HV" magic + tab-separated kind and fields, then a
 // "\r\n\r\n" separator (HTTP-style) and a payload passed through verbatim.
 // Registered names are C identifiers, so the header fields never contain a tab
 // or CR/LF; the payload (JSON text for args/result/data, or a native error
@@ -127,8 +128,16 @@
         'app-region:no-drag;-webkit-app-region:no-drag;';
       function refreshMax() {
         window.helios.call('__hv.state').then(function (s) {
+          if (!s) return;
+          /* Pick the caption-glyph font by the real OS build (exposed natively):
+             Windows 11 (build >= 22000) renders the title-bar buttons with
+             Segoe Fluent Icons, Windows 10 with Segoe MDL2 Assets — so the
+             buttons match the system title bar on either OS. */
+          st.fontFamily = (typeof s.osBuild === 'number' && s.osBuild >= 22000)
+            ? '"Segoe Fluent Icons","Segoe MDL2 Assets"'
+            : '"Segoe MDL2 Assets"';
           var b = host._maxBtn;
-          if (!b || !s) return;
+          if (!b) return;
           b.textContent = s.maximized ? G.restore : G.max;
           /* maximize is disabled while the window cannot be maximized (e.g.
              resizing was locked via setResizable); restore always stays

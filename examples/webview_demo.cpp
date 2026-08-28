@@ -85,11 +85,23 @@ int main()
     // Frameless: a fully frameless window (no system title bar). The page's
     // title bar is the injected <helios-window-title-bar> web component - it
     // auto-registers as the drag region (built-in __hv.drag) and hosts
-    // <helios-window-controls> for the buttons (built-in __hv.control / __hv.state).
+    // <helios-window-controls> for the caption buttons (built-in __hv.control /
+    // __hv.state — the page draws them, so the state glyph stays in sync).
+    //
+    // Alternative: let WebView2 draw the caption buttons instead (Window
+    // Controls Overlay). Opt in with setWindowControlsOverlay(true) + a
+    // matching setWindowControlsBackgroundColor, and REMOVE
+    // <helios-window-controls> from the page. Note: WebView2's overlay only
+    // updates its maximize/restore glyph for state changes it initiates itself
+    // (experimental API limitation) — externally-driven maximizes (Win+Up,
+    // taskbar, snap) leave the glyph stale, which is why the page-drawn
+    // buttons are the demo default.
     auto window = std::make_shared<helios::WebViewWindow>(
         900, 640, "HeliosView WebView Demo", helios::WindowStyle::Frameless);
     window->show();
     window->createWebView();
+    // window->setWindowControlsOverlay(true); /* WebView2 draws the caption buttons (see comment above) */
+    // window->setWindowControlsBackgroundColor(0x24, 0x24, 0x3A, 255);
 
     /* ---- auto-bound native functions (Boost.JSON deserializes arguments, serializes return values) ---- */
 
@@ -184,13 +196,15 @@ int main()
         // it drags the window through WebView2's native app-region:drag (the
         // library enables IsNonClientRegionSupportEnabled - verified that this
         // is the active drag mechanism, not WM_NCHITTEST, which a full-bleed
-        // WebView swallows). <helios-window-controls> inside it renders the
-        // min/max/close buttons.
+        // WebView swallows). <helios-window-controls> renders the min/max/close
+        // buttons in the page (it opts its own area out of the drag region with
+        // app-region:no-drag, so clicking them does not start a drag). The
+        // right padding keeps the title clear of the buttons.
         "<helios-window-title-bar style='padding:0 16px;padding-right:150px;"
         "box-sizing:border-box;background:#24243a;border-bottom:1px solid #3a3a55;"
-        "color:#cdd6f4;white-space:nowrap;overflow:hidden'>"
+        "color:#cdd6f4;white-space:nowrap;overflow:hidden;position:relative'>"
         "<span style='font-weight:600;font-size:14px'>HeliosView WebView Bridge Demo (Boost.JSON auto-binding)</span>"
-        "<helios-window-controls></helios-window-controls>"
+        "<helios-window-controls/>"
         "</helios-window-title-bar>"
         "<div style='padding:12px;flex:0 0 auto'>"
         "<div style='display:flex;gap:8px;flex-wrap:wrap'>"

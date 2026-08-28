@@ -16,6 +16,7 @@
  *   win.show();
  */
 
+#include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Window.h>
 
 #include <cstdint>
@@ -248,6 +249,29 @@ public:
         return heliosview_webview_set_devtools(m_webview, enabled ? 1 : 0);
     }
 
+    // Enable (enabled) or disable WebView2's built-in window controls overlay
+    // (the min/max/restore/close buttons WebView2 draws over the page's
+    // top-right corner). Disabled by default — apps that render their own
+    // title-bar buttons (e.g. the injected <helios-window-controls> component)
+    // leave it off. Applies immediately when initialized; when called during
+    // initialization it is applied when the WebView becomes ready. Requires the
+    // experimental WebView2 interface; on runtimes without it the call returns
+    // negative and has no effect. Returns 0 = success, negative = error.
+    int setWindowControlsOverlay(bool enabled)
+    {
+        return heliosview_webview_set_window_controls_overlay(m_webview, enabled ? 1 : 0);
+    }
+
+    // Set the window controls overlay's background color (r, g, b, a, 0-255).
+    // Default: fully transparent (a = 0) — the page's own title bar shows
+    // through and the buttons float over it. Applies immediately when the
+    // overlay exists; when called before it is enabled the color is applied
+    // when the overlay is created. Returns 0 = success, negative = error.
+    int setWindowControlsBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        return heliosview_webview_set_window_controls_background_color(m_webview, r, g, b, a);
+    }
+
     // ---- local resources ----
 
     // Map a local folder to a virtual host name so the page can load files from
@@ -280,8 +304,8 @@ public:
     {
         const int rc = heliosview_webview_bind(m_webview, name, callback, userdata, userdata_dtor);
         if (rc != 0)
-            throw std::invalid_argument(
-                "heliosview bind: invalid webview or name (names must be C identifiers, no dots)");
+            throwLastError<std::invalid_argument>(
+                "heliosview bind"); /* invalid webview/name: the C layer recorded the reason */
     }
 
     // Boost.JSON auto-binding (declared here, defined in <HeliosViewCore/WebViewJson.h>):
@@ -348,8 +372,8 @@ public:
     {
         const int rc = heliosview_webview_subscribe(m_webview, name, callback, userdata, userdata_dtor);
         if (rc != 0)
-            throw std::invalid_argument(
-                "heliosview subscribe: invalid webview or name (names must be C identifiers, no dots)");
+            throwLastError<std::invalid_argument>(
+                "heliosview subscribe"); /* invalid webview/name: the C layer recorded the reason */
     }
 
     // Boost.JSON auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):

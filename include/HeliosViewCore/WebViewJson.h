@@ -50,6 +50,7 @@
  * and keep any Async the handlers use alive for at least as long as the bindings.
  */
 
+#include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/WebViewWindow.h>
 
@@ -346,8 +347,7 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
                                            [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
     if (rc != 0) {
         detail::pmrRelease(box); /* the C layer never took ownership on failure */
-        throw std::invalid_argument(
-            "bindJson: invalid webview or name (names must be C identifiers, no dots)");
+        throwLastError<std::invalid_argument>("bindJson");
     }
 }
 
@@ -413,8 +413,7 @@ void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
                                                 [](void* userdata) { detail::pmrRelease(static_cast<detail::pmr_box<Fn>*>(userdata)); });
     if (rc != 0) {
         detail::pmrRelease(box); /* the C layer never took ownership on failure */
-        throw std::invalid_argument(
-            "subscribeJson: invalid webview or name (names must be C identifiers, no dots)");
+        throwLastError<std::invalid_argument>("subscribeJson");
     }
 }
 

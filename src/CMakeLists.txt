@@ -7,13 +7,16 @@ add_library(HeliosView SHARED
 # porting to another platform only requires rewriting these files.
 if(WIN32)
     target_sources(HeliosView PRIVATE
-        win32/heliosview_win32.cpp      # windows / message loop / native message translation / WebView2 / dialogs
+            win32/heliosview_window_win32.cpp      # windows / message loop / native message translation / dialogs
+        win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon, routing id via window subclass)
+        win32/heliosview_menu_win32.cpp # popup menus (heliosview_menu_* API; CreatePopupMenu / TrackPopupMenu, routing id via window subclass)
+        win32/heliosview_webview2_win32.cpp # WebView2 backend (heliosview_webview_* API; self-manages via parent-window subclass)
         win32/heliosview_notify_win32.cpp # OS toast notifications (WinRT via the Windows SDK)
         # Common-Controls v6 manifest: CMake passes .manifest sources to the MSVC
         # linker (/MANIFESTINPUT) so it is embedded into HeliosView.dll. The loader
         # does not merge a DLL's manifest into the host process, so the library
         # additionally activates it as a process/thread activation context at load
-        # (see heliosview_win32.cpp) - consumers get themed message boxes and
+        # (see heliosview_window_win32.cpp) - consumers get themed message boxes and
         # common controls without an exe-side manifest.
         win32/hv_common_controls.manifest
     )
@@ -33,7 +36,7 @@ if(WIN32)
     )
 
     # The WebView bridge shim (win32/webview_bridge.js) is embedded into the DLL
-    # as a raw-string literal (heliosview_win32.cpp #includes webview_bridge.inc).
+    # as a raw-string literal (heliosview_window_win32.cpp #includes webview_bridge.inc).
     # C++23 #embed is not supported by MSVC yet, so a small CMake script wraps the
     # .js into the .inc; the .inc is regenerated whenever the .js changes.
     set(HELIOSVIEW_BRIDGE_JS "${CMAKE_CURRENT_SOURCE_DIR}/win32/webview_bridge.js")

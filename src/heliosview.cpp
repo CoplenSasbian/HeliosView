@@ -281,8 +281,7 @@ size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_len, char* out_u
     if (wide_len == (size_t)-1)
         wide_len = std::wcslen(wide);
 
-    /* UTF-8
-     c ount, including the terminating NUL. */
+    /* UTF-8 byte count, including the terminating NUL. */
     size_t bytes = 1;
     for (size_t i = 0; i < wide_len;) {
         const uint32_t cp = wide_next(wide, wide_len, &i);
@@ -300,4 +299,31 @@ size_t heliosview_wide_to_utf8(const wchar_t* wide, size_t wide_len, char* out_u
     }
     out_utf8[o] = '\0';
     return o;
+}
+
+/* ================= Error reporting (last-error, platform-independent) =================
+ * The thread-local (code, message) pair is set by hv_fail at every failing
+ * public-API call site (see heliosview_internal.h; win32 backends use the
+ * hv_fail_win32 / hv_fail_hresult wrappers to append the platform message);
+ * these two read it back. The code follows the header's error-code space
+ * ("Error reporting" in heliosview.h). */
+
+int heliosview_last_error(void)
+{
+    return g_hv_last_error_code;
+}
+
+int heliosview_last_error_string(char* buf, size_t size)
+{
+    if (!buf || size == 0)
+        return -1;
+    const size_t n = g_hv_last_error_message.size();
+    if (n < size) {
+        std::memcpy(buf, g_hv_last_error_message.data(), n);
+        buf[n] = '\0';
+    } else {
+        std::memcpy(buf, g_hv_last_error_message.data(), size - 1);
+        buf[size - 1] = '\0';
+    }
+    return 0;
 }

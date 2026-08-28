@@ -35,7 +35,6 @@
  *
  *   The exceptions (safe from any thread):
  *     - heliosview_post_event / heliosview_wake_loop / heliosview_quit
- *     - heliosview_webview_resolve / _reject / _broadcast (marshalled internally)
  *     - heliosview_notification_init / _show (OS toasts are thread-agnostic)
  *     - heliosview_free (and the allocator, set before any other call)
  *
@@ -59,6 +58,53 @@ extern "C" {
 /* ================= Version ================= */
 
 HELIOSVIEW_API const char* heliosview_version(void);
+
+/* ================= Error reporting =================
+ *
+ * Return convention (every function): 0 = success, < 0 = an error code,
+ * > 0 = a payload / count — with one exception below, the negated HRESULT
+ * form, which is a positive number:
+ *
+ *     -1   generic failure — invalid/missing argument, an OS/COM call failed
+ *          with no better code available, or the function was called on the
+ *          wrong thread
+ *     -2   invalid name: not a C identifier ([A-Za-z_][A-Za-z0-9_]*) — used by
+ *          the WebView bind / subscribe / broadcast name checks
+ *     -3   HELIOSVIEW_WEBVIEW_DESTROYED: the WebView instance was already
+ *          destroyed (see the WebView section)
+ *     a small negative value (e.g. -5)  — the negated Win32 GetLastError code
+ *     a large positive value (e.g. 2147467259) — the negated HRESULT: the
+ *       HRESULT with its sign flipped, as returned by WebView2 / DWM / COM
+ *       failures (E_FAIL 0x80004005 surfaces as 2147467259).
+ *
+ * Async completion callbacks (error != 0) use the same code space.
+ *
+ * The reserved codes -1 / -2 / -3 take precedence in meaning; a negated Win32
+ * code with the same numeric value (e.g. Win32 error 2 → -2) is not
+ * distinguishable by number alone — read heliosview_last_error_string for the
+ * actual reason.
+ *
+ * For the reason behind the most recent failure on this thread, use
+ * heliosview_last_error / heliosview_last_error_string — every failing call
+ * records a descriptive message at the failure site.
+ * Note: heliosview_wait / heliosview_poll and the folder/file-picker functions
+ * return small tri-state results (1/0) that are NOT error codes — their
+ * meaning is documented per function.
+ */
+
+/* The error code recorded by the most recent failing library call on this
+ * thread (0 = no error recorded). Meaningful only immediately after a call
+ * returned < 0 (or a NULL handle). */
+HELIOSVIEW_API int heliosview_last_error(void);
+
+/* The failure-site message recorded for heliosview_last_error: write it into
+ * buf (always NUL-terminated, truncated to fit `size`; empty string when no
+ * error was recorded). It answers "why did the last call fail" (the context at
+ * the failure point, e.g. which operation / argument). The error code itself
+ * is available via heliosview_last_error; decoding it to a platform message is
+ * left to the caller (e.g. FormatMessage on Windows).
+ * 0 = success, negative = invalid arguments (buf == NULL or size == 0). */
+HELIOSVIEW_API int heliosview_last_error_string(char* buf, size_t size);
 
 /* ================= Memory allocation =================
  *
@@ -412,6 +458,10 @@ HELIOSVIEW_API int heliosview_window_toggle_maximize(heliosview_window_t* window
  * NORMAL windows can still be minimized. 0 = success. */
 HELIOSVIEW_API int heliosview_window_set_resizable(heliosview_window_t* window, int resizable);
 
+/* Whether the window can currently be resized / maximized (the complement of
+ * set_resizable). 1 = resizable, 0 = not resizable / not created. */
+HELIOSVIEW_API int heliosview_window_is_resizable(const heliosview_window_t* window);
+
 /* Register a client-area drag region: a mouse-down + drag inside any registered
  * region moves the window (like a title bar; WM_NCHITTEST -> HTCAPTION). This is
  * how frameless/borderless windows get an OS move gesture. Regions accumulate;
@@ -584,23 +634,32 @@ HELIOSVIEW_API int heliosview_window_set_backdrop(heliosview_window_t* window,
 /* Toggle the immersive dark-mode title bar (on != 0 = dark). 0 = success */
 HELIOSVIEW_API int heliosview_window_set_dark_mode(heliosview_window_t* window, int on);
 
-/* ================= Window routing registry =================
+/* ================= Window routing ids =================
  *
- * The window keeps a type-erased registry: a native routing id -> caller userdata
- * (a void*, e.g. a C++ object pointer). A registered id can be used as a native
- * message id (a menu item id / WM_COMMAND id, or a tray callback message) and the
- * default native-message conversion resolves the resulting event back to the
- * userdata (the event's `userdata` field). Tray icons and menu items are built on
- * this, and it is exposed so callers can register their own routing ids too.
- * Registered ids must be removed with heliosview_window_remove_item.
+ * A native routing id — a tray callback message id, a menu item id, or a
+ * caller-registered id — is bound to the caller's userdata as a comctl32 window
+ * subclass: registering installs a callout on the native window whose
+ * uIdSubclass IS the routing id and whose dwRefData is the userdata, so the
+ * binding is direct and there is no lookup table. The default native-message
+ * conversion resolves the resulting event back to the userdata (the event's
+ * `userdata` field): a message whose number is the id (tray-style WM_APP
+ * callback messages) or a WM_COMMAND whose command id is the id (menu-style
+ * command ids). Tray icons and popup menus use dedicated per-backend window
+ * subclasses of their own (see heliosview_tray_win32.cpp /
+ * heliosview_menu_win32.cpp) and do not go through this API; it remains exposed
+ * so callers can register their own routing ids too. Registered ids must be
+ * removed with heliosview_window_remove_item (which uninstalls the subclass).
  */
 
-/* Allocate a routing id on `window`, associate it with `userdata`, and store it
- * in the window's registry. Returns the id (never 0; 0 = failure, e.g. null window
- * or the id space is exhausted). */
+/* Allocate a routing id on `window`, bind it to `userdata` by installing a
+ * window subclass (uIdSubclass = the id, dwRefData = userdata), and return the
+ * id. The native window must already exist (an id is only usable once the
+ * window can receive messages). Returns the id (never 0; 0 = failure, e.g. null
+ * window, native window not yet created, or the id space is exhausted). */
 HELIOSVIEW_API uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata);
 
-/* Remove a routing id previously returned by heliosview_window_add_item.
+/* Remove a routing id previously returned by heliosview_window_add_item
+ * (uninstalls its window subclass).
  * 0 = success, negative = invalid window or the id is not registered. */
 HELIOSVIEW_API int heliosview_window_remove_item(heliosview_window_t* window, uint32_t id);
 
@@ -615,8 +674,9 @@ HELIOSVIEW_API int heliosview_window_remove_item(heliosview_window_t* window, ui
  * on it, because the tray posts its callback messages to the window's HWND.
  *
  * The icon is loaded from a .ico/.cur/etc. file path (UTF-8); pass NULL to use
- * the default application icon. Destroy the tray before destroying its window
- * (destroying the window destroys any trays attached to it).
+ * the default application icon. Destroy the tray BEFORE destroying its window:
+ * the icon stays in the notification area until heliosview_tray_destroy (NIM_DELETE),
+ * and destroying the window does not clean up trays on its own.
  */
 
 typedef struct heliosview_tray heliosview_tray_t;
@@ -637,8 +697,9 @@ HELIOSVIEW_API int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const ch
  * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_tray_set_icon(heliosview_tray_t* tray, const char* icon_path);
 
-/* Remove the tray icon and free the tray handle. Also called automatically when
- * the owning window is destroyed. */
+/* Remove the tray icon (NIM_DELETE) and free the tray handle. The icon is NOT
+ * removed automatically when the owning window is destroyed — always destroy
+ * the tray before its window. */
 HELIOSVIEW_API void heliosview_tray_destroy(heliosview_tray_t* tray);
 
 /* ================= Tray balloon notification =================
@@ -675,7 +736,8 @@ HELIOSVIEW_API int heliosview_tray_notify(heliosview_tray_t* tray, const char* t
  * heliosview_menu_add_item_ex and toggled afterwards with the
  * heliosview_menu_set_*_item_* helpers (checked / enabled / default).
  * Submenus are added by handle: the parent menu takes ownership of them
- * (destroying the parent destroys its submenus). heliosview_menu_show tracks
+ * (destroying the parent destroys its submenus; destroying a submenu
+ * separately while it is attached to a parent is undefined). heliosview_menu_show shows
  * the menu at the current cursor position, attached to `window` (which must
  * already be created).
  */
@@ -895,9 +957,9 @@ HELIOSVIEW_API int heliosview_webview_set_transparent_background(heliosview_webv
  *                  { "__hv":1, "kind":"reject",   "id":N, "error":<json> }
  *                  { "__hv":1, "kind":"broadcast", "name":"...", "data":<json> }
  *
- * Threading: bind / eval / eval_async are UI-thread calls (eval_* are queued while
- * the WebView initializes). resolve / reject / broadcast may be called from any
- * thread; they marshal to the UI thread internally.
+ * Threading: every WebView API is a UI-thread call — resolve / reject /
+ * broadcast included (they do not marshal). eval / eval_async are queued while
+ * the WebView initializes.
  * Lifetime: destroy the WebView only when no asynchronous calls are in flight
  * (a bind handler still running, or an eval_async not yet completed).
  */
@@ -946,14 +1008,14 @@ HELIOSVIEW_API int heliosview_webview_bind(heliosview_webview_t* webview, const 
                                            heliosview_webview_bind_cb callback, void* userdata,
                                            heliosview_webview_userdata_dtor dtor);
 
-/* The WebView instance no longer exists: returned by the thread-safe bridge
- * calls (heliosview_webview_resolve / _reject / _broadcast) when the WebView
+/* The WebView instance no longer exists: returned by the bridge calls
+ * (heliosview_webview_resolve / _reject / _broadcast) when the WebView
  * was already destroyed — e.g. destroyWebView/heliosview_webview_destroy ran
  * while this asynchronous call was still in flight. The call then never touches
  * the freed instance. */
 #define HELIOSVIEW_WEBVIEW_DESTROYED (-3)
 
-/* Resolve a pending JS Promise: result_json is any valid JSON value. Thread-safe.
+/* Resolve a pending JS Promise: result_json is any valid JSON value. UI-thread call.
  * Returns -3 (HELIOSVIEW_WEBVIEW_DESTROYED) when the WebView instance no longer
  * exists — e.g. destroyWebView/heliosview_webview_destroy ran while this
  * asynchronous call was still in flight. The call then never touches the freed
@@ -961,7 +1023,7 @@ HELIOSVIEW_API int heliosview_webview_bind(heliosview_webview_t* webview, const 
 HELIOSVIEW_API int heliosview_webview_resolve(heliosview_webview_t* webview,
                                               uint64_t call_id, const char* result_json);
 
-/* Reject a pending JS Promise: error_json is any valid JSON value. Thread-safe.
+/* Reject a pending JS Promise: error_json is any valid JSON value. UI-thread call.
  * Same stale-instance guard as resolve: returns -3 when the WebView was already
  * destroyed. */
 HELIOSVIEW_API int heliosview_webview_reject(heliosview_webview_t* webview,
@@ -977,7 +1039,7 @@ HELIOSVIEW_API int heliosview_webview_eval_async(heliosview_webview_t* webview, 
                                                  heliosview_webview_eval_cb callback, void* userdata);
 
 /* Broadcast a JSON value to the JS page's BroadcastChannel(name) instances; the
- * page receives it as a standard 'message' event. Thread-safe. Same
+ * page receives it as a standard 'message' event. UI-thread call. Same
  * stale-instance guard as resolve: returns -3 when the WebView was already
  * destroyed. */
 HELIOSVIEW_API int heliosview_webview_broadcast(heliosview_webview_t* webview,
@@ -1030,7 +1092,7 @@ typedef void (*heliosview_webview_title_changed_cb)(heliosview_webview_t* webvie
 /* Register a navigation-completed callback (replacing any previous one and
  * running its dtor). The callback fires on the UI thread when a navigation
  * completes or fails; it is not called for navigations that never finish
- * (e.g. aborted). UI-thread call (thread-safe: other threads are marshalled). */
+ * (e.g. aborted). UI-thread call. */
 HELIOSVIEW_API int heliosview_webview_set_navigation_callback(heliosview_webview_t* webview,
                                                               heliosview_webview_navigation_cb callback,
                                                               void* userdata,
@@ -1039,7 +1101,7 @@ HELIOSVIEW_API int heliosview_webview_set_navigation_callback(heliosview_webview
 /* Register a navigation-starting callback (replacing any previous one and
  * running its dtor). Fires on the UI thread just before a navigation begins;
  * returning non-zero cancels it (e.g. to block cross-origin or external links).
- * UI-thread call (thread-safe: other threads are marshalled). */
+ * UI-thread call. */
 HELIOSVIEW_API int heliosview_webview_set_navigation_starting_callback(
     heliosview_webview_t* webview,
     heliosview_webview_navigation_starting_cb callback,
@@ -1048,7 +1110,7 @@ HELIOSVIEW_API int heliosview_webview_set_navigation_starting_callback(
 
 /* Register a source-changed (URL-changed) callback (replacing any previous one
  * and running its dtor). Fires on the UI thread whenever the WebView's current
- * URL changes. UI-thread call (thread-safe: other threads are marshalled). */
+ * URL changes. UI-thread call. */
 HELIOSVIEW_API int heliosview_webview_set_source_changed_callback(
     heliosview_webview_t* webview,
     heliosview_webview_source_changed_cb callback,
@@ -1057,7 +1119,7 @@ HELIOSVIEW_API int heliosview_webview_set_source_changed_callback(
 
 /* Register a document-title-changed callback (replacing any previous one and
  * running its dtor). Fires on the UI thread when the page title changes.
- * UI-thread call (thread-safe: other threads are marshalled). */
+ * UI-thread call. */
 HELIOSVIEW_API int heliosview_webview_set_title_changed_callback(
     heliosview_webview_t* webview,
     heliosview_webview_title_changed_cb callback,
@@ -1112,6 +1174,26 @@ HELIOSVIEW_API int heliosview_webview_set_context_menu(heliosview_webview_t* web
  * negative = error. */
 HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview,
                                                    int enabled);
+
+/* Enable (enabled != 0) or disable WebView2's built-in window controls overlay
+ * (the min/max/restore/close buttons WebView2 draws over the page's top-right
+ * corner). Disabled by default — apps that render their own title-bar buttons
+ * (e.g. the injected <helios-window-controls> component) leave it off. Applies
+ * immediately when the WebView is initialized; when called during
+ * initialization the setting is applied when it becomes ready. Requires the
+ * experimental WebView2 interface; on runtimes without it the call returns
+ * negative and has no effect. Message-loop thread. 0 = success,
+ * negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_window_controls_overlay(
+    heliosview_webview_t* webview, int enabled);
+
+/* Set the window controls overlay's background color (red/green/blue/alpha).
+ * Default: fully transparent (alpha 0) — the page's own title bar shows
+ * through and the buttons float over it. Applies immediately when the overlay
+ * exists; when called before it is enabled the color is applied when the
+ * overlay is created. Message-loop thread. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_window_controls_background_color(
+    heliosview_webview_t* webview, uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha);
 
 /* ================= Native dialogs =================
  *

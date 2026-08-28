@@ -215,7 +215,7 @@ include(cmake/PlatformLibs.cmake)
 if(WIN32)
     # WebView2 SDK: download the Microsoft.Web.WebView2 NuGet package at
     # configure time and extract the native headers + WebView2Loader lib/dll.
-    set(HELIOSVIEW_WEBVIEW2_VERSION "1.0.4129.50")
+    set(HELIOSVIEW_WEBVIEW2_VERSION "1.0.4181-prerelease")
     set(HELIOSVIEW_WEBVIEW2_ARCHIVE "${CMAKE_BINARY_DIR}/webview2.nupkg")
     set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_BINARY_DIR}/webview2-sdk")
     if(NOT EXISTS "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/include/WebView2.h")

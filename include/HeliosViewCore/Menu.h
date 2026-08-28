@@ -3,10 +3,12 @@
 /**
  * HeliosView.Core -- Menu: a popup / context menu.
  *
- * Built on the C layer's per-window routing registry: each item is registered
- * on the owner window, so choosing it posts a HELIOSVIEW_EVENT_MENU_SELECT
- * event (menu_item = the item id, userdata = the Menu object). Like Tray, a
- * Menu works without a C++ Window wrapper — only the raw handle is needed.
+ * Built on the C layer's per-window routing ids (each registered id is a window
+ * subclass carrying the item's userdata, no lookup table): each item is
+ * registered on the owner window, so choosing it posts a
+ * HELIOSVIEW_EVENT_MENU_SELECT event (menu_item = the item id, userdata = the
+ * Menu object). Like Tray, a Menu works without a C++ Window wrapper — only the
+ * raw handle is needed.
  *
  * Usage (from the README):
  *   helios::Menu menu(window.nativeHandle());
@@ -32,6 +34,7 @@
  */
 
 #include <HeliosViewCore/App.h>
+#include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/Types.h>
 
@@ -104,12 +107,14 @@ public:
     // True when the menu was created successfully
     bool valid() const { return m_menu != nullptr; }
 
-    // Add a text item (UTF-8); returns its Item (owned by this menu). nullptr on failure.
+    // Add a text item (UTF-8); returns its Item (owned by this menu).
+    // Throws std::runtime_error on failure (e.g. the menu or its owner window
+    // is not valid) with the reason recorded by the C layer.
     Item* addItem(const char* text)
     {
         uint32_t id = 0;
         if (heliosview_menu_add_item(m_menu, text, &id) != 0)
-            return nullptr;
+            throwLastError("menu addItem");
         auto& item = m_items[id] = std::make_unique<Item>();
         item->m_id = id;
         item->m_menu = this;
@@ -119,12 +124,13 @@ public:
     // Add a checkable text item (UTF-8): a checkmark shows next to its text
     // while checked (starts checked when `checked`). Update it from the item's
     // triggered signal, e.g. `item->setChecked(!item->checked())`, to make a
-    // toggle. Returns its Item (owned by this menu); nullptr on failure.
+    // toggle. Returns its Item (owned by this menu).
+    // Throws std::runtime_error on failure (same conditions as addItem).
     Item* addCheckItem(const char* text, bool checked = false)
     {
         uint32_t id = 0;
         if (heliosview_menu_add_checkable_item(m_menu, text, checked ? 1 : 0, &id) != 0)
-            return nullptr;
+            throwLastError("menu addCheckItem");
         auto& item = m_items[id] = std::make_unique<Item>();
         item->m_id = id;
         item->m_menu = this;
@@ -134,8 +140,10 @@ public:
     // Add a visual separator line
     void addSeparator() { heliosview_menu_add_separator(m_menu); }
 
-    // Add a submenu under `text`; the submenu is owned by this menu.
-    // Returns the submenu (for adding items to it), or nullptr on failure.
+    // Add a submenu under `text`; the submenu is owned by this menu. Returns
+    // the submenu (for adding items to it). Throws std::runtime_error on
+    // failure (e.g. the menu or its owner window is not valid) with the reason
+    // recorded by the C layer.
     // The submenu's C-layer handle is owned by this menu's C layer (destroying
     // this menu destroys the submenu's handle), so this wrapper marks itself
     // m_owned = false to avoid a double destroy — but keeps the handle so
@@ -145,7 +153,7 @@ public:
         auto submenu = std::make_unique<Menu>(m_window);
         if (!submenu->valid() ||
             heliosview_menu_add_submenu(m_menu, text, submenu->m_menu) != 0)
-            return nullptr;
+            throwLastError("menu addSubmenu");
         auto* raw = submenu.get();
         submenu->m_owned = false; /* parent's C layer owns the handle (freed with parent) */
         m_submenus.push_back(std::move(submenu));

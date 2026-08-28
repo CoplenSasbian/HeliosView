@@ -8,6 +8,7 @@
  */
 
 #include <HeliosViewCore/App.h>
+#include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
@@ -49,7 +50,7 @@ public:
                                                this))
     {
         if (!m_window)
-            throw std::runtime_error("heliosview: window creation failed");
+            throwLastError("window creation failed"); /* the C layer recorded the reason (null title / CreateWindowExW error) */
     }
 
     // Destroy the window (closes the native window if it was shown)

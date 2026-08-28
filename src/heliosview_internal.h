@@ -14,6 +14,7 @@
 #include <deque>
 #include <flat_map>
 #include <new>
+#include <string>
 #include <utility>
 
 namespace hv {
@@ -95,3 +96,34 @@ inline void queue_push(const heliosview_event_t& event)
 }
 
 } // namespace hv
+
+/* ================= Last-error (platform-independent) =================
+ *
+ * Every failing public-API call site records WHY it failed through hv_fail
+ * (or, on win32, the hv_fail_win32 / hv_fail_hresult wrappers that also append
+ * the platform message): a thread-local (code, message) pair that the public
+ * heliosview_last_error / heliosview_last_error_string read back. The message
+ * is produced at the failure point, where the context is known — NOT in a
+ * central decoder — so a new error is a one-line `return hv_fail(...)` and the
+ * decoder never grows. The code follows the header's error-code space
+ * (see "Error reporting" in heliosview.h: -1 generic / -2 invalid name /
+ * -3 destroyed / negated Win32 codes as small negatives / negated HRESULTs as
+ * large positives). The value is only meaningful immediately after a call failed
+ * (returned < 0 or NULL); a later successful call does not clear it.
+ * No platform dependency: any implementation file (src/*.cpp or a platform
+ * backend) sets and reads these. */
+
+inline thread_local int g_hv_last_error_code = 0;
+inline thread_local std::string g_hv_last_error_message;
+
+/* Record `message` (UTF-8, copied) as this thread's last error and return
+ * `code`, so a failure site is one line:
+ *     return hv_fail(-1, "window is not created yet");
+ * Win32 backends prefer the formatting wrappers hv_fail_win32 / hv_fail_hresult
+ * (heliosview_win32_internal.h), which append the platform's own message. */
+inline int hv_fail(int code, const char* message)
+{
+    g_hv_last_error_code = code;
+    g_hv_last_error_message = message ? message : "";
+    return code;
+}
