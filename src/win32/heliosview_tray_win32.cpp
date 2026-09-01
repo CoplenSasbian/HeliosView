@@ -28,6 +28,7 @@
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATAW */
 
 #include <atomic>
+#include <algorithm>
 #include <cstring>
 #include <flat_map>
 #include <string>
@@ -57,6 +58,21 @@ constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
  * those are different procs. */
 constexpr UINT_PTR kTraySubclassKey = 0;
 
+/* "TaskbarCreated": a registered window message the shell broadcasts to every
+ * top-level window when the taskbar (Shell_NotifyIcon) is (re)created — e.g.
+ * Explorer starting, restarting, or crashing and coming back. On receipt the
+ * shell has dropped all our icons, so every live tray on the window must be
+ * re-added (NIM_ADD). Registered lazily on the message-loop thread; the value
+ * is arbitrary but stable for the process. */
+UINT g_taskbar_created_message = 0;
+
+UINT taskbar_created_message()
+{
+    if (g_taskbar_created_message == 0)
+        g_taskbar_created_message = RegisterWindowMessageW(L"TaskbarCreated");
+    return g_taskbar_created_message;
+}
+
 /* Tray icon id allocator: per-process, never reused while a tray lives, so the
  * uID → userdata table below has no collisions and no stale entries. */
 std::atomic<UINT> g_next_tray_uid{1};
@@ -66,6 +82,13 @@ std::atomic<UINT> g_next_tray_uid{1};
  * (fail-closed). */
 inline thread_local std::flat_map<UINT, void*> tls_tray_userdata;
 
+/* hwnd → the live heliosview_tray_t* on that window. Used to re-add every icon
+ * when the shell posts "TaskbarCreated" (Explorer restart / slow start). */
+inline thread_local std::flat_map<HWND, std::vector<heliosview_tray_t*>> tls_window_trays;
+
+/* Forward: defined below, used by the TaskbarCreated handler in the callout. */
+int tray_apply(heliosview_tray_t* tray, DWORD msg);
+
 /* The tray routing callout: installed ONCE per window (fixed key), shared by
  * all trays on it. Shell_NotifyIcon posts kTrayCallbackMessage with the tray's
  * uID in wParam; resolve the userdata from the TLS table, translate the mouse
@@ -73,6 +96,16 @@ inline thread_local std::flat_map<UINT, void*> tls_tray_userdata;
 LRESULT CALLBACK hv_tray_subclass_proc(HWND hwnd, UINT message, WPARAM wparam,
                                        LPARAM lparam, UINT_PTR, DWORD_PTR)
 {
+    if (message == taskbar_created_message()) {
+        /* Explorer (re)created the taskbar: it dropped every tray icon we had
+         * shown, so re-add all live trays on this window. NIM_ADD upserts, so
+         * this is safe to run even if a tray was never added. */
+        const auto it = tls_window_trays.find(hwnd);
+        if (it != tls_window_trays.end())
+            for (heliosview_tray_t* t : it->second)
+                tray_apply(t, NIM_ADD);
+        return 0; /* handled: the shell does not expect us to forward this */
+    }
     if (message == kTrayCallbackMessage) {
         const auto it = tls_tray_userdata.find(static_cast<UINT>(wparam)); /* wParam = the tray's uID */
         if (it != tls_tray_userdata.end()) {
@@ -161,11 +194,16 @@ heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const cha
      * window has the shared tray callout — the rest of the routing (message,
      * wParam) is handled by the OS + the one callout. */
     tls_tray_userdata[tray->uid] = userdata;
+    tls_window_trays[tray->hwnd].push_back(tray);
     tray_ensure_window_subclass(tray->hwnd);
 
     if (tray_apply(tray, NIM_ADD) != 0) {
         hv_fail_win32(GetLastError(), "Shell_NotifyIcon (NIM_ADD) failed — tray not created");
         tls_tray_userdata.erase(tray->uid);
+        auto& v = tls_window_trays[tray->hwnd];
+        v.erase(std::remove(v.begin(), v.end(), tray), v.end());
+        if (v.empty())
+            tls_window_trays.erase(tray->hwnd);
         if (tray->icon)
             DestroyIcon(tray->icon);
         hv::hv_dealloc(tray);
@@ -201,6 +239,15 @@ void heliosview_tray_destroy(heliosview_tray_t* tray)
     if (tray->added)
         tray_apply(tray, NIM_DELETE);
     tls_tray_userdata.erase(tray->uid); /* the window's shared callout stays (dies with the window) */
+
+    /* Unregister from the per-window tray list (needed for TaskbarCreated re-add). */
+    const auto wit = tls_window_trays.find(tray->hwnd);
+    if (wit != tls_window_trays.end()) {
+        auto& v = wit->second;
+        v.erase(std::remove(v.begin(), v.end(), tray), v.end());
+        if (v.empty())
+            tls_window_trays.erase(wit);
+    }
     if (tray->icon)
         DestroyIcon(tray->icon);
     hv::hv_dealloc(tray);
