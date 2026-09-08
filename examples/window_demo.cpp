@@ -11,6 +11,14 @@ int main()
     helios::enableDpiAwareness(); // before any window: crisp, per-monitor DPI
 
     helios::App app;
+    // Process identity + how the OS presents the process. A tray-only / menu-bar
+    // -only app should use ActivationPolicy::Accessory: on macOS that is what
+    // keeps the (otherwise useless) Dock icon away.
+    helios::App::setAppId("com.example.heliosview.demo");
+    helios::App::setActivationPolicy(helios::ActivationPolicy::Regular);
+    std::printf("[app] id=%s policy=%d\n", helios::App::appId(),
+                static_cast<int>(helios::App::activationPolicy()));
+
     helios::Window window(800, 600, "HeliosView Demo");
     window.show();
 
@@ -28,13 +36,45 @@ int main()
     });
     frameless.show();
 
-    helios::Menu menu(window.nativeHandle());
+    // Style flags: the idiomatic macOS look — a real title bar with its title
+    // hidden and the content underneath, traffic lights floating over the page.
+    // On Windows the same flags mean "no native caption" (the frameless layout).
+    helios::Window native(520, 360, "Native chrome", helios::WindowStyle::Normal,
+                          helios::WindowFlag::TitleBarHidden
+                              | helios::WindowFlag::TitleBarTransparent
+                              | helios::WindowFlag::FullSizeContent
+                              | helios::WindowFlag::Resizable);
+    native.show();
+    std::printf("[native] flags=0x%X scale=%.2f\n", helios::toUint(native.flags()),
+                native.scaleFactor());
+
+    // Application menu bar. macOS: the one global bar (the first submenu becomes
+    // the App menu). Windows: the menu bar of every HeliosView window. Roles
+    // supply the platform's labels/shortcuts and the actions the app cannot do
+    // itself (Ctrl+C/X/V go to the focused control).
+    helios::Menu bar;
+    bar.addSubmenu("File")->addRole(helios::MenuRole::Quit);
+    helios::Menu* editMenu = bar.addSubmenu("Edit");
+    editMenu->addRole(helios::MenuRole::Undo);
+    editMenu->addRole(helios::MenuRole::Cut);
+    editMenu->addRole(helios::MenuRole::Copy);
+    editMenu->addRole(helios::MenuRole::Paste);
+    helios::Menu* windowMenu = bar.addSubmenu("Window");
+    windowMenu->setKind(helios::MenuKind::Window);   // macOS wires NSApp.windowsMenu
+    windowMenu->addRole(helios::MenuRole::Minimize);
+    windowMenu->addRole(helios::MenuRole::Zoom);
+    helios::Action toggleFull("Toggle Fullscreen", "Primary+F");   // custom accelerator
+    toggleFull.triggered.connect([&window] { window.setFullscreen(!window.isFullscreen()); });
+    bar.addSubmenu("View")->addAction(toggleFull);
+    bar.setAppMenu();
+
+    helios::Menu menu;   // standalone popup: no window needed until show()
     helios::Menu::Item* showItem = menu.addItem("Show / Restore");
     helios::Menu::Item* minimizeItem = menu.addItem("Minimize");
     helios::Menu::Item* maximizeItem = menu.addItem("Maximize");
     helios::Menu::Item* resizableItem = menu.addItem("Toggle Resizable");
     menu.addSeparator();
-    helios::Menu::Item* quitItem = menu.addItem("Quit");
+    helios::Menu::Item* quitItem = menu.addRole(helios::MenuRole::Quit);  // platform label + shortcut
     menu.addSeparator();
     helios::Menu::Item* disabledItem = menu.addItem("Disabled (grey)");
     disabledItem->setEnabled(false); // grayed out, not selectable
@@ -59,16 +99,17 @@ int main()
         std::printf("[win] menu: quit\n");
         app.quit();
     });
-    showItem->setDefault(true); // bold default item (Enter / double-click)
+    menu.setDefaultAction(*showItem); // bold default item (Enter / double-click)
 
-    // Tray icon (notification area). The native window must exist first, so this
-    // runs after show(). Connect signals to respond to clicks on the icon.
-    helios::Tray tray(window.nativeHandle(), "HeliosView Demo");
+    // Tray icon (notification area). Standalone: no window required, so it can be
+    // created before (or without) show(). Connect signals to respond to clicks.
+    helios::Tray tray("HeliosView Demo");
+    // Attach the context menu instead of popping it up from rightClicked: that is
+    // the only portable way (Linux exports the menu over DBus; macOS opens an
+    // NSStatusItem menu) — with a menu attached the right-click event may not be
+    // delivered at all. The tray keeps a reference to the menu.
+    tray.setMenu(menu);
     tray.leftClicked.connect([] { std::printf("[win] tray left-click\n"); });
-    tray.rightClicked.connect([&] {
-        std::printf("[win] tray right-click -> menu\n");
-        menu.show(window.nativeHandle()); // context menu at the cursor
-    });
     tray.leftDoubleClicked.connect([&app] {
         std::printf("[win] tray double-click -> quit\n");
         app.quit();

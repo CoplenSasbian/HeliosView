@@ -95,7 +95,7 @@ HeliosView 把**所有分配都路由到一个可配置的分配器**，因此�
 | `stdexec` | 固定 commit 758f41f4（origin/main，2026-08-15，0.11.0+） | vendored（`third_party/stdexec/`） | C++23 协程（sender/receiver） |
 | `Boost`（Asio/Beast/JSON） | 1.92.0（超项目 submodule，所需库配置时自动按需初始化） | vendored（`third_party/boost/`） | 后台线程池（`Async`）、HTTP（Boost.Beast）、WebView 桥接自动绑定（Boost.JSON） |
 
-其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。Boost 库在配置时按需初始化（在 `third_party/boost/` 里执行 `git submodule update --init --depth 1`）——不要对整个 HeliosView 执行 `git submodule update --init --recursive`，那会拉取全部约 160 个 Boost 库。
+其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。Boost 库在配置时按需初始化：在 `third_party/boost/` 里执行**一条** `git submodule update --init --depth 1`，把所有需要的库作为 pathspec 一次传入（git 的输出会实时打印，`--jobs` 并行克隆，因此首次克隆不会看起来像卡住）——不要对整个 HeliosView 执行 `git submodule update --init --recursive`，那会拉取全部约 160 个 Boost 库。
 
 ```sh
 git submodule update --init
@@ -212,6 +212,8 @@ int main()
 
 `Window` 还提供 `showMinimized/Maximized/Normal`（以及便捷的 `minimize`/`maximize`/`restore`/`toggleMaximize`）、`move/resize`、`position/size/geometry`、`setTitle`、`center`、`setOpacity`、`focus`、`hide`、`setTopmost`、`setIcon`、`requestClose`、`setResizable`、`setProgress`（任务栏）、`setBackdrop(Mica/Acrylic)` + `setDarkMode`（Win11）、`dpi`，以及 `WindowStyle::{Normal, Borderless, Frameless}`。`focused`/`blurred` 信号上报窗口激活状态变化。标题与字符串均为 UTF-8。
 
+**文本输入与修饰键状态。** `keyPressed` 只在首次按下时触发，`keyRepeated` 用于系统自动重复，`keyEvent(const KeyEvent&)` 覆盖每次按下/释放并带 `modifiers`（`helios::mods::Ctrl | helios::mods::Shift | …`，含左右键位与锁定状态）和 `repeat` 标志。`textInput(const std::string&)` 按输入内容投递 UTF-8 文本（包含输入法上屏）；超过事件缓冲区的长文本会拆成连续的多个事件，不会截断。C API 中同样的信息在 `heliosview_event_t` 里（`modifiers`、`flags`、`text`/`text_len`，事件类型 `HELIOSVIEW_EVENT_TEXT_INPUT`）。
+
 **关闭按钮行为。** 点击关闭按钮（×）或按 Alt+F4 **不会**销毁窗口——它只发出 `closeRequested` 信号。需要连接该信号并调用 `close()` 才能真正关闭：
 
 ```cpp
@@ -306,7 +308,7 @@ int main()
 **事件、本地资源与原生对话框**：
 
 - **导航事件** — `WebViewWindow` 上的四个信号，都在 UI 线程上触发：`navigationStarting`（配合 `navigationStartingGate` 否决用 std::function）、`urlChanged`、`titleChanged`、`navigationCompleted`。
-- **`mapLocalFolder(host, folder)`** — 通过虚拟 `https://<host>/` 主机服务本地文件夹，供前端之外的资源使用。
+- **`mapLocalFolder(host, folder)`** + **`localUrl(host, path)`** — 服务前端之外的本地资源文件夹；URL 必须用 `localUrl()` 生成（Windows 是虚拟 `https://<host>/` 主机，其他引擎注册自定义 scheme，别把 URL 写死）。
 - **`helios::selectFolder`** 等 — 通过 `bindJson` 处理器暴露给页面的原生对话框。
 
 **WebView2 窗口 chrome 开关** — 调整 WebView 原生外观的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setStatusBarEnabled`、`setContextMenuEnabled`、`setDevToolsEnabled`；C：`heliosview_webview_set_status_bar` / `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`）：
@@ -357,14 +359,18 @@ std::string folder;
 if (helios::selectFolder(window.nativeHandle(), "Pick a folder", folder))
     std::println("folder: {}", folder);
 
-// 文件选择（单选或多选；过滤器格式 "Name|*.ext|..."）
+// 文件选择（单选或多选；结构化过滤器：名称 + 扩展名规则）
 auto files = helios::openFiles(window.nativeHandle(), "Pick images",
-                               "Images (*.png;*.jpg)|*.png;*.jpg|All files (*.*)|*.*",
+                               std::vector<helios::FileFilter>{
+                                   {"Images", "png;jpg;jpeg"},
+                                   {"All files", "*.*"}
+                               },
                                /*multi=*/true);
 
 // 保存对话框
 std::string path;
-if (helios::saveFile(window.nativeHandle(), "Save as", "Text (*.txt)|*.txt", "out.txt", path))
+if (helios::saveFile(window.nativeHandle(), "Save as",
+                     std::vector<helios::FileFilter>{{"Text", "txt"}}, "out.txt", path))
     std::println("saving to {}", path);
 
 // 剪贴板
@@ -379,29 +385,85 @@ helios::showInFolder("C:\\path\\to\\file.txt");
 
 ### 7. 通知（toast）
 
-现代 OS toast。**与线程无关**：可从任意线程调用。启动时初始化一次（注册 AppUserModelID + 开始菜单快捷方式）：
+现代 OS toast。**与线程无关**：可从任意线程调用（回调运行在未指定的线程上，碰 UI 前先切回循环线程）。启动时初始化一次（注册应用标识：Windows 是 AppUserModelID + 开始菜单快捷方式，macOS 是 bundle id，Linux 是 desktop id）：
 
 ```cpp
-helios::notificationInit("MyApp");                    // 启动时一次
+helios::App::setAppId("com.example.myapp");           // 也可以直接传给 init
+helios::notificationInit();                           // 启动时一次
+helios::notificationRequestPermission([](helios::NotificationPermission p) {
+    // macOS：系统弹窗已答复；Windows/Linux：直接报告系统设置
+    std::println("permission = {}", static_cast<int>(p));
+});
+helios::notificationSetClickCallback([](const char* title, const char* body) {
+    /* 用户点击了通知 */
+});
 helios::notificationShow("Download", "Finished");     // 任意线程
 ```
 
+macOS 在用户授权前会静默丢弃通知，所以启动时就申请权限。Windows 上全新应用标识的**首次运行**会返回 `NotificationPermission::Unknown`（系统异步注册），这不代表被拒绝。
+
 ### 8. 托盘图标 + 弹出 / 右键菜单
 
-`helios::Tray` 在系统通知区显示一个图标；`helios::Menu` 是弹出 / 右键菜单。两者都挂到**已创建（显示）**的原生窗口上，并通过信号响应：
+`helios::Tray` 在系统通知区显示一个图标；`helios::Menu` 是弹出 / 右键菜单。菜单是**独立对象**（构建时不需要窗口，`show(window)` 的 owner 可空），它显示的是 **action**：action 拥有命令本身（文本、启用/勾选状态、`triggered`），菜单只拥有布局。同一个 action 可以出现在多个菜单里：
 
 ```cpp
-helios::Menu menu(window.nativeHandle());
-helios::Menu::Item* show = menu.addItem("Show / Restore");
+helios::Action copy("Copy");                 // 共享命令
+copy.triggered.connect(&onCopy, this);
+
+helios::Menu menu;                           // 不需要窗口
+helios::Menu::Item* show = menu.addItem("Show / Restore");   // 菜单拥有的 action
 helios::Menu::Item* quit = menu.addItem("Quit");
+helios::Menu::Item* top = menu.addCheckItem("Toggle Topmost"); // 可勾选
+menu.addAction(copy);                                // 共享的 action
 menu.addSeparator();
+menu.setDefaultAction(*show);                        // 加粗的默认项
 show->triggered.connect([&] { window.showNormal(); });
 quit->triggered.connect([&] { app.quit(); });
+editMenu->addAction(copy);                           // 同一个命令，另一个菜单
+copy.setEnabled(false);                              // 两个菜单同时变灰
 
-helios::Tray tray(window.nativeHandle(), "Tray Demo");
+// 标准 role：文案/快捷键由平台提供，app 做不到的动作由库执行
+editMenu->addRole(helios::MenuRole::Cut);            // macOS ⌘X / Windows Ctrl+X
+editMenu->addRole(helios::MenuRole::Copy);
+editMenu->addRole(helios::MenuRole::Paste);
+windowMenu->addRole(helios::MenuRole::Minimize);
+appMenu->addRole(helios::MenuRole::Quit);            // macOS "Quit <App>" ⌘Q / Windows "Exit"
+
+helios::Action open("Open…", "Primary+O");           // 可移植快捷键字符串
+open.triggered.connect(&onOpen, this);
+fileMenu->addAction(open);
+
+// 应用菜单栏：macOS 装进唯一那条全局菜单栏（第一个子菜单 = App 菜单）；
+// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）
+helios::Menu bar;
+bar.addSubmenu("File")->addAction(open);
+bar.addSubmenu("Edit")->addRole(helios::MenuRole::Copy);
+bar.setAppMenu();
+
+// action 上的快捷键就是全局加速键：heliosview_run / heliosview_pump_events 会翻译；
+// 自带消息循环的 app 在 DispatchMessage 前调 heliosview_translate_accelerator(&msg)
+
+helios::Tray tray("Tray Demo");
+tray.setMenu(menu);                                    // 可移植的右键菜单
 tray.leftClicked.connect([] { /* ... */ });
-tray.rightClicked.connect([&] { menu.show(window.nativeHandle()); });
 tray.notify("Tray", "Hello");                          // 气泡通知（无需配置）
+
+// 用 setMenu 挂菜单，而不是在 rightClicked 里自己弹：Linux 的菜单由桌面环境
+// 通过 DBus 导出（应用自己弹不出来），macOS 的 NSStatusItem 菜单任意点击都会
+// 打开 —— 所以挂了菜单后点击事件可能根本不会送达。用 tray.setMenu(nullptr) 解除。
+```
+
+窗口外观同样可移植：`WindowStyle` 定基线，`WindowFlag` 细化，同一份代码就能得到各平台惯用的样子：
+
+```cpp
+// macOS：真标题栏 + 隐藏标题 + 内容延伸到标题栏下，红绿灯浮在页面之上。
+// Windows：没有原生标题栏，应用自己画 chrome。
+helios::Window w(900, 600, "App", helios::WindowStyle::Normal,
+                 helios::WindowFlag::TitleBarHidden
+                     | helios::WindowFlag::TitleBarTransparent
+                     | helios::WindowFlag::FullSizeContent);
+w.scaleFactor();      // 1.0 / 2.0 —— 逻辑单位换算到物理像素
+w.flags();            // 创建时传入的 flags
 ```
 
 ### 9. C API

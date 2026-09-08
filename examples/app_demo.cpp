@@ -95,8 +95,8 @@ private:
 public:
     void createTray()
     {
-        m_tray = std::make_unique<helios::Tray>(nativeHandle(), "HeliosView App Demo");
-        if (!m_tray->valid()) { /* needs a created (shown) native window */
+        m_tray = std::make_unique<helios::Tray>("HeliosView App Demo");
+        if (!m_tray->valid()) {
             m_tray.reset();
             return;
         }

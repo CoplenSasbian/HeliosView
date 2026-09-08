@@ -8,7 +8,8 @@ add_library(HeliosView SHARED
 if(WIN32)
     target_sources(HeliosView PRIVATE
             win32/heliosview_window_win32.cpp      # windows / message loop / native message translation / dialogs
-        win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon, routing id via window subclass)
+        win32/heliosview_host_win32.cpp # hidden library host window (tray callbacks + window-less popup menu owner)
+        win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon)
         win32/heliosview_menu_win32.cpp # popup menus (heliosview_menu_* API; CreatePopupMenu / TrackPopupMenu, routing id via window subclass)
         win32/heliosview_webview2_win32.cpp # WebView2 backend (heliosview_webview_* API; self-manages via parent-window subclass)
         win32/heliosview_notify_win32.cpp # OS toast notifications (WinRT via the Windows SDK)
@@ -35,11 +36,12 @@ if(WIN32)
             $<TARGET_FILE_DIR:HeliosView>
     )
 
-    # The WebView bridge shim (win32/webview_bridge.js) is embedded into the DLL
-    # as a raw-string literal (heliosview_window_win32.cpp #includes webview_bridge.inc).
+    # The WebView bridge shim (src/webview_bridge.js — engine-neutral: protocol +
+    # a per-engine transport adapter) is embedded into the DLL as a raw-string
+    # literal (heliosview_webview2_win32.cpp #includes webview_bridge.inc).
     # C++23 #embed is not supported by MSVC yet, so a small CMake script wraps the
     # .js into the .inc; the .inc is regenerated whenever the .js changes.
-    set(HELIOSVIEW_BRIDGE_JS "${CMAKE_CURRENT_SOURCE_DIR}/win32/webview_bridge.js")
+    set(HELIOSVIEW_BRIDGE_JS "${CMAKE_CURRENT_SOURCE_DIR}/webview_bridge.js")
     set(HELIOSVIEW_BRIDGE_INC "${CMAKE_CURRENT_BINARY_DIR}/webview_bridge.inc")
     add_custom_command(
         OUTPUT "${HELIOSVIEW_BRIDGE_INC}"
@@ -56,6 +58,15 @@ if(WIN32)
     # extension — but the HeliosView compile depends on it).
     target_sources(HeliosView PRIVATE "${HELIOSVIEW_BRIDGE_INC}")
     target_include_directories(HeliosView PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+else()
+    # No native backend for this platform yet: build the portable stub so the
+    # library still configures, compiles and links, and the C API is exercisable
+    # in "unsupported" mode (every feature reports HELIOSVIEW_ERROR_UNSUPPORTED,
+    # the WebView engine query returns ""). Replace this with src/<os>/ when a
+    # real backend lands — see src/heliosview_backend.h for the contract.
+    target_sources(HeliosView PRIVATE
+        portable/heliosview_portable_stub.cpp
+    )
 endif()
 
 add_library(HeliosView::HeliosView ALIAS HeliosView)

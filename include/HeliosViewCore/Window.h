@@ -45,9 +45,17 @@ public:
     // dispatches events through it.
     Window(int width, int height, const char* title,
            WindowStyle style = WindowStyle::Normal)
-        : m_window(heliosview_window_create_ex(width, height, title,
-                                               static_cast<heliosview_window_style_t>(style),
-                                               this))
+        : Window(width, height, title, style, WindowFlag::None)
+    {
+    }
+
+    // Same, with style flags (WindowFlag). Use the macOS-idiomatic combination
+    // TitleBarHidden | TitleBarTransparent | FullSizeContent for a native title
+    // bar with the page underneath, and Frameless for a fully custom one.
+    Window(int width, int height, const char* title, WindowStyle style, WindowFlag flags)
+        : m_window(heliosview_window_create_ex2(width, height, title,
+                                                static_cast<heliosview_window_style_t>(style),
+                                                toUint(flags), this))
     {
         if (!m_window)
             throwLastError("window creation failed"); /* the C layer recorded the reason (null title / CreateWindowExW error) */
@@ -146,6 +154,13 @@ public:
 
     // The window's DPI (per-monitor; 0 if not created)
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
+
+    // The display scale: 1.0 at 96 DPI / non-Retina, 2.0 on a Retina or 200%
+    // display. Multiply logical coordinates by this to get device pixels.
+    float scaleFactor() const { return heliosview_window_scale_factor(m_window); }
+
+    // The style flags the window was created with
+    WindowFlag flags() const { return static_cast<WindowFlag>(heliosview_window_flags(m_window)); }
 
     // Height (client pixels, DPI-scaled) of the title-bar strip a Frameless
     // window reserves at the top (the drag area / where the page puts its
@@ -261,8 +276,16 @@ public:
     // Set the window opacity (0.0 fully transparent to 1.0 opaque)
     void setOpacity(float opacity) { heliosview_window_set_opacity(m_window, opacity); }
 
-    // Replace the window icon (an .ico/.cur path, UTF-8; nullptr = default)
+    // Replace the window icon (an icon file path, UTF-8; nullptr = default).
+    // [Windows only] — macOS/Linux take the application icon from the bundle or
+    // the .desktop file and return an error here.
     void setIcon(const char* icon_path) { heliosview_window_set_icon(m_window, icon_path); }
+
+    // Same, with icon flags (e.g. IconFlag::Template on macOS).
+    void setIcon(const char* icon_path, IconFlag flags)
+    {
+        heliosview_window_set_icon_ex(m_window, icon_path, toUint(flags));
+    }
 
     // ---- taskbar progress ----
 
@@ -322,8 +345,11 @@ public:
     Signal<> focused;                                      // window gained focus (activated)
     Signal<> blurred;                                      // window lost focus (deactivated)
     Signal<bool> enabledChanged;                           // enabled (true) / disabled (false)
-    Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered)
+    Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered; use keyEvent for repeat)
     Signal<KeyCode> keyReleased;                           // key released
+    Signal<KeyCode> keyRepeated;                           // OS auto-repeat of a held key (keyPressed does NOT fire for these)
+    Signal<const KeyEvent&> keyEvent;                      // every key down/up with modifiers + repeat flag
+    Signal<const std::string&> textInput;                  // UTF-8 text entered (keyboard or IME commit); long input arrives as consecutive events
     Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
     Signal<int32_t, int32_t, MouseButton> mouseButtonPressed;  // pressed (x, y, button)
     Signal<int32_t, int32_t, MouseButton> mouseButtonReleased; // released (x, y, button)
@@ -380,11 +406,21 @@ public:
         case EventType::WindowHidden:
             hidden();
             return true;
-        case EventType::KeyDown:
-            keyPressed(e.key);
+        case EventType::KeyDown: {
+            const bool repeat = (e.flags & HELIOSVIEW_EVENT_FLAG_KEY_REPEAT) != 0;
+            keyEvent(KeyEvent{e.key, e.modifiers, /*pressed=*/true, repeat});
+            if (repeat)
+                keyRepeated(e.key);
+            else
+                keyPressed(e.key);
             return true;
+        }
         case EventType::KeyUp:
+            keyEvent(KeyEvent{e.key, e.modifiers, /*pressed=*/false, /*repeat=*/false});
             keyReleased(e.key);
+            return true;
+        case EventType::TextInput:
+            textInput(std::string(e.text, e.textLen));
             return true;
         case EventType::MouseMove:
             mouseMoved(e.x, e.y);

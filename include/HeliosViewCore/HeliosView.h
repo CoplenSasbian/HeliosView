@@ -37,6 +37,7 @@
  * which comes in via the HeliosView::Core CMake target automatically).
  */
 
+#include <HeliosViewCore/Action.h>
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Async.h>
 #include <HeliosViewCore/Dialogs.h>

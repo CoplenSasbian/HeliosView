@@ -274,7 +274,12 @@ int main()
 {
     std::println("HeliosView {} - master demo", helios::version());
     helios::enableDpiAwareness();
+    helios::App::setAppId("com.example.heliosview.demo"); /* Windows AUMID / macOS bundle id / Linux app id */
+    std::println("[init] app id: {}", helios::App::appId());
     std::println("[init] notification backend: {}", helios::notificationInit() ? "ok" : "failed (unpackaged app)");
+    helios::notificationRequestPermission([](helios::NotificationPermission permission) {
+        std::println("[init] notification permission: {}", static_cast<int>(permission));
+    });
 
     /* Order matters: app first, then state - Tray/Menu use App::instance(), and
      * state (with the window/WebView) is destroyed before the App. */
@@ -419,7 +424,7 @@ int main()
     });
     win->bindJson<json>("dlg_openFiles", [&state](json) -> Task<json> {
         const auto files = helios::openFiles(state.win->nativeHandle(), "Pick files",
-                                             "All files (*.*)|*.*", true);
+                                             std::vector<helios::FileFilter>{{"All files", "*.*"}}, true);
         if (files.empty())
             throw std::runtime_error("cancelled");
         state.lastPicked = files.front();
@@ -427,7 +432,8 @@ int main()
     });
     win->bindJson<json>("dlg_saveFile", [&state](json) -> Task<boost::json::value> {
         std::string path;
-        if (!helios::saveFile(state.win->nativeHandle(), "Save file", "Text files (*.txt)|*.txt",
+        if (!helios::saveFile(state.win->nativeHandle(), "Save file",
+                              std::vector<helios::FileFilter>{{"Text files", "txt"}},
                               "untitled.txt", path))
             throw std::runtime_error("cancelled");
         state.lastPicked = path;
@@ -514,10 +520,10 @@ int main()
 
     win->bindJson<json>("tray_create", [&state](json) -> Task<bool> {
         if (!state.tray) {
-            state.tray = std::make_shared<helios::Tray>(state.win->nativeHandle(), "HeliosView Master Demo");
+            state.tray = std::make_shared<helios::Tray>("HeliosView Master Demo");
             if (!state.tray->valid()) {
                 state.tray.reset();
-                throw std::runtime_error("tray creation failed (window not shown?)");
+                throw std::runtime_error("tray creation failed");
             }
             state.tray->leftClicked.connect([&state] { emit(state, "tray-left-click"); });
             state.tray->leftDoubleClicked.connect([&state] {
@@ -543,7 +549,7 @@ int main()
     });
     win->bindJson<json>("menu_show", [&state](json) -> Task<bool> {
         if (!state.menu) {
-            auto menu = std::make_shared<helios::Menu>(state.win->nativeHandle());
+            auto menu = std::make_shared<helios::Menu>();
             if (!menu->valid())
                 throw std::runtime_error("menu creation failed");
             menu->addItem("Show / Restore")->triggered.connect([&state] {

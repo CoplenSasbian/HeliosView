@@ -3,23 +3,20 @@
 /**
  * HeliosView.Core -- Tray: a notification-area (system tray) icon.
  *
- * Attached to a created (shown) native window via window.nativeHandle(); the
- * icon lives until the Tray is destroyed or its window is destroyed (which
- * removes any trays attached to it). Mouse events on the icon are delivered
- * as TRAY_* events through the app's extension-sink registry, so a Tray works
- * without a C++ Window wrapper — it only needs the raw window handle.
+ * Completely standalone — it needs no window: create it, optionally attach a
+ * context menu with setMenu(), and connect the click signals. Mouse events on
+ * the icon are delivered as TRAY_* events through the app's extension-sink
+ * registry, so a Tray works without a C++ Window wrapper.
  *
  * Signals run on the message-loop thread:
  *   tray.leftClicked, tray.leftDoubleClicked, tray.rightClicked, tray.middleClicked
  *
- * Usage (from the README):
- *   helios::Window window(800, 600, "Tray Demo");
- *   window.show();                        // window must exist first
- *   helios::Tray tray(window.nativeHandle(), "Tray Demo");   // tooltip
+ * Usage:
+ *   helios::Tray tray("Tray Demo", "icon.png");   // tooltip, icon
  *   tray.leftClicked.connect([] { ... });
- *   tray.rightClicked.connect([&] { ... context menu ... });
+ *   tray.setMenu(menu);                           // portable context menu
  *
- * Destroy the tray before its window.
+ * Destroy the tray (and its menu) before the App.
  */
 
 #include <HeliosViewCore/App.h>
@@ -38,14 +35,23 @@ enum class NotifyIcon : int32_t {
 
 class Tray {
 public:
-    // Attach a tray icon to `window` (must already be created/shown) with the
-    // given tooltip (UTF-8). icon_path is an .ico/.cur path, or nullptr for
-    // the default application icon. Not copyable/movable: a Tray owns its icon.
-    Tray(heliosview_window_t* window, const char* tooltip, const char* icon_path = nullptr)
-        : m_tray(heliosview_tray_create(window, tooltip, icon_path, this))
+    // Create a standalone tray icon with the given tooltip (UTF-8). icon_path is
+    // an icon file path, or nullptr for the default application icon. Not copyable/movable.
+    Tray(const char* tooltip, const char* icon_path = nullptr)
+        : m_tray(heliosview_tray_create(tooltip, icon_path, this))
     {
         if (m_tray)
             m_sink = App::instance()->addSink([this](const Event& ev) { return handleEvent(ev); });
+    }
+
+    /**
+     * @deprecated Passing a window is deprecated because Tray is completely decoupled from windows.
+     * Use Tray(const char* tooltip, const char* icon_path = nullptr) instead.
+     */
+    [[deprecated("Tray no longer requires a window; use Tray(tooltip, icon_path) instead")]]
+    Tray(heliosview_window_t* /*window*/, const char* tooltip, const char* icon_path = nullptr)
+        : Tray(tooltip, icon_path)
+    {
     }
 
     ~Tray()
@@ -64,6 +70,25 @@ public:
     // Update the tooltip / replace the icon (nullptr = default icon)
     void setTooltip(const char* tooltip) { heliosview_tray_set_tooltip(m_tray, tooltip); }
     void setIcon(const char* icon_path) { heliosview_tray_set_icon(m_tray, icon_path); }
+
+    // Same, with icon flags — pass IconFlag::Template on macOS so the status-bar
+    // icon follows light/dark mode.
+    void setIcon(const char* icon_path, IconFlag flags)
+    {
+        heliosview_tray_set_icon_ex(m_tray, icon_path, toUint(flags));
+    }
+
+    // Attach a menu as this tray's context menu (nullptr detaches). The shell
+    // opens it: this is the only way a tray menu works on Linux (the menu is
+    // exported over DBus) and the idiomatic way on macOS. With a menu attached
+    // rightClicked (and on macOS leftClicked) may not fire — see heliosview.h.
+    // The tray holds a reference to the menu until it is replaced or destroyed.
+    template <class MenuT>
+    void setMenu(MenuT& menu)
+    {
+        heliosview_tray_set_menu(m_tray, menu.handle());
+    }
+    void setMenu(heliosview_menu_t* menu) { heliosview_tray_set_menu(m_tray, menu); }
 
     // Show a balloon notification next to the icon (works with no setup,
     // unlike OS toasts). Message-loop thread. Returns true when the OS accepted

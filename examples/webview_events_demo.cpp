@@ -77,7 +77,10 @@ int main()
                "<text x='48' y='60' font-size='40' text-anchor='middle' fill='#1e1e2e'>HV</text></svg>";
     }
     window->mapLocalFolder("assets.local", assetsDir.string().c_str());
-    std::println("[map] {} mapped to https://assets.local/", assetsDir.string());
+    // localUrl() builds the engine's URL shape (https://<host>/... on Windows,
+    // a custom scheme elsewhere) — never hard-code it.
+    const std::string logoUrl = window->localUrl("assets.local", "logo.svg");
+    std::println("[map] {} mapped to {}", assetsDir.string(), logoUrl);
 
     /* ---- native folder dialog exposed to the page through the bridge ---- */
     window->bindJson<BrowseReq>("browseFolder",
@@ -92,16 +95,16 @@ int main()
 
     /* ---- a page that uses all of the above ---- */
 
-    window->navigateHtml(
-        "<html><head><meta charset='utf-8'><title>HeliosView Events</title></head>"
-        "<body style='font-family:system-ui;background:#1e1e2e;color:#cdd6f4;margin:0;"
+    const std::string page =
+        std::string("<html><head><meta charset='utf-8'><title>HeliosView Events</title></head>")
+        + "<body style='font-family:system-ui;background:#1e1e2e;color:#cdd6f4;margin:0;"
         "height:100%;display:flex;flex-direction:column'>"
         "<div style='padding:12px'>"
         "<h2 style='margin:0 0 8px'>WebView Events + Local Resources + Folder Dialog</h2>"
         "<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap'>"
-        "<img id='logo' src='https://assets.local/logo.svg' width='48' height='48'"
+        "<img id='logo' src='" + logoUrl + "' width='48' height='48'"
         " style='background:#111;border-radius:8px' onerror=\"this.style.visibility='hidden'\">"
-        "<span>Local resource: https://assets.local/logo.svg</span>"
+        "<span>Local resource: " + logoUrl + "</span>"
         "<button onclick=\"browse()\">Browse folder...</button>"
         "<button onclick=\"document.title += ' #' + (++window.__n||1)\">Rename</button>"
         "<span id='picked' style='opacity:.6'></span>"
@@ -124,8 +127,8 @@ int main()
         "    else { line('result: ' + r.path); document.getElementById('picked').textContent = r.path; }"
         "  }"
         "</script>"
-        "</body></html>");
-
+        "</body></html>";
+    window->navigateHtml(page.c_str());
     // close button does NOT auto-close; connect to closeRequested and call close()
     window->closeRequested.connect([window] {
         std::println("[main] close requested -> closing");

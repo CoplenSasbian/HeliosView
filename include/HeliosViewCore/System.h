@@ -59,8 +59,9 @@ inline bool clipboardGetText(std::string& out)
     return true;
 }
 
-// Make the process per-monitor DPI aware (v2). Call once, before creating any
-// window. Returns true on success (or when already set). Message-loop thread.
+// Ensure per-monitor DPI awareness. Note: on supported platforms this is now
+// initialized automatically upon window creation; calling it manually remains
+// supported for explicit early initialization. Message-loop thread.
 inline bool enableDpiAwareness()
 {
     return heliosview_set_dpi_awareness() == 0;

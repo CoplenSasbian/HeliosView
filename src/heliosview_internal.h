@@ -16,6 +16,7 @@
 #include <new>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace hv {
 
@@ -62,17 +63,109 @@ void hv_dealloc(T* p)
 inline thread_local std::deque<heliosview_event_t> tls_event_queue;
 inline std::atomic<bool> g_quit{false}; /* process/loop-wide control flag; may be set from any thread */
 
-/* Native-message -> event converters. Registered handlers are tried in id order
- * after the library's built-in default_native_convert (which always runs first);
- * the first converter to return 1 (handled: it posted events via
- * heliosview_post_event) or 0 (consumed, no events) wins. Only ever touched
- * on the message-loop thread (add/remove happen during app setup, iteration in the
- * WndProc), so no locking is needed. */
+/* ---------- Live-window registry (thread-local, message-loop thread) ----------
+ * The core owns the registry, so every backend gets heliosview_window_count /
+ * heliosview_window_from_id for free: a backend only calls hv_register_window
+ * when the native window exists and hv_unregister_window before it is destroyed.
+ * The window object itself stays backend-private (stored as void*). */
+inline thread_local std::flat_map<uintptr_t, void*> tls_windows;
+
+inline void hv_register_window(uintptr_t window_id, void* window)
+{
+    if (window_id)
+        tls_windows[window_id] = window;
+}
+
+inline void hv_unregister_window(uintptr_t window_id)
+{
+    if (window_id)
+        tls_windows.erase(window_id);
+}
+
+inline void* hv_find_window(uintptr_t window_id)
+{
+    const auto it = tls_windows.find(window_id);
+    return it == tls_windows.end() ? nullptr : it->second;
+}
+
+inline int hv_window_count()
+{
+    return static_cast<int>(tls_windows.size());
+}
+
+/* ---------- Action registry (thread-local, message-loop thread) ----------
+ * id → live action object. Menus reference actions by pointer directly; this
+ * map exists for the paths that only have an id (accelerators, the legacy
+ * by-id menu helpers) and for heliosview_action_from_id. The object itself is
+ * backend-private (stored as void*). */
+inline thread_local std::flat_map<uint32_t, void*> tls_actions;
+inline std::atomic<uint32_t> g_next_action_id{1};
+
+inline uint32_t hv_register_action(void* action)
+{
+    const uint32_t id = g_next_action_id.fetch_add(1);
+    if (id == 0)
+        return 0; /* id space exhausted */
+    tls_actions[id] = action;
+    return id;
+}
+
+inline void hv_unregister_action(uint32_t id)
+{
+    if (id)
+        tls_actions.erase(id);
+}
+
+inline void* hv_find_action(uint32_t id)
+{
+    const auto it = tls_actions.find(id);
+    return it == tls_actions.end() ? nullptr : it->second;
+}
+
+/* Native message interceptor filters (pipeline / middleware chain).
+ * Only touched on the message-loop thread, so no locking is needed — the public
+ * header documents that register/remove must happen on the loop thread.
+ *
+ * The dispatch snapshot is rebuilt lazily whenever the registry changes, so the
+ * per-message path never allocates (the WndProc used to copy the whole map for
+ * every message), and a filter that removes itself while running still finishes
+ * the current message from the snapshot it was dispatched from. */
+struct heliosview_filter_entry {
+    heliosview_native_filter_fn filter;
+    void* userdata;
+};
+inline std::atomic<uint32_t> g_next_filter_id{1};
+inline std::flat_map<uint32_t, heliosview_filter_entry> g_native_filters;
+inline std::vector<heliosview_filter_entry> g_native_filter_snapshot; /* id order */
+inline bool g_native_filter_snapshot_dirty = true;
+
+/* The filters to dispatch this message, in registration (id) order. */
+inline const std::vector<heliosview_filter_entry>& native_filters_snapshot()
+{
+    if (g_native_filter_snapshot_dirty) {
+        g_native_filter_snapshot.clear();
+        g_native_filter_snapshot.reserve(g_native_filters.size());
+        for (const auto& [id, entry] : g_native_filters)
+            g_native_filter_snapshot.push_back(entry);
+        g_native_filter_snapshot_dirty = false;
+    }
+    return g_native_filter_snapshot;
+}
+
+/* Legacy converter delegates (adapted into the filter pipeline). */
 inline std::atomic<uint32_t> g_next_handler_id{1};
 inline std::flat_map<uint32_t, heliosview_native_handler_fn> g_native_handlers;
 
 /* Platform wake callback: the win32 implementation registers SetEvent (wakes the message-loop wait); may be null */
 inline void (*g_platform_wake)(void) = nullptr;
+
+/* ---------- Application identity + activation policy ----------
+ * Set by heliosview_app_init / heliosview_set_activation_policy (core), read by
+ * a backend before it creates its first window/tray (macOS: NSApplication
+ * activation policy, bundle identity; Linux: desktop/application id). Written
+ * once at startup, before any UI exists — a backend may cache the value. */
+inline std::string g_app_id; /* UTF-8, "" = unset */
+inline heliosview_activation_policy_t g_activation_policy = HELIOSVIEW_ACTIVATION_REGULAR;
 
 inline int64_t now_ms()
 {

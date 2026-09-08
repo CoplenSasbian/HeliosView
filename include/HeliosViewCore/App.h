@@ -41,6 +41,7 @@ struct app_scheduler; /* Forward declaration (defined below). */
 class Window; /* Only used for the userdata static_cast. */
 class Tray;   /* Only used for the friend (extension sink registry); defined in Tray.h. */
 class Menu;   /* Only used for the friend (extension sink registry); defined in Menu.h. */
+class Action; /* Only used for the friend (extension sink registry); defined in Action.h. */
 
 class App {
 public:
@@ -64,6 +65,25 @@ public:
 
     // The current App instance, or nullptr before any App is constructed
     static App* instance() { return s_instance; }
+
+    // ---- process identity / activation policy (call before creating UI) ----
+
+    // Set the application id (UTF-8): Windows AppUserModelID, macOS bundle
+    // identifier, Linux application id. Also the default for notificationInit().
+    static void setAppId(const char* appId) { heliosview_app_init(appId); }
+    static const char* appId() { return heliosview_app_id(); }
+
+    // How the process presents itself to the OS. Use Accessory for a tray-only
+    // application: on macOS that is what removes the (otherwise useless) Dock
+    // icon. Windows stores the value but has no equivalent concept.
+    static void setActivationPolicy(ActivationPolicy policy)
+    {
+        heliosview_set_activation_policy(static_cast<heliosview_activation_policy_t>(policy));
+    }
+    static ActivationPolicy activationPolicy()
+    {
+        return static_cast<ActivationPolicy>(heliosview_activation_policy());
+    }
 
     // Run the message loop. Dispatches queued events to windows and runs idle
     // tasks. Exits automatically when the last window is destroyed or after
@@ -105,16 +125,35 @@ public:
         heliosview_post_event(&c);
     }
 
-    // Register a native-message -> event converter callback (see heliosview.h for
-    // the return-value contract). The library's built-in conversion always runs
-    // first; registered converters are tried in order, and the first returning 1/0
-    // wins. Returns an id (0 = failure).
+    // Register a native message filter into the middleware pipeline (onion model).
+    // The filter can inspect/modify native messages, invoke next() to proceed downstream,
+    // and observe or adjust the result.
+    // Returns a filter ID (0 = failure).
+    static uint32_t addNativeFilter(heliosview_native_filter_fn filter, void* userdata = nullptr)
+    {
+        return heliosview_add_native_filter(filter, userdata);
+    }
+
+    // Remove a filter registered with addNativeFilter.
+    static void removeNativeFilter(uint32_t id)
+    {
+        heliosview_remove_native_filter(id);
+    }
+
+    /**
+     * @deprecated Legacy conversion delegate. Use addNativeFilter / removeNativeFilter
+     * for the pipeline/middleware filter model instead.
+     */
+    [[deprecated("Use addNativeFilter instead")]]
     static uint32_t addNativeHandler(heliosview_native_handler_fn handler)
     {
         return heliosview_add_native_handler(handler);
     }
 
-    // Remove a converter registered with addNativeHandler.
+    /**
+     * @deprecated Legacy conversion delegate. Use removeNativeFilter instead.
+     */
+    [[deprecated("Use removeNativeFilter instead")]]
     static void removeNativeHandler(uint32_t id)
     {
         heliosview_remove_native_handler(id);
@@ -182,6 +221,7 @@ private:
     SinkId m_nextSink = 1;
     friend class Tray;
     friend class Menu;
+    friend class Action;
 
     SinkId addSink(std::function<bool(const Event&)> sink)
     {

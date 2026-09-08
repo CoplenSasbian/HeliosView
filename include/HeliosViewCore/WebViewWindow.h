@@ -22,8 +22,20 @@
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
+#include <string>
 
 namespace helios {
+
+// Web engine version used by the WebView backend (UTF-8, e.g. "131.0.2903.86").
+// Empty = no engine available (on Windows: the WebView2 Runtime is not installed),
+// in which case createWebView() fails and the C API reports -4.
+// Platform meaning: Windows = WebView2 Runtime, macOS = system WebKit, Linux = WebKitGTK.
+inline std::string webViewEngineVersion()
+{
+    char buf[64] = {};
+    heliosview_webview_engine_version(buf, sizeof buf);
+    return buf;
+}
 
 class WebViewWindow : public Window {
 public:
@@ -144,11 +156,11 @@ public:
     // Fired on the UI thread when the page's <title> changes.
     Signal<std::string> titleChanged;
 
-    // Fired on the UI thread when a page load completes: error == 0 on success,
-    // otherwise a negated platform error code (on WebView2: -HRESULT, e.g.
-    // -COREWEBVIEW2_WEB_ERROR_STATUS_*). Not fired for navigations that never
-    // finish (e.g. aborted). Use it to know when the page is ready for eval()
-    // or to show an error state when loading fails.
+    // Fired on the UI thread when a page load completes: error ==
+    // WebViewError::Ok (0) on success, otherwise a portable WebViewError value
+    // (the engine's own code is available via lastNativeError()). Not fired for
+    // navigations that never finish (e.g. aborted). Use it to know when the page
+    // is ready for eval() or to show an error state when loading fails.
     Signal<int> navigationCompleted;
 
     // Register a veto callback for navigations. It runs on the UI thread just
@@ -275,14 +287,30 @@ public:
     // ---- local resources ----
 
     // Map a local folder to a virtual host name so the page can load files from
-    // it via https://<host>/<relative-path>. WebView2 restricts mappings to the
-    // ".local" host suffix (e.g. "assets.local"). Call before navigating; the
-    // page must be reloaded for new mappings to take effect.
+    // it. Build the URL with localUrl() — the URL shape is engine-defined
+    // (Windows: https://<host>/..., WebView2 requires the ".local" host suffix,
+    // e.g. "assets.local"; other engines register a custom scheme). Call before
+    // navigating; the page must be reloaded for new mappings to take effect.
     // Returns 0 = success, negative = failure.
     int mapLocalFolder(const char* host_name, const char* folder_path)
     {
         return heliosview_webview_map_local_folder(m_webview, host_name, folder_path);
     }
+
+    // The URL serving `path` from the folder mapped to `host_name` (see
+    // mapLocalFolder). Empty string on failure.
+    std::string localUrl(const char* host_name, const char* path)
+    {
+        char buf[1024] = {};
+        if (heliosview_webview_local_url(m_webview, host_name, path, buf, sizeof buf) != 0)
+            return {};
+        return buf;
+    }
+
+    // The engine's own error code for the last failed navigation (WebView2: a
+    // COREWEBVIEW2_WEB_ERROR_STATUS_* value; macOS: NSURLError; Linux: GError).
+    // 0 = none.
+    int lastNativeError() const { return heliosview_webview_last_native_error(m_webview); }
 
     // ---- JS <-> native bridge ----
     // The WebView injects a shim exposing window.helios.call(name, ...args) -> Promise
@@ -347,7 +375,10 @@ public:
     }
 
     // Run a JavaScript string; callback(error, result_json, userdata) fires once on the
-    // UI thread with the JSON encoding of the completion value. Queued while initializing.
+    // UI thread with the JSON encoding of the completion value. A returned Promise
+    // is awaited (so `fetch(...).then(r => r.json())` yields the JSON value); a
+    // thrown error or rejected promise reports a negative error and the message
+    // text. Queued while initializing.
     void evalAsync(const char* script, heliosview_webview_eval_cb callback, void* userdata = nullptr)
     {
         heliosview_webview_eval_async(m_webview, script, callback, userdata);

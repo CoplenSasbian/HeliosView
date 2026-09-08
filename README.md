@@ -126,9 +126,11 @@ Everything else comes from the OS: windowing, dialogs, toasts (WinRT via the
 Windows SDK), DWM backdrop. The WebView2 SDK is the only thing fetched at
 configure time (a `.nupkg` is just a zip of headers + the WebView2Loader
 library), cached in the build directory. Boost libs are initialized
-selectively at configure time (`git submodule update --init --depth 1` inside
-`third_party/boost/`) — do not run `git submodule update --init --recursive`,
-it would fetch all ~160 Boost libraries.
+selectively at configure time: a single `git submodule update --init --depth 1`
+inside `third_party/boost/` with every needed lib as a pathspec (git output is
+streamed and `--jobs` clones them in parallel, so a fresh clone never looks
+stalled) — do not run `git submodule update --init --recursive`, it would fetch
+all ~160 Boost libraries.
 
 ```sh
 git submodule update --init
@@ -263,6 +265,16 @@ int main()
 (taskbar), `setBackdrop(Mica/Acrylic)` + `setDarkMode` (Win11), `dpi`, and
 `WindowStyle::{Normal, Borderless, Frameless}`. `focused`/`blurred` signals
 report activation changes. Titles and strings are UTF-8.
+
+**Text and modifier state.** `keyPressed` fires only for the initial press,
+`keyRepeated` for OS auto-repeat, and `keyEvent(const KeyEvent&)` for every key
+down/up with `modifiers` (`helios::mods::Ctrl | helios::mods::Shift | …`,
+including LEFT_/RIGHT_ bits and lock state) and a `repeat` flag.
+`textInput(const std::string&)` delivers UTF-8 text as typed — IME commits
+included; input longer than the event buffer arrives as consecutive events, so
+nothing is ever truncated. In the C API the same information is in
+`heliosview_event_t` (`modifiers`, `flags`, `text`/`text_len`, and
+`HELIOSVIEW_EVENT_TEXT_INPUT`).
 
 **Close button behavior.** Clicking the close button (×) or pressing Alt+F4
 does **not** destroy the window — it only emits the `closeRequested` signal.
@@ -422,8 +434,10 @@ them and can never shadow the built-in components.
 - **Navigation events** — four signals on `WebViewWindow`, all fired on the UI
   thread: `navigationStarting` (with the `navigationStartingGate` veto
   `std::function`), `urlChanged`, `titleChanged`, `navigationCompleted`.
-- **`mapLocalFolder(host, folder)`** — serves a local folder over a virtual
-  `https://<host>/` host for assets outside the packaged frontend.
+- **`mapLocalFolder(host, folder)`** + **`localUrl(host, path)`** — serves a local
+  folder for assets outside the packaged frontend; build the URL with `localUrl()`
+  (Windows: a virtual `https://<host>/` host; other engines register a custom
+  scheme, so never hard-code the URL).
 - **`helios::selectFolder`** and friends — native dialogs exposed to the page
   through a `bindJson` handler.
 
@@ -492,14 +506,18 @@ std::string folder;
 if (helios::selectFolder(window.nativeHandle(), "Pick a folder", folder))
     std::println("folder: {}", folder);
 
-// file pickers (single or multi; "Name|*.ext|..." filter format)
+// file pickers (single or multi; structured filters: name + extensions)
 auto files = helios::openFiles(window.nativeHandle(), "Pick images",
-                               "Images (*.png;*.jpg)|*.png;*.jpg|All files (*.*)|*.*",
+                               std::vector<helios::FileFilter>{
+                                   {"Images", "png;jpg;jpeg"},
+                                   {"All files", "*.*"}
+                               },
                                /*multi=*/true);
 
 // save dialog
 std::string path;
-if (helios::saveFile(window.nativeHandle(), "Save as", "Text (*.txt)|*.txt", "out.txt", path))
+if (helios::saveFile(window.nativeHandle(), "Save as",
+                     std::vector<helios::FileFilter>{{"Text", "txt"}}, "out.txt", path))
     std::println("saving to {}", path);
 
 // clipboard
@@ -514,40 +532,105 @@ helios::showInFolder("C:\\path\\to\\file.txt");
 
 ### 7. Notifications (toasts)
 
-Modern OS toasts. **Thread-agnostic**: call from any thread. Init once at
-startup (registers an AppUserModelID + Start Menu shortcut):
+Modern OS toasts. **Thread-agnostic**: call from any thread (the callbacks run on
+an unspecified thread — marshal back to the loop thread before touching UI).
+Init once at startup (registers the application id: Windows AppUserModelID +
+Start Menu shortcut, macOS bundle id, Linux desktop id):
 
 ```cpp
-helios::notificationInit("MyApp");                    // once, at startup
+helios::App::setAppId("com.example.myapp");           // or pass it to init
+helios::notificationInit();                           // once, at startup
+helios::notificationRequestPermission([](helios::NotificationPermission p) {
+    // macOS: the system prompt was answered; Windows/Linux: the OS setting
+    std::println("permission = {}", static_cast<int>(p));
+});
+helios::notificationSetClickCallback([](const char* title, const char* body) {
+    /* the user clicked the toast */
+});
 helios::notificationShow("Download", "Finished");     // any thread
 ```
+
+macOS silently drops toasts until the user allows them, so ask for permission at
+startup. On Windows the first run of a brand-new app id reports
+`NotificationPermission::Unknown` (the OS registers it asynchronously); that is
+not a denial.
 
 ### 8. Tray icon + popup / context menu
 
 `helios::Tray` shows an icon in the notification area; `helios::Menu` is a
-popup / context menu. Both attach to a **created (shown)** native window and
-respond through signals:
+popup / context menu. A menu is **standalone** (no window needed to build it;
+`show(window)` takes an optional owner) and displays **actions** — the action
+owns the command (label, enabled/checked state, `triggered`), the menu owns the
+layout. The same action can be shown by several menus:
 
 ```cpp
-helios::Menu menu(window.nativeHandle());
-helios::Menu::Item* show = menu.addItem("Show / Restore");
+helios::Action copy("Copy");                 // shared command
+copy.triggered.connect(&onCopy, this);
+
+helios::Menu menu;                           // no window needed
+helios::Menu::Item* show = menu.addItem("Show / Restore");   // menu-owned action
 helios::Menu::Item* quit = menu.addItem("Quit");
 helios::Menu::Item* top = menu.addCheckItem("Toggle Topmost"); // checkable
 helios::Menu::Item* off = menu.addItem("Unavailable");
 off->setEnabled(false);                              // grayed out, not selectable
+menu.addAction(copy);                                // shared action
 menu.addSeparator();
-show->setDefault(true);                              // bold default item
+menu.setDefaultAction(*show);                        // bold default item
 show->triggered.connect([&] { window.showNormal(); });
 quit->triggered.connect([&] { app.quit(); });
 top->triggered.connect([&] {                    // toggle the checkmark
     top->setChecked(!top->checked());
     /* ... apply the state ... */
 });
+editMenu->addAction(copy);                           // same command, another menu
+copy.setEnabled(false);                              // both menus gray out
 
-helios::Tray tray(window.nativeHandle(), "Tray Demo");
+// Standard roles: the platform supplies the label and shortcut, and the library
+// performs the action where the app cannot (edit / window commands).
+editMenu->addRole(helios::MenuRole::Cut);            // ⌘X on macOS, Ctrl+X on Windows
+editMenu->addRole(helios::MenuRole::Copy);
+editMenu->addRole(helios::MenuRole::Paste);
+windowMenu->addRole(helios::MenuRole::Minimize);
+appMenu->addRole(helios::MenuRole::Quit);            // "Quit <App>" ⌘Q / "Exit"
+
+helios::Action open("Open…", "Primary+O");           // portable shortcut string
+open.triggered.connect(&onOpen, this);
+fileMenu->addAction(open);
+
+// Application menu bar: macOS installs the one global bar (first submenu = App
+// menu); Windows shows it as the bar of every window, including future ones.
+helios::Menu bar;
+bar.addSubmenu("File")->addAction(open);
+bar.addSubmenu("Edit")->addRole(helios::MenuRole::Copy);
+bar.setAppMenu();
+
+// A shortcut on an action is an application-wide accelerator: heliosview_run /
+// heliosview_pump_events translate it; an app running its own loop calls
+// heliosview_translate_accelerator(&msg) before DispatchMessage.
+
+helios::Tray tray("Tray Demo");
+tray.setMenu(menu);                                    // portable context menu
 tray.leftClicked.connect([] { /* ... */ });
-tray.rightClicked.connect([&] { menu.show(window.nativeHandle()); });
 tray.notify("Tray", "Hello");                          // balloon (no setup needed)
+
+// Attach the menu instead of popping it up from rightClicked: on Linux the
+// shell owns the menu (it is exported over DBus, the app cannot show it) and on
+// macOS an NSStatusItem menu opens on any click — so with a menu attached the
+// click events may not be delivered at all. Detach with tray.setMenu(nullptr).
+```
+
+Window chrome is portable too: `WindowStyle` picks the baseline, `WindowFlag`
+refines it, and the same code gives each OS its idiomatic look:
+
+```cpp
+// macOS: real title bar, hidden title, content underneath, traffic lights over
+// the page. Windows: no native caption, the app draws its own chrome.
+helios::Window w(900, 600, "App", helios::WindowStyle::Normal,
+                 helios::WindowFlag::TitleBarHidden
+                     | helios::WindowFlag::TitleBarTransparent
+                     | helios::WindowFlag::FullSizeContent);
+w.scaleFactor();      // 1.0 / 2.0 — logical units -> device pixels
+w.flags();            // the flags it was created with
 ```
 
 ### 9. The C API

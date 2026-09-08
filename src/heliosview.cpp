@@ -1,6 +1,8 @@
-// HeliosView.dll - platform-independent core: version, allocator, events, conversion-delegate registration.
-// Platform-specific implementation lives in src/win32/ (window/message loop, WebView2, dialogs, toasts).
+// HeliosView.dll - platform-independent core: version, allocator, events, window registry,
+// conversion-delegate registration, UTF codecs. The platform backend (src/<os>/) implements the
+// rest of the public API; the contract it must satisfy is src/heliosview_backend.h.
 #include <HeliosView/heliosview.h>
+#include "heliosview_backend.h"
 #include "heliosview_internal.h"
 
 #include <chrono>
@@ -35,6 +37,40 @@ void heliosview_free(void* ptr)
         hv::g_allocator.free_(ptr, hv::g_allocator.context);
     else
         std::free(ptr);
+}
+
+/* ================= Application identity + activation policy =================
+ *
+ * Process-wide settings the core owns (a backend reads hv::g_app_id /
+ * hv::g_activation_policy when it creates its application object). Called once
+ * at startup, before any window/tray exists, so no locking is needed. */
+
+int heliosview_app_init(const char* app_id)
+{
+    hv::g_app_id = app_id ? app_id : "";
+    return 0;
+}
+
+const char* heliosview_app_id(void)
+{
+    return hv::g_app_id.c_str();
+}
+
+int heliosview_set_activation_policy(heliosview_activation_policy_t policy)
+{
+    if (policy < HELIOSVIEW_ACTIVATION_REGULAR || policy > HELIOSVIEW_ACTIVATION_PROHIBITED)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "unknown activation policy");
+    hv::g_activation_policy = policy;
+    /* The policy is stored by the core; a backend applies it when it creates the
+     * application object. Windows has no equivalent concept — it reports success
+     * (the value is honored by heliosview_activation_policy) rather than failing
+     * a call whose intent is meaningful. */
+    return 0;
+}
+
+heliosview_activation_policy_t heliosview_activation_policy(void)
+{
+    return hv::g_activation_policy;
 }
 
 /* ================= Event queue (thread-local) =================
@@ -90,11 +126,56 @@ void heliosview_wake_loop(void)
         hv::g_platform_wake();
 }
 
-/* ================= Conversion delegates ================= */
+/* ================= Window registry & backend identity (core-owned) =================
+ *
+ * The registry itself lives in heliosview_internal.h (thread-local, filled by
+ * the backend on create/destroy); the backend only has to validate that a
+ * native handle still belongs to it. Keeping these two functions in the core
+ * means a new platform never reimplements them. */
 
-/* Register `handler`. It is tried after the library's built-in default conversion
- * (which always runs first); the first converter returning 1 or 0 wins. Returns an
- * id (0 = failure, e.g. null handler). */
+heliosview_window_t* heliosview_window_from_id(uintptr_t window_id)
+{
+    if (!window_id || !hv_backend_window_alive(window_id))
+        return nullptr;
+    return static_cast<heliosview_window_t*>(hv::hv_find_window(window_id));
+}
+
+int heliosview_window_count(void)
+{
+    return hv::hv_window_count();
+}
+
+const char* heliosview_backend_name(void)
+{
+    return hv_backend_name();
+}
+
+heliosview_action_t* heliosview_action_from_id(uint32_t id)
+{
+    return static_cast<heliosview_action_t*>(hv::hv_find_action(id));
+}
+
+/* ================= Native message filters & legacy delegates ================= */
+
+uint32_t heliosview_add_native_filter(heliosview_native_filter_fn filter, void* userdata)
+{
+    if (!filter)
+        return 0;
+    const uint32_t id = hv::g_next_filter_id.fetch_add(1);
+    hv::g_native_filters[id] = {filter, userdata};
+    hv::g_native_filter_snapshot_dirty = true; /* the WndProc dispatch cache */
+    return id;
+}
+
+int heliosview_remove_native_filter(uint32_t id)
+{
+    if (!hv::g_native_filters.erase(id))
+        return -1;
+    hv::g_native_filter_snapshot_dirty = true;
+    return 0;
+}
+
+/* Legacy converter delegate adapter: forwards into g_native_handlers */
 uint32_t heliosview_add_native_handler(heliosview_native_handler_fn handler)
 {
     if (!handler)
@@ -104,8 +185,6 @@ uint32_t heliosview_add_native_handler(heliosview_native_handler_fn handler)
     return id;
 }
 
-/* Remove a handler previously registered with heliosview_add_native_handler.
- * 0 = success, negative = the id is not registered. */
 int heliosview_remove_native_handler(uint32_t id)
 {
     return hv::g_native_handlers.erase(id) ? 0 : -1;

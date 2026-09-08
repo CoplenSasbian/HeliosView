@@ -42,6 +42,23 @@
  *   (heliosview_post_event) or wake the loop (heliosview_wake_loop); the C++
  *   wrapper provides App::postTask for this.
  *
+ *   Platform note: on Windows the message-loop thread may be any thread. On
+ *   macOS and Linux it must be the process's MAIN thread — AppKit (NSApplication)
+ *   and GTK both require UI work there — so a portable program runs its loop on
+ *   main() and hands work to other threads, never the other way round.
+ *
+ * Coordinates: every screen coordinate and size in this API uses the same
+ * convention as Win32 — origin at the TOP-LEFT of the primary display, x right,
+ * y down, in virtual-desktop logical units (DPI-independent pixels/points).
+ * Backends whose native origin differs (macOS: bottom-left, y up) convert
+ * internally; portable code never sees the difference. The scale of one unit is
+ * reported by heliosview_window_scale_factor().
+ *
+ * Wide characters: wchar_t is UTF-16 on Windows and UTF-32 on macOS/Linux, so
+ * heliosview_utf8_to_wide / heliosview_wide_to_utf8 convert to and from the
+ * PLATFORM's wchar_t — not to UTF-16 specifically. Prefer the UTF-8 API and use
+ * these codecs only to interop with a platform's wide-char functions.
+ *
  * C++ users should include <HeliosViewCore/HeliosView.h> (the HeliosView.Core wrapper).
  */
 
@@ -59,38 +76,49 @@ extern "C" {
 
 HELIOSVIEW_API const char* heliosview_version(void);
 
+/* Backend identity: "win32", "macos", "linux", or "portable" (this platform has
+ * no backend yet — every feature then reports HELIOSVIEW_ERROR_UNSUPPORTED).
+ * Static string, never NULL. Diagnostic / test output. */
+HELIOSVIEW_API const char* heliosview_backend_name(void);
+
 /* ================= Error reporting =================
  *
  * Return convention (every function): 0 = success, < 0 = an error code,
- * > 0 = a payload / count — with one exception below, the negated HRESULT
- * form, which is a positive number:
+ * > 0 = a payload / count (e.g. number of items or characters).
  *
- *     -1   generic failure — invalid/missing argument, an OS/COM call failed
- *          with no better code available, or the function was called on the
- *          wrong thread
- *     -2   invalid name: not a C identifier ([A-Za-z_][A-Za-z0-9_]*) — used by
- *          the WebView bind / subscribe / broadcast name checks
- *     -3   HELIOSVIEW_WEBVIEW_DESTROYED: the WebView instance was already
- *          destroyed (see the WebView section)
- *     a small negative value (e.g. -5)  — the negated Win32 GetLastError code
- *     a large positive value (e.g. 2147467259) — the negated HRESULT: the
- *       HRESULT with its sign flipped, as returned by WebView2 / DWM / COM
- *       failures (E_FAIL 0x80004005 surfaces as 2147467259).
+ * Standard error codes:
+ *     0   HELIOSVIEW_SUCCESS: operation completed successfully
+ *    -1   HELIOSVIEW_ERROR_GENERIC: generic failure — invalid/missing argument,
+ *         underlying platform call failed with no specific code, or called on the wrong thread
+ *    -2   HELIOSVIEW_ERROR_INVALID_ARGUMENT: invalid argument or name (e.g. not a valid C identifier)
+ *    -3   HELIOSVIEW_WEBVIEW_DESTROYED: the WebView instance was already destroyed
+ *    -4   HELIOSVIEW_ERROR_UNSUPPORTED: the platform or OS version cannot provide this
+ *         feature (e.g. a Mica backdrop on Windows 10, any Windows-only feature on
+ *         another platform). Safe to ignore: callers degrade to their fallback.
+ *
+ * Other error codes are platform codes:
+ *   - a small negative value (e.g. -5) is the negated OS error status (Win32
+ *     GetLastError);
+ *   - a large positive value (e.g. 2147467259) is the negated HRESULT as returned
+ *     by COM / WebView2 / DWM failures (E_FAIL 0x80004005 surfaces as 2147467259).
+ * A negated platform code can collide numerically with the reserved codes above;
+ * read heliosview_last_error_string for the actual reason.
  *
  * Async completion callbacks (error != 0) use the same code space.
  *
- * The reserved codes -1 / -2 / -3 take precedence in meaning; a negated Win32
- * code with the same numeric value (e.g. Win32 error 2 → -2) is not
- * distinguishable by number alone — read heliosview_last_error_string for the
- * actual reason.
- *
- * For the reason behind the most recent failure on this thread, use
+ * For the descriptive reason behind the most recent failure on this thread, use
  * heliosview_last_error / heliosview_last_error_string — every failing call
- * records a descriptive message at the failure site.
- * Note: heliosview_wait / heliosview_poll and the folder/file-picker functions
- * return small tri-state results (1/0) that are NOT error codes — their
- * meaning is documented per function.
+ * records a failure-site message.
+ * Note: heliosview_wait / heliosview_poll and dialog functions return small
+ * tri-state status codes (1/0) documented per function.
  */
+
+#define HELIOSVIEW_SUCCESS                 0
+#define HELIOSVIEW_ERROR_GENERIC          (-1)
+#define HELIOSVIEW_ERROR_INVALID_ARGUMENT (-2)
+#define HELIOSVIEW_WEBVIEW_DESTROYED      (-3)
+#define HELIOSVIEW_ERROR_UNSUPPORTED      (-4)
+
 
 /* The error code recorded by the most recent failing library call on this
  * thread (0 = no error recorded). Meaningful only immediately after a call
@@ -192,6 +220,7 @@ typedef enum heliosview_event_type {
     HELIOSVIEW_EVENT_WINDOW_RESTORED,          /* window restored to normal from minimized/maximized. A RESIZE with the real size follows; plain resizes and fullscreen toggles never produce this. */
     HELIOSVIEW_EVENT_WINDOW_SHOWN,             /* window became visible (show/hide only; the first show stays WINDOW_FIRST_SHOWN) */
     HELIOSVIEW_EVENT_WINDOW_HIDDEN,            /* window became hidden. Minimize is NOT a hide: a minimized window keeps WS_VISIBLE, so it reports WINDOW_MINIMIZED instead. */
+    HELIOSVIEW_EVENT_TEXT_INPUT,                /* text was entered (keyboard or IME commit): UTF-8 in text[0..text_len); see heliosview_event_t */
 } heliosview_event_type_t;
 
 /* Platform-independent keycodes (native keycodes are mapped in the C layer) */
@@ -251,19 +280,109 @@ typedef enum heliosview_keycode {
     HELIOSVIEW_KEY_F9,
     HELIOSVIEW_KEY_F10,
     HELIOSVIEW_KEY_F11,
-    HELIOSVIEW_KEY_F12
+    HELIOSVIEW_KEY_F12,
+    /* editing / navigation */
+    HELIOSVIEW_KEY_TAB,
+    HELIOSVIEW_KEY_BACKSPACE,
+    HELIOSVIEW_KEY_DELETE,
+    HELIOSVIEW_KEY_INSERT,
+    HELIOSVIEW_KEY_HOME,
+    HELIOSVIEW_KEY_END,
+    HELIOSVIEW_KEY_PAGE_UP,
+    HELIOSVIEW_KEY_PAGE_DOWN,
+    /* modifier keys (also reported as bits in heliosview_event_t::modifiers) */
+    HELIOSVIEW_KEY_LEFT_SHIFT,
+    HELIOSVIEW_KEY_RIGHT_SHIFT,
+    HELIOSVIEW_KEY_LEFT_CTRL,
+    HELIOSVIEW_KEY_RIGHT_CTRL,
+    HELIOSVIEW_KEY_LEFT_ALT,
+    HELIOSVIEW_KEY_RIGHT_ALT,
+    HELIOSVIEW_KEY_LEFT_META,   /* Windows / Command key */
+    HELIOSVIEW_KEY_RIGHT_META,
+    /* punctuation (US layout names; the character itself arrives via TEXT_INPUT) */
+    HELIOSVIEW_KEY_MINUS,
+    HELIOSVIEW_KEY_EQUAL,
+    HELIOSVIEW_KEY_LEFT_BRACKET,
+    HELIOSVIEW_KEY_RIGHT_BRACKET,
+    HELIOSVIEW_KEY_BACKSLASH,
+    HELIOSVIEW_KEY_SEMICOLON,
+    HELIOSVIEW_KEY_APOSTROPHE,
+    HELIOSVIEW_KEY_GRAVE,
+    HELIOSVIEW_KEY_COMMA,
+    HELIOSVIEW_KEY_PERIOD,
+    HELIOSVIEW_KEY_SLASH,
+    /* locks / system */
+    HELIOSVIEW_KEY_CAPS_LOCK,
+    HELIOSVIEW_KEY_NUM_LOCK,
+    HELIOSVIEW_KEY_SCROLL_LOCK,
+    HELIOSVIEW_KEY_PRINT_SCREEN,
+    HELIOSVIEW_KEY_PAUSE,
+    HELIOSVIEW_KEY_MENU,        /* context-menu key */
+    /* numeric keypad */
+    HELIOSVIEW_KEY_NUMPAD_0,
+    HELIOSVIEW_KEY_NUMPAD_1,
+    HELIOSVIEW_KEY_NUMPAD_2,
+    HELIOSVIEW_KEY_NUMPAD_3,
+    HELIOSVIEW_KEY_NUMPAD_4,
+    HELIOSVIEW_KEY_NUMPAD_5,
+    HELIOSVIEW_KEY_NUMPAD_6,
+    HELIOSVIEW_KEY_NUMPAD_7,
+    HELIOSVIEW_KEY_NUMPAD_8,
+    HELIOSVIEW_KEY_NUMPAD_9,
+    HELIOSVIEW_KEY_NUMPAD_DECIMAL,
+    HELIOSVIEW_KEY_NUMPAD_DIVIDE,
+    HELIOSVIEW_KEY_NUMPAD_MULTIPLY,
+    HELIOSVIEW_KEY_NUMPAD_SUBTRACT,
+    HELIOSVIEW_KEY_NUMPAD_ADD,
+    HELIOSVIEW_KEY_NUMPAD_ENTER
 } heliosview_keycode_t;
 
 typedef enum heliosview_mouse_button {
     HELIOSVIEW_MOUSE_LEFT = 1,
     HELIOSVIEW_MOUSE_RIGHT,
-    HELIOSVIEW_MOUSE_MIDDLE
+    HELIOSVIEW_MOUSE_MIDDLE,
+    HELIOSVIEW_MOUSE_X1,     /* first extra button (browser "back") */
+    HELIOSVIEW_MOUSE_X2      /* second extra button (browser "forward") */
 } heliosview_mouse_button_t;
 
+/* Modifier keys held while an input event was produced (bit flags; OR of the
+ * bits below). The generic bits are set for either side; the LEFT_/RIGHT_ bits
+ * tell which physical key is down. */
+typedef enum heliosview_modifier {
+    HELIOSVIEW_MOD_NONE       = 0,
+    HELIOSVIEW_MOD_SHIFT      = 1u << 0,
+    HELIOSVIEW_MOD_CTRL       = 1u << 1,
+    HELIOSVIEW_MOD_ALT        = 1u << 2,
+    HELIOSVIEW_MOD_META       = 1u << 3,  /* Windows / Command key */
+    HELIOSVIEW_MOD_LEFT_SHIFT = 1u << 4,
+    HELIOSVIEW_MOD_RIGHT_SHIFT = 1u << 5,
+    HELIOSVIEW_MOD_LEFT_CTRL  = 1u << 6,
+    HELIOSVIEW_MOD_RIGHT_CTRL = 1u << 7,
+    HELIOSVIEW_MOD_LEFT_ALT   = 1u << 8,
+    HELIOSVIEW_MOD_RIGHT_ALT  = 1u << 9,
+    HELIOSVIEW_MOD_LEFT_META  = 1u << 10,
+    HELIOSVIEW_MOD_RIGHT_META = 1u << 11,
+    HELIOSVIEW_MOD_CAPS_LOCK  = 1u << 12,
+    HELIOSVIEW_MOD_NUM_LOCK   = 1u << 13,
+} heliosview_modifier_t;
 
+/* Extra per-event state (bit flags in heliosview_event_t::flags). */
+typedef enum heliosview_event_flag {
+    HELIOSVIEW_EVENT_FLAG_NONE       = 0,
+    HELIOSVIEW_EVENT_FLAG_KEY_REPEAT = 1u << 0, /* KEY_DOWN: OS auto-repeat, not the initial press */
+} heliosview_event_flag_t;
 
-/* Event: flat POD, safe to pass across the DLL boundary. The struct layout is
- * fixed for the 1.x series: new event data is added only at a major version. */
+/* Event: flat POD, safe to pass across the DLL boundary, no ownership. Fields are
+ * meaningful only for the event types noted next to them; unused fields are 0.
+ *
+ * The struct layout is fixed for the 1.x series: new event data is added only at
+ * a major version (new event TYPES may be added at any time).
+ *
+ * TEXT_INPUT: `text` holds UTF-8 (IME commits included), `text_len` its byte
+ * length; the buffer is always NUL-terminated and text_len < sizeof(text).
+ * Input longer than the buffer is split into consecutive TEXT_INPUT events at
+ * UTF-8 codepoint boundaries, so no bytes are ever dropped — append them in
+ * order to reconstruct the full string. */
 typedef struct heliosview_event {
     heliosview_event_type_t type;
     uintptr_t window_id;                     /* native window handle of the event's origin (0 = not window-related; HWND on Windows) */
@@ -276,6 +395,10 @@ typedef struct heliosview_event {
     heliosview_mouse_button_t mouse_button;  /* button (MOUSE_BUTTON_*) */
     uint32_t menu_item;                      /* menu item id (MENU_SELECT) */
     void* userdata;                          /* owning tray/menu userdata (TRAY_* / MENU_SELECT) */
+    uint32_t modifiers;                      /* HELIOSVIEW_MOD_* bits held (KEY_*, MOUSE_*, TEXT_INPUT) */
+    uint32_t flags;                          /* HELIOSVIEW_EVENT_FLAG_* bits (KEY_DOWN) */
+    uint32_t text_len;                       /* TEXT_INPUT: UTF-8 length in text[] (0 = none) */
+    char text[48];                           /* TEXT_INPUT: UTF-8 text, NUL-terminated */
 } heliosview_event_t;
 
 /* ================= Event queue =================
@@ -303,29 +426,76 @@ HELIOSVIEW_API void heliosview_quit(void);
  * process pending work (e.g. scheduled tasks). No-op when no loop is running. */
 HELIOSVIEW_API void heliosview_wake_loop(void);
 
-/* ================= Native message -> event conversion ================= */
+/* ================= Native message interceptor / pipeline filter =================
+ *
+ * Intercepts or augments native window messages (middleware / onion model).
+ * Filters run BEFORE the library's built-in conversion, so a filter sees every
+ * message first (the legacy heliosview_native_handler_fn delegates run after it).
+ *
+ * native_context:
+ *   - window_id: native window handle / ID (0 = global or unparented message)
+ *   - native_msg: platform-specific native message pointer (const MSG* on Windows,
+ *                 NSEvent* on macOS, GdkEvent* on Linux). Valid ONLY for the
+ *                 duration of the callback: inspect it, never store, replace or
+ *                 free it (the library hands the original to the default
+ *                 procedure and the OS).
+ *   - result: platform result code the window procedure returns to the system
+ *   - is_handled: 1 = the message is considered handled (no default processing),
+ *                 0 = unhandled
+ *
+ * Filters are chained: each filter can perform pre-processing, conditionally invoke
+ * next(ctx, next_ud) to forward to downstream filters / default handling, and perform
+ * post-processing (e.g. adjusting result or observing return values).
+ * Not invoking next() short-circuits the pipeline and prevents downstream processing.
+ * The value returned to the OS is always ctx->result, so a filter that wants to
+ * force a specific return value (including 0) sets ctx->result itself; the terminal
+ * stage sets it to 0 when the built-in conversion handled the message, otherwise to
+ * the platform's default-procedure result.
+ *
+ * Threading: register and remove filters on the message-loop thread — dispatch
+ * happens there and the registry is not locked. Registering from another thread
+ * is a data race, not a no-op.
+ *
+ * Filter ids and legacy handler ids come from separate id spaces: an id from
+ * heliosview_add_native_handler is not valid for heliosview_remove_native_filter.
+ */
 
-/* Conversion delegate: native_msg is a platform native message pointer, valid
- * only during the callback; on Windows it is const MSG* (callback runs on the
- * message-dispatch thread). window_id is the native window handle of the
- * message's window (0 = none; the HWND on Windows) — set it on every event you
- * post, so the event routes back to that window (see heliosview_event_t).
- * Return value:
- *   1  -> handled: the delegate posted the resulting event(s) via
- *         heliosview_post_event (post only when returning 1)
- *   0  -> consumed, no events posted
- *  -1  -> not handled; the next converter is tried
- * The library's built-in conversion always runs first; registered converters are
- * then tried in registration order, and the first that returns 1 or 0 wins. If no
- * converter returns 1 or 0, the message falls through to the platform (DefWindowProc). */
+typedef struct heliosview_native_context {
+    uintptr_t window_id;     /* native window handle / ID of the message origin (0 = none / global) */
+    void* native_msg;        /* platform-specific native message (Windows: const MSG*) */
+    intptr_t result;         /* platform return value / LRESULT when handled */
+    int is_handled;          /* 1 = handled (inhibits system default procedure), 0 = unhandled */
+} heliosview_native_context_t;
+
+typedef void (*heliosview_next_filter_fn)(heliosview_native_context_t* ctx, void* next_ud);
+
+typedef void (*heliosview_native_filter_fn)(
+    heliosview_native_context_t* ctx,
+    heliosview_next_filter_fn next,
+    void* next_ud,
+    void* userdata);
+
+/* Register a native filter into the interceptor pipeline.
+ * Filters are invoked in registration order (outer to inner).
+ * Returns a filter ID (0 on failure) used to remove it. */
+HELIOSVIEW_API uint32_t heliosview_add_native_filter(heliosview_native_filter_fn filter, void* userdata);
+
+/* Remove a filter previously registered with heliosview_add_native_filter.
+ * 0 = success, negative = not found. */
+HELIOSVIEW_API int heliosview_remove_native_filter(uint32_t id);
+
+/* Legacy conversion delegate: wraps a simple converter function into the pipeline. */
 typedef int (*heliosview_native_handler_fn)(void* native_msg, uintptr_t window_id);
 
-/* Register a converter (see above). Returns an id used by
- * heliosview_remove_native_handler (0 = failure, e.g. null handler). */
+/**
+ * @deprecated Legacy conversion delegate. Use heliosview_add_native_filter instead for
+ * the pipeline middleware filter model.
+ */
 HELIOSVIEW_API uint32_t heliosview_add_native_handler(heliosview_native_handler_fn handler);
 
-/* Remove a converter previously registered with heliosview_add_native_handler.
- * 0 = success, negative = not registered. */
+/**
+ * @deprecated Use heliosview_remove_native_filter instead.
+ */
 HELIOSVIEW_API int heliosview_remove_native_handler(uint32_t id);
 
 /* ================= Message loop ================= */
@@ -341,6 +511,68 @@ HELIOSVIEW_API void heliosview_pump_events(void);
  * 0 = normal exit (heliosview_quit / WM_QUIT / callback returned non-zero) */
 HELIOSVIEW_API int heliosview_run(heliosview_loop_callback frame_callback, void* userdata);
 
+/* ================= Application (identity + activation policy) =================
+ *
+ * Process-wide settings that a backend needs BEFORE the first window/tray is
+ * created. Both are optional: a program that never calls them behaves as
+ * heliosview_set_activation_policy(HELIOSVIEW_ACTIVATION_REGULAR) with an empty
+ * app id. Call them first thing in main(), before creating any window, menu or
+ * tray; calling them later is allowed but a policy change may not be applied
+ * retroactively by every backend.
+ */
+
+/* How the process presents itself to the OS:
+ *   REGULAR    a normal GUI application (default): Dock icon on macOS, taskbar
+ *              presence on Windows/Linux.
+ *   ACCESSORY  no Dock/taskbar icon of its own — the normal choice for a
+ *              tray-only or menu-bar-only application. macOS requires this or
+ *              the app shows a Dock icon with no way to reopen a window.
+ *   PROHIBITED never becomes the active/front application (background agent). */
+typedef enum heliosview_activation_policy {
+    HELIOSVIEW_ACTIVATION_REGULAR = 0,
+    HELIOSVIEW_ACTIVATION_ACCESSORY,
+    HELIOSVIEW_ACTIVATION_PROHIBITED,
+} heliosview_activation_policy_t;
+
+/* Set the process's application id (UTF-8): Windows AppUserModelID, macOS
+ * bundle identifier, Linux desktop/application id. NULL or "" clears it. The id
+ * is stored by the core and applied by the backend where it matters (toast
+ * notifications, taskbar grouping, desktop integration); it also becomes the
+ * default used by heliosview_notification_init(NULL). Returns 0 on success. */
+HELIOSVIEW_API int heliosview_app_init(const char* app_id);
+
+/* The application id set by heliosview_app_init ("" when none). The pointer is
+ * owned by the library and stays valid until the next heliosview_app_init. */
+HELIOSVIEW_API const char* heliosview_app_id(void);
+
+/* Set the activation policy. Returns 0 on success, HELIOSVIEW_ERROR_UNSUPPORTED
+ * when the platform has no equivalent concept (the value is still stored and
+ * reported by heliosview_activation_policy). */
+HELIOSVIEW_API int heliosview_set_activation_policy(heliosview_activation_policy_t policy);
+
+/* The current activation policy (REGULAR when never set). */
+HELIOSVIEW_API heliosview_activation_policy_t heliosview_activation_policy(void);
+
+/* ================= Icons =================
+ *
+ * An icon is identified by a file path (UTF-8) and loaded by the backend from
+ * whichever format the platform understands:
+ *     Windows  .ico, .cur (also .png/.bmp/.jpg via the imaging path)
+ *     macOS    .icns, .png, .pdf (vector)
+ *     Linux    .png, .svg (and .xpm)
+ * Portable code ships one file per platform next to the executable and picks it
+ * by extension; a path the backend cannot load makes the call fail (negative
+ * return) and the previous icon is kept. NULL/"" restores the platform default.
+ */
+typedef enum heliosview_icon_flag {
+    HELIOSVIEW_ICON_FLAG_NONE = 0,
+    /* macOS: treat the image as a template (monochrome mask) so the system
+     * recolors it for light/dark menu bars and highlight states. Required for a
+     * correct status-bar icon; ignored elsewhere. The same effect can be
+     * achieved without this flag by naming the file "<name>Template.png". */
+    HELIOSVIEW_ICON_FLAG_TEMPLATE = 1u << 0,
+} heliosview_icon_flag_t;
+
 /* ================= Windows ================= */
 
 typedef struct heliosview_window heliosview_window_t;
@@ -351,6 +583,36 @@ typedef enum heliosview_window_style {
     HELIOSVIEW_WINDOW_BORDERLESS, /* Borderless (fully custom drawing; not resizable) */
     HELIOSVIEW_WINDOW_FRAMELESS,  /* Fully frameless: no title bar / caption buttons; resizable via the edges; the app draws all chrome (e.g. the injected <helios-window-controls> web component for the buttons) */
 } heliosview_window_style_t;
+
+/* Style flags, combined with | and passed to heliosview_window_create_ex2.
+ * The preset style picks the baseline (frame, resize behavior, caption); these
+ * flags refine it. A flag a platform cannot honor is ignored, never an error —
+ * use them for the idiomatic look of each OS:
+ *
+ *   Windows: TITLEBAR_HIDDEN/TITLEBAR_TRANSPARENT/FULL_SIZE_CONTENT all mean
+ *            "no native caption, the client area fills the window" (the app
+ *            draws its own chrome, e.g. the injected <helios-window-controls>).
+ *   macOS:   TITLEBAR_HIDDEN keeps a real NSWindow title bar but hides its
+ *            title; TITLEBAR_TRANSPARENT lets the content show through it;
+ *            FULL_SIZE_CONTENT extends the content view under the title bar —
+ *            together these give the standard macOS look with the traffic
+ *            lights floating over the page. Prefer them over FRAMELESS on macOS.
+ *   Linux:   mapped to the closest WM hint; may be ignored by some window
+ *            managers (Wayland in particular).
+ *
+ * CLOSABLE/MINIMIZABLE/RESIZABLE restrict the corresponding affordance and are
+ * independent of the preset style; HELIOSVIEW_WINDOW_FLAG_TOOLWINDOW keeps the
+ * window out of the taskbar / Dock window list (a utility or palette window). */
+typedef enum heliosview_window_flag {
+    HELIOSVIEW_WINDOW_FLAG_NONE = 0,
+    HELIOSVIEW_WINDOW_FLAG_TITLEBAR_HIDDEN = 1u << 0,
+    HELIOSVIEW_WINDOW_FLAG_TITLEBAR_TRANSPARENT = 1u << 1,
+    HELIOSVIEW_WINDOW_FLAG_FULL_SIZE_CONTENT = 1u << 2,
+    HELIOSVIEW_WINDOW_FLAG_CLOSABLE = 1u << 3,
+    HELIOSVIEW_WINDOW_FLAG_MINIMIZABLE = 1u << 4,
+    HELIOSVIEW_WINDOW_FLAG_RESIZABLE = 1u << 5,
+    HELIOSVIEW_WINDOW_FLAG_TOOLWINDOW = 1u << 6,
+} heliosview_window_flag_t;
 
 /* Create a window with a preset style and user data. The native window is
  * created immediately (not shown); show() makes it visible. userdata is owned
@@ -363,6 +625,23 @@ HELIOSVIEW_API heliosview_window_t* heliosview_window_create_ex(int width, int h
 
 /* Create a standard window (no user data) */
 HELIOSVIEW_API heliosview_window_t* heliosview_window_create(int width, int height, const char* title);
+
+/* Same as heliosview_window_create_ex, plus a combination of
+ * heliosview_window_flag_t bits (0 = none). Returns NULL on failure.
+ * Message-loop thread. */
+HELIOSVIEW_API heliosview_window_t* heliosview_window_create_ex2(int width, int height,
+                                                                 const char* title, /* UTF-8 */
+                                                                 heliosview_window_style_t style,
+                                                                 uint32_t flags,
+                                                                 void* userdata);
+
+/* The flags the window was created with (0 when created without flags). */
+HELIOSVIEW_API uint32_t heliosview_window_flags(const heliosview_window_t* window);
+
+/* The window's display scale: 1.0 at 96 DPI / non-Retina, 2.0 on a Retina or
+ * 200% display. Multiply logical coordinates/sizes by this to get device pixels
+ * (e.g. to size a bitmap). Returns 1.0 when the window is not created. */
+HELIOSVIEW_API float heliosview_window_scale_factor(const heliosview_window_t* window);
 
 /* Window user data (object pointer used for event dispatch) */
 HELIOSVIEW_API void* heliosview_window_userdata(const heliosview_window_t* window);
@@ -437,9 +716,15 @@ HELIOSVIEW_API int heliosview_window_center(heliosview_window_t* window);
 /* Set the window opacity (0.0 fully transparent to 1.0 opaque). 0 = success */
 HELIOSVIEW_API int heliosview_window_set_opacity(heliosview_window_t* window, float opacity);
 
-/* Replace the window's icon (loaded from an .ico/.cur file path, UTF-8);
- * NULL restores the default application icon. 0 = success. */
+/* Replace the window's icon (loaded from an icon file path, UTF-8 — see Icons);
+ * NULL restores the default application icon. [Windows only] — macOS and Linux
+ * have no per-window icon (the application icon comes from the bundle or the
+ * .desktop file); they return HELIOSVIEW_ERROR_UNSUPPORTED. 0 = success. */
 HELIOSVIEW_API int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_path);
+
+/* Same, with heliosview_icon_flag_t bits (0 = none). */
+HELIOSVIEW_API int heliosview_window_set_icon_ex(heliosview_window_t* window, const char* icon_path,
+                                                 uint32_t flags);
 
 /* Minimize the window (equivalent to show_state with SHOW_MINIMIZED). 0 = success. */
 HELIOSVIEW_API int heliosview_window_minimize(heliosview_window_t* window);
@@ -490,7 +775,9 @@ HELIOSVIEW_API int heliosview_window_clear_drag_regions(heliosview_window_t* win
  * window like a native title bar. Message-loop thread. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_window_start_drag(heliosview_window_t* window);
 
-/* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created. */
+/* The window's DPI (per-monitor; GetDpiForWindow). 0 = failure / not created.
+ * [Windows only] — macOS/Linux have no per-monitor DPI value in this sense; use
+ * heliosview_window_scale_factor() for portable code (dpi / 96). */
 HELIOSVIEW_API uint32_t heliosview_window_dpi(const heliosview_window_t* window);
 
 /* Height (client pixels, DPI-scaled) of the title-bar strip a FRAMELESS window
@@ -543,7 +830,9 @@ HELIOSVIEW_API int heliosview_window_is_enabled(const heliosview_window_t* windo
  * The registered callback runs synchronously on the message-loop thread before
  * the session ends, giving the app a chance to save state; return non-zero to
  * veto the shutdown (zero = allow). At most one callback: setting a new one
- * replaces the previous. */
+ * replaces the previous.
+ * macOS: delivered for applicationShouldTerminate (quit / logout); the veto
+ * return value is honored as NSApplicationTerminateReply::Cancel. */
 typedef int (*heliosview_session_end_cb)(void* userdata);
 
 /* Register the session-end callback (NULL = unregister). Returns 0. */
@@ -551,7 +840,10 @@ HELIOSVIEW_API int heliosview_set_session_end_callback(heliosview_session_end_cb
                                                        void* userdata);
 
 /* Make the process per-monitor DPI aware (v2). Call once, before any window is
- * created. Returns 0 on success, negative if already set or unsupported. */
+ * created. Returns 0 on success, negative if already set or unsupported.
+ * [Windows only] — macOS handles scaling per display automatically (Retina) and
+ * Linux follows the toolkit/compositor, so they return
+ * HELIOSVIEW_ERROR_UNSUPPORTED and portable code can ignore the result. */
 HELIOSVIEW_API int heliosview_set_dpi_awareness(void);
 
 /* Native window handle (HWND on Windows) — the window_id carried in events;
@@ -590,7 +882,7 @@ HELIOSVIEW_API int heliosview_cursor_position(int32_t* out_x, int32_t* out_y);
 
 /* ================= Taskbar progress =================
  *
- * A taskbar progress indicator attached to a window (Win32: ITaskbarList3).
+ * A taskbar/dock progress indicator attached to a window.
  * Set a determinate value with heliosview_window_set_progress, change its
  * visual state (indeterminate / paused / error) with
  * heliosview_window_set_progress_state, and remove it with
@@ -618,8 +910,12 @@ HELIOSVIEW_API int heliosview_window_clear_progress(heliosview_window_t* window)
 /* ================= Window backdrop & dark mode (Win11 DWM) =================
  *
  * Applies a system backdrop to the window (Mica / Acrylic) and toggles the
- * immersive dark-mode title bar. Available on Win11; on unsupported systems the
- * functions return a negative error code (the window is left unchanged). */
+ * immersive dark-mode title bar. Mica/Acrylic require Windows 11 22H2 (build
+ * 22621); the dark-mode title bar requires Windows 10 1809 (build 17763). Where
+ * the OS cannot provide it the function returns HELIOSVIEW_ERROR_UNSUPPORTED
+ * (-4) and leaves the window unchanged, so callers can ignore -4 and degrade.
+ * On other platforms these map to the platform's own material/theme concept or
+ * return -4. */
 
 typedef enum heliosview_backdrop {
     HELIOSVIEW_BACKDROP_NONE = 0,  /* default (opaque) background */
@@ -627,66 +923,49 @@ typedef enum heliosview_backdrop {
     HELIOSVIEW_BACKDROP_ACRYLIC,   /* Acrylic material */
 } heliosview_backdrop_t;
 
-/* Apply a system backdrop. 0 = success, negative = unsupported/failure */
+/* Apply a system backdrop. 0 = success, HELIOSVIEW_ERROR_UNSUPPORTED (-4) when
+ * the OS cannot, other negative = failure. */
 HELIOSVIEW_API int heliosview_window_set_backdrop(heliosview_window_t* window,
                                                   heliosview_backdrop_t backdrop);
 
-/* Toggle the immersive dark-mode title bar (on != 0 = dark). 0 = success */
+/* Toggle the immersive dark-mode title bar (on != 0 = dark). 0 = success,
+ * HELIOSVIEW_ERROR_UNSUPPORTED (-4) when the OS cannot, other negative = failure. */
 HELIOSVIEW_API int heliosview_window_set_dark_mode(heliosview_window_t* window, int on);
-
-/* ================= Window routing ids =================
- *
- * A native routing id — a tray callback message id, a menu item id, or a
- * caller-registered id — is bound to the caller's userdata as a comctl32 window
- * subclass: registering installs a callout on the native window whose
- * uIdSubclass IS the routing id and whose dwRefData is the userdata, so the
- * binding is direct and there is no lookup table. The default native-message
- * conversion resolves the resulting event back to the userdata (the event's
- * `userdata` field): a message whose number is the id (tray-style WM_APP
- * callback messages) or a WM_COMMAND whose command id is the id (menu-style
- * command ids). Tray icons and popup menus use dedicated per-backend window
- * subclasses of their own (see heliosview_tray_win32.cpp /
- * heliosview_menu_win32.cpp) and do not go through this API; it remains exposed
- * so callers can register their own routing ids too. Registered ids must be
- * removed with heliosview_window_remove_item (which uninstalls the subclass).
- */
-
-/* Allocate a routing id on `window`, bind it to `userdata` by installing a
- * window subclass (uIdSubclass = the id, dwRefData = userdata), and return the
- * id. The native window must already exist (an id is only usable once the
- * window can receive messages). Returns the id (never 0; 0 = failure, e.g. null
- * window, native window not yet created, or the id space is exhausted). */
-HELIOSVIEW_API uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata);
-
-/* Remove a routing id previously returned by heliosview_window_add_item
- * (uninstalls its window subclass).
- * 0 = success, negative = invalid window or the id is not registered. */
-HELIOSVIEW_API int heliosview_window_remove_item(heliosview_window_t* window, uint32_t id);
 
 /* ================= Tray icon (system tray notification icon) =================
  *
- * A tray icon is attached to a window and shows an icon in the OS notification
- * area. Mouse events on the icon (single/double click, right/middle click) are
- * converted into heliosview events with the associated window's window_id
- * (see HELIOSVIEW_EVENT_TRAY_*), so they flow through the normal event queue.
+ * Shows an icon in the OS notification area (system tray / status bar / menu extras). Mouse events on the icon (single/double click, right/middle click) are delivered
+ * as HELIOSVIEW_EVENT_TRAY_* events through the event queue.
  *
- * Note: the target window must already be created (shown) before creating a tray
- * on it, because the tray posts its callback messages to the window's HWND.
+ * The tray icon is completely standalone and does not require an application window
+ * to exist, enabling background-only applications that run purely in the tray.
  *
- * The icon is loaded from a .ico/.cur/etc. file path (UTF-8); pass NULL to use
- * the default application icon. Destroy the tray BEFORE destroying its window:
- * the icon stays in the notification area until heliosview_tray_destroy (NIM_DELETE),
- * and destroying the window does not clean up trays on its own.
+ * The icon is loaded from an icon file path (UTF-8, see Icons); pass NULL to use
+ * the default application icon. Destroy the tray with heliosview_tray_destroy.
+ *
+ * Menus: attach a menu with heliosview_tray_set_menu so the shell can open it —
+ * this is the ONLY way a tray menu can work on Linux (StatusNotifierItem exports
+ * the menu over DBus; the application cannot pop one up itself) and the idiomatic
+ * way on macOS (an NSStatusItem menu). With a menu attached, opening it is the
+ * shell's job on those platforms: TRAY_RIGHT_CLICK may not be delivered at all,
+ * and on macOS any click opens the menu, so TRAY_LEFT_CLICK may not be delivered
+ * either. On Windows the library opens the menu on right-click and then does not
+ * emit TRAY_RIGHT_CLICK (left/middle clicks still emit their events). Code that
+ * needs the click itself should leave the menu unattached and call
+ * heliosview_menu_show from the event handler — which only works on Windows and
+ * macOS.
  */
 
 typedef struct heliosview_tray heliosview_tray_t;
 
-/* Create and show a tray icon attached to `window` with the given tooltip
- * (UTF-8) and icon file path (NULL = default icon). `userdata` is caller data
- * (e.g. a C++ Tray object) copied verbatim into the TRAY_* events this tray
- * produces. Returns NULL on failure. */
-HELIOSVIEW_API heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window,
-                                                         const char* tooltip,
+/* Forward declaration: the tray can own a context menu (heliosview_tray_set_menu). */
+typedef struct heliosview_menu heliosview_menu_t;
+
+/* Create and show a standalone tray icon with the given tooltip (UTF-8) and
+ * icon file path (NULL = default icon). `userdata` is caller data (e.g. a C++
+ * Tray object) copied verbatim into the TRAY_* events this tray produces.
+ * The tray does not require an application window to exist. Returns NULL on failure. */
+HELIOSVIEW_API heliosview_tray_t* heliosview_tray_create(const char* tooltip,
                                                          const char* icon_path,
                                                          void* userdata);
 
@@ -697,7 +976,19 @@ HELIOSVIEW_API int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const ch
  * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_tray_set_icon(heliosview_tray_t* tray, const char* icon_path);
 
-/* Remove the tray icon (NIM_DELETE) and free the tray handle. The icon is NOT
+/* Same, with heliosview_icon_flag_t bits (0 = none) — use
+ * HELIOSVIEW_ICON_FLAG_TEMPLATE for a macOS status-bar icon. */
+HELIOSVIEW_API int heliosview_tray_set_icon_ex(heliosview_tray_t* tray, const char* icon_path,
+                                               uint32_t flags);
+
+/* Attach (or detach, with NULL) the tray's context menu. The tray keeps a
+ * reference to the menu until it is replaced or the tray is destroyed, so the
+ * menu must not be freed while it is attached (heliosview_menu_destroy only
+ * drops the caller's reference; the attached menu stays alive). Menu actions
+ * fire as usual. See the platform notes above. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_tray_set_menu(heliosview_tray_t* tray, heliosview_menu_t* menu);
+
+/* Remove the tray icon and free the tray handle. The icon is NOT
  * removed automatically when the owning window is destroyed — always destroy
  * the tray before its window. */
 HELIOSVIEW_API void heliosview_tray_destroy(heliosview_tray_t* tray);
@@ -722,27 +1013,184 @@ HELIOSVIEW_API int heliosview_tray_notify(heliosview_tray_t* tray, const char* t
                                           heliosview_tray_notify_icon_t icon_type,
                                           uint32_t timeout_ms);
 
-/* ================= Menu (popup / context menu) =================
+/* ================= Action (shareable menu command) =================
  *
- * A popup menu that can be attached to a window and shown (typically at the
- * current cursor position, e.g. for a tray-icon right-click context menu).
- * Each item is assigned a unique id; choosing an item posts a
- * HELIOSVIEW_EVENT_MENU_SELECT event (with menu_item = the item id and
- * window_id = the owner window), which flows through the normal event queue.
+ * An action is a command with identity and state: its label, whether it is
+ * enabled, whether it is checkable/checked, its shortcut and standard role. It
+ * carries no window and no menu — a menu only *displays* actions.
  *
- * Items are added with heliosview_menu_add_item; the caller receives the item's
- * id via out_id (used to match the event). Item state flags (checkmark,
- * disabled, radio-style checkmark, default) are set at creation with
- * heliosview_menu_add_item_ex and toggled afterwards with the
- * heliosview_menu_set_*_item_* helpers (checked / enabled / default).
- * Submenus are added by handle: the parent menu takes ownership of them
- * (destroying the parent destroys its submenus; destroying a submenu
- * separately while it is attached to a parent is undefined). heliosview_menu_show shows
- * the menu at the current cursor position, attached to `window` (which must
- * already be created).
+ * The same action may be added to any number of menus (an Edit menu, a context
+ * menu, ...): one triggered event, one enabled/checked state, one label.
+ *
+ * Portability contract (every backend must satisfy it):
+ *   - Menus re-read action state when they pop up, so changing an action
+ *     updates every menu that shows it. Native item state is a cache, never the
+ *     source of truth.
+ *   - Shortcut scope differs by platform: on macOS a shortcut is a menu key
+ *     equivalent, so it only takes effect for actions reachable from the
+ *     application menu bar; on Windows every live action with a shortcut is an
+ *     application-wide accelerator. Portable applications should put
+ *     shortcut-bearing actions in the application menu bar (see
+ *     heliosview_menu_set_app_menu) so both platforms behave identically.
+ *   - heliosview_menu_set_default_action (bold item, Enter activates) is a
+ *     Windows convention; other platforms may ignore it.
+ *
+ * Lifetime: reference-counted by the menus that display it. heliosview_action_destroy
+ * releases the caller's reference; the object itself lives until the last menu
+ * using it is destroyed, so a menu can never reference a freed action.
+ *
+ * Message-loop thread (like menus and windows).
  */
 
-typedef struct heliosview_menu heliosview_menu_t;
+typedef struct heliosview_action heliosview_action_t;
+
+/* ---------- Standard roles ----------
+ *
+ * A role marks an action as a standard command. The library then supplies the
+ * platform's conventional label and shortcut, and — where the application cannot
+ * do the work itself — performs the action:
+ *
+ *   role                    macOS (system-provided)          Windows (library-provided)
+ *   ABOUT                   About <App>                     event only
+ *   PREFERENCES             "Settings…" ⌘,                 event only
+ *   QUIT                    "Quit <App>" ⌘Q                event only (C++ App quits when
+ *                                                          no handler is connected)
+ *   HIDE / HIDE_OTHERS      ⌘H / ⌥⌘H                       event only
+ *   SHOW_ALL                "Show All"                     event only
+ *   SERVICES                system Services menu           event only
+ *   UNDO / REDO             ⌘Z / ⇧⌘Z → responder chain     Ctrl+Z / Ctrl+Y → focused control
+ *   CUT/COPY/PASTE          ⌘X/⌘C/⌘V → responder chain     Ctrl+X/C/V → focused control
+ *   SELECT_ALL              ⌘A → responder chain           Ctrl+A → focused control
+ *   DELETE                  forward delete                 Del → focused control
+ *   MINIMIZE                ⌘M → performMiniaturize:       minimizes the active window
+ *   ZOOM                    performZoom:                   maximizes/restores it
+ *   CLOSE_WINDOW            ⌘W → performClose:             closes the active window
+ *   TOGGLE_FULLSCREEN       ⌃⌘F → toggleFullScreen:        F11 → toggles it
+ *   BRING_ALL_TO_FRONT      "Bring All to Front"           event only
+ *
+ * "Event only" roles still post MENU_SELECT, so the application can implement
+ * them (and observe/confirm others); the library only performs the actions the
+ * application cannot perform itself. A role's default label/shortcut can always
+ * be overridden with heliosview_action_set_text / _set_shortcut.
+ */
+typedef enum heliosview_menu_role {
+    HELIOSVIEW_MENU_ROLE_NONE = 0,   /* plain action */
+    /* application */
+    HELIOSVIEW_MENU_ROLE_ABOUT,
+    HELIOSVIEW_MENU_ROLE_PREFERENCES,
+    HELIOSVIEW_MENU_ROLE_QUIT,
+    HELIOSVIEW_MENU_ROLE_HIDE,
+    HELIOSVIEW_MENU_ROLE_HIDE_OTHERS,
+    HELIOSVIEW_MENU_ROLE_SHOW_ALL,
+    HELIOSVIEW_MENU_ROLE_SERVICES,
+    /* edit */
+    HELIOSVIEW_MENU_ROLE_UNDO,
+    HELIOSVIEW_MENU_ROLE_REDO,
+    HELIOSVIEW_MENU_ROLE_CUT,
+    HELIOSVIEW_MENU_ROLE_COPY,
+    HELIOSVIEW_MENU_ROLE_PASTE,
+    HELIOSVIEW_MENU_ROLE_SELECT_ALL,
+    HELIOSVIEW_MENU_ROLE_DELETE,
+    /* window */
+    HELIOSVIEW_MENU_ROLE_MINIMIZE,
+    HELIOSVIEW_MENU_ROLE_ZOOM,
+    HELIOSVIEW_MENU_ROLE_CLOSE_WINDOW,
+    HELIOSVIEW_MENU_ROLE_TOGGLE_FULLSCREEN,
+    HELIOSVIEW_MENU_ROLE_BRING_ALL_TO_FRONT,
+} heliosview_menu_role_t;
+
+/* Create an action with the given label (UTF-8; NULL = empty). `userdata` is
+ * caller data (the C++ wrapper stores the Action object pointer) copied into
+ * the MENU_SELECT events this action produces. Returns NULL on failure. */
+HELIOSVIEW_API heliosview_action_t* heliosview_action_create(const char* text, void* userdata);
+
+/* Create a standard role action (see the table above). `text` overrides the
+ * platform's default label (NULL = default). Returns NULL on failure. */
+HELIOSVIEW_API heliosview_action_t* heliosview_action_create_role(heliosview_menu_role_t role,
+                                                                  const char* text,
+                                                                  void* userdata);
+
+/* The action's role (HELIOSVIEW_MENU_ROLE_NONE for a plain action). */
+HELIOSVIEW_API heliosview_menu_role_t heliosview_action_role(const heliosview_action_t* action);
+
+/* Release the caller's reference. The action is freed once no menu references it. */
+HELIOSVIEW_API void heliosview_action_destroy(heliosview_action_t* action);
+
+/* Update the label (UTF-8). Menus showing this action display it on their next popup. */
+HELIOSVIEW_API int heliosview_action_set_text(heliosview_action_t* action, const char* text);
+
+/* Set the keyboard shortcut, written portably as modifier(s) joined by '+' and a
+ * key: "Primary+S", "Ctrl+Shift+Z", "Alt+F4", "F11", "Cmd+O".
+ *   Primary  = Command on macOS, Control elsewhere (write this in portable code)
+ *   Cmd      = Command on macOS, Control elsewhere (alias of Primary)
+ *   Ctrl, Alt/Option, Shift, Meta/Win  = that key on every platform
+ *   key      = a single character (A-Z, 0-9, punctuation) or a name: F1..F24,
+ *              Escape, Return/Enter, Space, Tab, Backspace, Delete, Insert, Home,
+ *              End, PageUp, PageDown, Left, Right, Up, Down, Comma, Period,
+ *              Slash, Semicolon, Apostrophe, Grave, Minus, Equal, Backslash
+ * The string is stored as given (menus display the platform's own form) and is
+ * rejected (-1 + heliosview_last_error) when it cannot be parsed. NULL clears it. */
+HELIOSVIEW_API int heliosview_action_set_shortcut(heliosview_action_t* action, const char* shortcut);
+
+/* The action's shortcut string (NULL when unset; library-owned, valid until the
+ * shortcut is changed or the action is destroyed). */
+HELIOSVIEW_API const char* heliosview_action_shortcut(const heliosview_action_t* action);
+
+/* Enable (enabled != 0) or disable the action: disabled items are grayed out and
+ * not selectable in every menu that shows it. 0 = success. */
+HELIOSVIEW_API int heliosview_action_set_enabled(heliosview_action_t* action, int enabled);
+
+/* Make the action checkable (checkable != 0): menus then draw a checkmark while
+ * it is checked. heliosview_action_set_radio_style switches the mark to a radio
+ * bullet. Un-checkable actions ignore heliosview_action_set_checked. */
+HELIOSVIEW_API int heliosview_action_set_checkable(heliosview_action_t* action, int checkable);
+HELIOSVIEW_API int heliosview_action_set_radio_style(heliosview_action_t* action, int radio);
+
+/* Set the checked state (only meaningful for a checkable action). */
+HELIOSVIEW_API int heliosview_action_set_checked(heliosview_action_t* action, int checked);
+
+/* Read state: 1 = enabled / checked / checkable / radio style, 0 = not (or NULL action). */
+HELIOSVIEW_API int heliosview_action_is_enabled(const heliosview_action_t* action);
+HELIOSVIEW_API int heliosview_action_is_checked(const heliosview_action_t* action);
+HELIOSVIEW_API int heliosview_action_is_checkable(const heliosview_action_t* action);
+HELIOSVIEW_API int heliosview_action_is_radio_style(const heliosview_action_t* action);
+
+/* The action's label (UTF-8, library-owned; valid until the action is changed or
+ * destroyed; never NULL — empty string when unset). */
+HELIOSVIEW_API const char* heliosview_action_text(const heliosview_action_t* action);
+
+/* The action's process-unique id: it is what MENU_SELECT carries in
+ * heliosview_event_t::menu_item, and what an accelerator will trigger. 0 = none. */
+HELIOSVIEW_API uint32_t heliosview_action_id(const heliosview_action_t* action);
+
+/* Look up a live action by its id (0 / unknown id = NULL). Message-loop thread. */
+HELIOSVIEW_API heliosview_action_t* heliosview_action_from_id(uint32_t id);
+
+/* ================= Menu (popup / context menu) =================
+ *
+ * A menu is a standalone object, like a tray icon: it is created and filled
+ * without any window, and only showing it needs an owner (the OS delivers the
+ * selection to the owner's message queue).
+ *
+ * heliosview_menu_show(menu, window) pops it up at the current cursor position;
+ * `window` may be NULL, in which case the library uses its own hidden owner
+ * window — so a menu can be shown from a tray icon even when the application has
+ * no window at all (MENU_SELECT then carries window_id = 0).
+ *
+ * Each item is assigned a unique id; choosing an item posts a
+ * HELIOSVIEW_EVENT_MENU_SELECT event (menu_item = the item id, userdata = the
+ * menu's userdata) which flows through the normal event queue. Its window_id is
+ * the window the menu belongs to; for an item of the application menu bar it is
+ * the window that was active when the item was chosen (0 = none). Items are
+ * added with heliosview_menu_add_item; the caller receives the item's id via
+ * out_id (used to match the event). Item state flags (checkmark, disabled,
+ * radio-style checkmark, default) are set at creation with
+ * heliosview_menu_add_item_ex and toggled afterwards with the
+ * heliosview_menu_set_*_item_* helpers (checked / enabled / default). Submenus
+ * are added by handle: the parent keeps its own reference to them, so destroying
+ * a submenu that is still attached only drops the caller's reference (the parent
+ * keeps displaying it until the parent is released too).
+ */
 
 /* Item flags for heliosview_menu_add_item_ex (OR-able). */
 enum {
@@ -752,18 +1200,93 @@ enum {
     HELIOSVIEW_MENU_ITEM_DEFAULT    = 1 << 3  /* default item: bold, Enter / double-click activates */
 };
 
-/* Create an empty popup menu attached to `window`. The window owns the menu:
- * its items are registered on the window so MENU_SELECT events can be routed
- * back to this menu (via `userdata`, copied verbatim into the event). The menu
- * and all its submenus must share the same owner window. Returns NULL on failure. */
-HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create(heliosview_window_t* window,
-                                                         void* userdata);
+/* Create an empty standalone menu. `userdata` is caller data (e.g. a C++ Menu
+ * object) copied verbatim into the MENU_SELECT events this menu produces; it is
+ * how a selection is routed back to the menu, so no window is needed here.
+ * Returns NULL on failure. */
+HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create(void* userdata);
+
+/* Add an action to the menu (in order). The same action may be added to several
+ * menus; the menu holds a reference (see heliosview_action_destroy) and borrows
+ * nothing else. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_add_action(heliosview_menu_t* menu, heliosview_action_t* action);
+
+/* Make `action` the menu's default item (bold; Enter / double-click activates
+ * it; one per menu). NULL clears the current default. The action must already
+ * be in this menu. Windows convention — other platforms may ignore it.
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_default_action(heliosview_menu_t* menu,
+                                                      heliosview_action_t* action);
+
+/* ================= Menu kind & lazy population ================= */
+
+/* What a submenu *is*, beyond its title. macOS needs this to wire the standard
+ * menus (NSApp.servicesMenu / windowsMenu / helpMenu, and the App menu), where
+ * the title is chosen by the system; other platforms treat it as a hint. */
+typedef enum heliosview_menu_kind {
+    HELIOSVIEW_MENU_KIND_NORMAL = 0,
+    HELIOSVIEW_MENU_KIND_APP,       /* the application menu (macOS: first submenu of the bar) */
+    HELIOSVIEW_MENU_KIND_SERVICES,  /* the Services menu (macOS) */
+    HELIOSVIEW_MENU_KIND_WINDOW,    /* the Window menu (macOS) */
+    HELIOSVIEW_MENU_KIND_HELP,      /* the Help menu (macOS) */
+} heliosview_menu_kind_t;
+
+/* Mark a menu with a standard kind (see above). 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_menu_set_kind(heliosview_menu_t* menu, heliosview_menu_kind_t kind);
+
+/* The menu's kind (HELIOSVIEW_MENU_KIND_NORMAL when unset). */
+HELIOSVIEW_API heliosview_menu_kind_t heliosview_menu_kind(const heliosview_menu_t* menu);
+
+/* Called just before a menu is shown — including every time a submenu opens —
+ * so a menu can populate itself lazily (recent files, state-dependent items).
+ * Runs on the message-loop thread; the callback may add actions/submenus to
+ * `menu` (item state is refreshed after it returns). NULL removes it. */
+typedef void (*heliosview_menu_open_cb)(heliosview_menu_t* menu, void* userdata);
+
+/* Register/remove the open callback. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_open_callback(heliosview_menu_t* menu,
+                                                     heliosview_menu_open_cb callback,
+                                                     void* userdata);
+
+/* ================= Application menu bar =================
+ *
+ * Install `menu` as the application's menu bar (NULL removes it).
+ *
+ *   macOS        the one global menu bar (NSApp.mainMenu); the first submenu
+ *                becomes the App menu.
+ *   Windows      the menu bar of every HeliosView top-level window, including
+ *                windows created later — the platform's native shape (Windows
+ *                has no global menu bar).
+ *   Linux/GTK    each window's GtkMenuBar.
+ *
+ * The menu must outlive the windows showing it; destroying it detaches it from
+ * every window first. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_menu_set_app_menu(heliosview_menu_t* menu);
+
+/* The current application menu bar (NULL when unset). */
+HELIOSVIEW_API heliosview_menu_t* heliosview_menu_app_menu(void);
+
+/* Translate a native keyboard message against the library's action shortcuts
+ * (menu accelerators). Call it in your own message loop before
+ * TranslateMessage/DispatchMessage — heliosview_pump_events/heliosview_run
+ * already do. Returns 1 when the message was consumed as an accelerator (do not
+ * dispatch it further), 0 when it is not ours.
+ *
+ * native_msg is platform-specific: a MSG* on Windows (an NSEvent* or GdkEvent*
+ * on the other platforms once they exist). Only Windows needs this: macOS routes
+ * key equivalents through the menu bar itself and the Linux toolkits do the same
+ * for GTK/Qt menus, so there it is a no-op that always returns 0 — an application
+ * with its own event loop can call it unconditionally. */
+HELIOSVIEW_API int heliosview_translate_accelerator(void* native_msg);
 
 /* Destroy the menu and all its submenus. */
 HELIOSVIEW_API void heliosview_menu_destroy(heliosview_menu_t* menu);
 
-/* Add a text item; its unique id is written to out_id (NULL = ignore).
- * 0 = success, negative = error code. */
+/* Add a text item. Convenience over the action API: the menu creates and owns an
+ * action with this text; its id is written to out_id (NULL = ignore) and its
+ * state is reachable through the heliosview_menu_*_item_* helpers below.
+ * Use heliosview_menu_add_action instead when the item must be shared or its
+ * state managed explicitly. 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_add_item(heliosview_menu_t* menu, const char* text,
                                             uint32_t* out_id);
 
@@ -818,12 +1341,15 @@ HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);
 HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
                                                heliosview_menu_t* submenu);
 
-/* Show the menu at the current cursor position, owned by `window` (its HWND
- * receives the WM_COMMAND that yields the MENU_SELECT event). 0 = success,
- * negative = error code. */
+/* Show the menu at the current cursor position. `window` is the owner: it
+ * receives the resulting MENU_SELECT event (window_id = its native handle), and
+ * the popup is dismissed when the user clicks elsewhere. Pass NULL to show it
+ * without an application window: the library uses a hidden owner window and the
+ * event carries window_id = 0.
+ * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window);
 
-/* ================= WebView (Win32: WebView2) =================
+/* ================= WebView (Windows: WebView2) =================
  *
  * A WebView handle independent of the window: it attaches to a parent window at
  * creation; afterwards operations involve only the webview itself, not
@@ -831,16 +1357,39 @@ HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_wind
  * before it completes are queued automatically (the last one wins).
  * Note: destroy the webview before the window; the window must not be destroyed
  * before initialization completes (usually a few milliseconds).
- * Other platforms: not yet implemented (return an error code). Event support
- * will come in a later version.
+ *
+ * Portability: the API is engine-neutral (Windows: WebView2; macOS: WKWebView;
+ * Linux: WebKitGTK). Navigation, HTML loading, script evaluation, the JS bridge
+ * (bind/resolve/reject/subscribe/broadcast), navigation callbacks, background
+ * color and transparency, local-folder mapping, insets and the context-menu /
+ * DevTools toggles all map to every engine. The few functions that depend on a
+ * WebView2-only capability return HELIOSVIEW_ERROR_UNSUPPORTED (-4) elsewhere,
+ * with the reason in heliosview_last_error_string; they are marked below.
+ * Creation-time options that do not apply to an engine are ignored.
  */
 
 typedef struct heliosview_webview heliosview_webview_t;
+
+/* Why a navigation failed (heliosview_webview_navigation_cb). 0 = success; the
+ * other values are portable — the engine's own code is available through
+ * heliosview_webview_last_native_error. */
+typedef enum heliosview_webview_error {
+    HELIOSVIEW_WEBVIEW_OK = 0,
+    HELIOSVIEW_WEBVIEW_ERROR_CANCELLED = 1,          /* navigation cancelled / aborted by the app */
+    HELIOSVIEW_WEBVIEW_ERROR_HOST_NOT_FOUND = 2,     /* DNS / name resolution failed */
+    HELIOSVIEW_WEBVIEW_ERROR_CONNECTION_FAILED = 3,  /* could not connect, disconnected, reset */
+    HELIOSVIEW_WEBVIEW_ERROR_TIMEOUT = 4,
+    HELIOSVIEW_WEBVIEW_ERROR_TLS = 5,                /* certificate / TLS problem */
+    HELIOSVIEW_WEBVIEW_ERROR_HTTP = 6,               /* server returned an invalid response */
+    HELIOSVIEW_WEBVIEW_ERROR_OTHER = 7,
+} heliosview_webview_error_t;
 
 /* Creation-time WebView2 environment options: the fields below are read when
  * the WebView2 environment is created and cannot be changed afterwards, so they
  * are only honored via heliosview_webview_create_ex. Zero-initialize the struct
  * (or pass NULL) for the pure runtime defaults and set only what you need.
+ * Fields marked [Windows] have no equivalent on the other engines and are
+ * ignored there.
  * String fields are UTF-8 and copied by the library; they may point at
  * temporary storage. Boolean fields are 0/1: 0 (the zero-initialized default)
  * = leave at the runtime default, 1 = enable. */
@@ -849,40 +1398,64 @@ typedef struct heliosview_webview_env_opts {
      * <exe>.WebView2 folder). UTF-8 absolute path; NULL/"" = the default next
      * to the executable. Created by WebView2 if missing. */
     const char* user_data_folder;
-    /* Folder of a fixed WebView2 runtime (the directory that holds
+    /* [Windows] Folder of a fixed WebView2 runtime (the directory that holds
      * msedgewebview2.exe). UTF-8; NULL = the system WebView2 Runtime. */
     const char* browser_executable_folder;
     /* Default page language / Accept-Language, e.g. "zh-CN". UTF-8;
      * NULL = the system default. */
     const char* language;
-    /* Extra Chromium command-line switches, e.g. "--disable-gpu". UTF-8;
-     * NULL = none. */
+    /* [Windows] Extra Chromium command-line switches, e.g. "--disable-gpu".
+     * UTF-8; NULL = none. */
     const char* additional_browser_arguments;
-    /* Target compatible browser version (used with browser_executable_folder),
-     * e.g. "95.*"; NULL/"" = the latest available on that runtime. UTF-8. */
+    /* [Windows] Target compatible browser version (used with
+     * browser_executable_folder), e.g. "95.*"; NULL/"" = the latest available
+     * on that runtime. UTF-8. */
     const char* target_compatible_browser_version;
-    /* Use the OS primary account for single sign-on (0/1). */
+    /* [Windows] Use the OS primary account for single sign-on (0/1). */
     int allow_sso_with_os_primary_account;
-    /* Exclusive access to the user data folder, so no other process can share
-     * it (0/1). */
+    /* [Windows] Exclusive access to the user data folder, so no other process
+     * can share it (0/1). */
     int exclusive_user_data_folder_access;
     /* Tracking prevention (on by default in WebView2): 1 = turn it off,
      * 0 = keep it enabled. */
     int disable_tracking_prevention;
-    /* Browser extensions (e.g. ad blockers) enabled in the WebView (0/1). */
+    /* [Windows] Browser extensions (e.g. ad blockers) enabled (0/1). */
     int are_browser_extensions_enabled;
 } heliosview_webview_env_opts_t;
+
+/* ================= WebView engine availability =================
+ *
+ * The WebView backend is the platform's web engine. On Windows that is the
+ * WebView2 Runtime — a separate deploy-time component (preinstalled on Windows
+ * 11, present on most but not all Windows 10 devices) — so an app may need to
+ * know, before it creates a window or a WebView, whether an engine is available
+ * and which version it is. The same call answers that on every platform:
+ *
+ *   Windows   WebView2 Runtime version, e.g. "131.0.2903.86". Empty = the
+ *             Runtime is not installed; heliosview_webview_create/_ex then fail
+ *             with HELIOSVIEW_ERROR_UNSUPPORTED (-4) and the window is left
+ *             untouched, so an app can fall back to a non-WebView UI.
+ *   macOS     The system WebKit version (part of the OS, always available).
+ *   Linux     The WebKitGTK version, e.g. "2.44.3"; empty = the backend's web
+ *             engine library is not present at runtime.
+ *   other     Empty (no WebView backend on this platform yet).
+ *
+ * Writes a UTF-8 version string into buf (always NUL-terminated, truncated to
+ * fit `size`; "" when no engine is available) and returns 0. Negative = invalid
+ * arguments (buf == NULL or size == 0). */
+HELIOSVIEW_API int heliosview_webview_engine_version(char* buf, size_t size);
 
 /* Create a WebView in the parent window's client area (async initialization)
  * with creation-time WebView2 environment options (see
  * heliosview_webview_env_opts_t; NULL = all runtime defaults).
- * Returns NULL on failure. */
+ * Returns NULL on failure: HELIOSVIEW_ERROR_UNSUPPORTED (-4) when no web engine
+ * is available (see heliosview_webview_engine_version). */
 HELIOSVIEW_API heliosview_webview_t* heliosview_webview_create_ex(
     heliosview_window_t* parent, const heliosview_webview_env_opts_t* opts);
 
 /* Create a WebView in the parent window's client area (async initialization;
  * all WebView2 environment options at their runtime defaults).
- * Returns NULL on failure. */
+ * Returns NULL on failure (see heliosview_webview_create_ex). */
 HELIOSVIEW_API heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent);
 
 /* Destroy the WebView (must be called before destroying the parent window) */
@@ -899,6 +1472,10 @@ HELIOSVIEW_API int heliosview_webview_navigate_html(heliosview_webview_t* webvie
  * the browser process's resources while the page stays alive; resume() restores
  * it where it left off. The typical use: suspend when the window is hidden (or
  * the app goes to the background), resume when it is shown again.
+ *
+ * [Windows only] — the other engines have no equivalent; these functions return
+ * HELIOSVIEW_ERROR_UNSUPPORTED (-4) there (an app that needs the memory back can
+ * hide the webview, or destroy and recreate it).
  */
 
 /* Completion callback for heliosview_webview_suspend: error is 0 on success,
@@ -975,9 +1552,10 @@ typedef void (*heliosview_webview_bind_cb)(heliosview_webview_t* webview,
                                            uint64_t call_id, const char* name,
                                            const char* args_json, void* userdata);
 
-/* Callback for heliosview_webview_eval_async. result_json is the JSON encoding of
- * the script's completion value. error is 0 on success, else a negated platform
- * error code. Runs on the UI thread. */
+/* Callback for heliosview_webview_eval_async. On success (error == 0),
+ * result_json is the JSON encoding of the script's completion value. On failure,
+ * error is negative and result_json carries the script's error message text
+ * (not JSON). Runs on the UI thread. */
 typedef void (*heliosview_webview_eval_cb)(int error, const char* result_json, void* userdata);
 
 /* Callback for a broadcast subscription: fires when the page posts a message to
@@ -988,12 +1566,20 @@ typedef void (*heliosview_webview_subscribe_cb)(heliosview_webview_t* webview,
                                                 void* userdata);
 
 /* Callback for navigation events: fires when a navigation completes (page fully
- * loaded) or fails. error is 0 on success, else a negated platform error code
- * (on WebView2: -HRESULT, e.g. -0x7ff5fb70 / COREWEBVIEW2_E_NAVIGATION_CANCELLED).
+ * loaded) or fails. error is HELIOSVIEW_WEBVIEW_OK (0) on success, else a
+ * portable heliosview_webview_error_t value; the engine's own error code is
+ * available through heliosview_webview_last_native_error.
  * Runs on the UI thread. Only one callback may be registered; setting a new one
  * replaces the previous (running its dtor). */
 typedef void (*heliosview_webview_navigation_cb)(heliosview_webview_t* webview,
                                                  int error, void* userdata);
+
+/* The engine's own code for the last completed navigation: a
+ * COREWEBVIEW2_WEB_ERROR_STATUS_* value on Windows, an NSURLError code on
+ * macOS, a GError code on Linux. 0 = success, or the engine reported no specific
+ * code — use the navigation callback's portable error to tell the two apart.
+ * Diagnostic. */
+HELIOSVIEW_API int heliosview_webview_last_native_error(heliosview_webview_t* webview);
 
 /* Register a native function under `name`, callable from JS via
  * window.helios.call(name, ...). Rebinding a name replaces the previous binding
@@ -1034,7 +1620,11 @@ HELIOSVIEW_API int heliosview_webview_reject(heliosview_webview_t* webview,
 HELIOSVIEW_API int heliosview_webview_eval(heliosview_webview_t* webview, const char* script);
 
 /* Run a JavaScript string and get its JSON completion value. UI-thread call; queued
- * while the WebView is still initializing. The callback fires exactly once. */
+ * while the WebView is still initializing. The callback fires exactly once.
+ * A returned Promise is awaited, so "fetch(...).then(r => r.json())" resolves to
+ * the JSON value (the engine's own script evaluation returns the promise object
+ * instead). A script that throws, or a rejected promise, reports a negative
+ * error and the message text. */
 HELIOSVIEW_API int heliosview_webview_eval_async(heliosview_webview_t* webview, const char* script,
                                                  heliosview_webview_eval_cb callback, void* userdata);
 
@@ -1127,14 +1717,28 @@ HELIOSVIEW_API int heliosview_webview_set_title_changed_callback(
     heliosview_webview_userdata_dtor dtor);
 
 /* Map a local folder to a virtual host name so the page can load files from it
- * via https://<host>/<relative-path>. Used to serve images or other local assets
- * that are not part of the packaged frontend (game banners, avatars, ...).
- * WebView2 restricts mappings to the "trusted origin" host suffix .local; call
- * before navigating, or the page must be reloaded for new mappings to take effect.
+ * through heliosview_webview_local_url(). Used to serve images or other local
+ * assets that are not part of the packaged frontend (game banners, avatars, ...).
+ * Call before navigating, or the page must be reloaded for new mappings to take
+ * effect.
+ * Windows (WebView2) restricts mappings to the "trusted origin" host suffix
+ * .local, e.g. "assets.local".
  * Returns 0 = success, negative = failure. */
 HELIOSVIEW_API int heliosview_webview_map_local_folder(heliosview_webview_t* webview,
                                                        const char* host_name,
                                                        const char* folder_path);
+
+/* Build the URL that serves `path` from the folder mapped to `host_name` (see
+ * heliosview_webview_map_local_folder). The URL shape is engine-defined:
+ * Windows produces "https://<host>/<path>", other engines register a custom
+ * scheme instead — this helper is what keeps the difference out of application
+ * code, so never build the URL by hand.
+ * Writes a NUL-terminated URL into buf (truncated to fit `size`); `path` is
+ * appended as given (percent-encode it yourself if it contains special
+ * characters). 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_webview_local_url(heliosview_webview_t* webview,
+                                                const char* host_name, const char* path,
+                                                char* buf, size_t size);
 
 /* Keep the given insets (client pixels) clear around the WebView: the WebView
  * occupies the parent client area minus these insets on each side, and the
@@ -1153,7 +1757,8 @@ HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
  * target URL of a hovered link at the bottom-left corner of the WebView.
  * Disabled by default. Applies immediately when the WebView is initialized;
  * when called during initialization the setting is applied when it becomes
- * ready. Message-loop thread. 0 = success, negative = error. */
+ * ready. [Windows only] — other engines return -4 (draw one in the page if
+ * needed). Message-loop thread. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_webview_set_status_bar(heliosview_webview_t* webview,
                                                      int enabled);
 
@@ -1182,7 +1787,8 @@ HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview
  * immediately when the WebView is initialized; when called during
  * initialization the setting is applied when it becomes ready. Requires the
  * experimental WebView2 interface; on runtimes without it the call returns
- * negative and has no effect. Message-loop thread. 0 = success,
+ * negative and has no effect. [Windows only] — other engines return -4 (they
+ * use the native title bar). Message-loop thread. 0 = success,
  * negative = error. */
 HELIOSVIEW_API int heliosview_webview_set_window_controls_overlay(
     heliosview_webview_t* webview, int enabled);
@@ -1207,20 +1813,27 @@ HELIOSVIEW_API int heliosview_select_folder(heliosview_window_t* window,
                                             const char* title,
                                             char** out_path);
 
-/* Open-file dialog. `filter` uses the "Name1 (*.ext)|*.ext|Name2|..." format
- * (NULL = "All files (*.*)|*.*"); `multi` != 0 enables multi-selection. On
- * success (n > 0) out_paths receives a NULL-terminated array of n UTF-8 paths
- * (each string and the array itself are freed with heliosview_free, or in one
+/* File dialog filter rule (display name and semicolon-separated extensions) */
+typedef struct heliosview_file_filter {
+    const char* name;        /* filter display name, e.g. "Image files" or "Text documents" */
+    const char* extensions;  /* semicolon-separated extensions, e.g. "png;jpg;jpeg" or "*.png;*.jpg" */
+} heliosview_file_filter_t;
+
+/* Open-file dialog. `filters` is an array of `filter_count` filters (NULL or 0 = "All files");
+ * `multi` != 0 enables multi-selection. On success (n > 0) out_paths receives a NULL-terminated
+ * array of n UTF-8 paths (each string and the array itself are freed with heliosview_free, or in one
  * call with heliosview_free_paths). 0 = cancelled, negative = error. */
 HELIOSVIEW_API int heliosview_open_files(heliosview_window_t* window, const char* title,
-                                         const char* filter, int multi, char*** out_paths);
+                                         const heliosview_file_filter_t* filters, size_t filter_count,
+                                         int multi, char*** out_paths);
 
 /* Free a path array returned by heliosview_open_files (each string and the array). NULL is ignored. */
 HELIOSVIEW_API void heliosview_free_paths(char** paths);
 
 /* Save-file dialog. On success (1) out_path receives the chosen path (heliosview_free). */
 HELIOSVIEW_API int heliosview_save_file(heliosview_window_t* window, const char* title,
-                                        const char* filter, const char* default_name,
+                                        const heliosview_file_filter_t* filters, size_t filter_count,
+                                        const char* default_name,
                                         char** out_path);
 
 /* ================= Message box ================= */
@@ -1276,22 +1889,75 @@ HELIOSVIEW_API int heliosview_clipboard_get_text(char** out);
 
 /* ================= Notifications (OS toast) =================
  *
- * Modern OS notifications (Win32: Windows toast). Unlike every other API in this
- * header, these functions are thread-agnostic: they may be called from any
- * thread (e.g. a worker reporting that a background task finished).
+ * Modern OS notifications (Win32: Windows toast; macOS: UserNotifications;
+ * Linux: org.freedesktop.Notifications). Unlike every other API in this header,
+ * these functions are thread-agnostic: they may be called from any thread (e.g. a
+ * worker reporting that a background task finished). Their callbacks, however,
+ * run on an unspecified thread (see below) — never assume the message loop.
  *
- * Setup: heliosview_notification_init registers an AppUserModelID and installs a
- * Start Menu shortcut carrying it (unpackaged Win32 apps need both for toasts).
- * app_user_model_id may be NULL, in which case it is derived from the exe file
- * name. Call it once, typically at startup. It is safe to call again later.
+ * Setup: heliosview_notification_init registers the application id (see
+ * heliosview_app_init; NULL = the id set there, else one derived from the
+ * executable name) and performs the platform's registration — on Windows an
+ * AppUserModelID plus the Start Menu shortcut carrying it (unpackaged Win32 apps
+ * need both for toasts). Call it once, typically at startup; it is safe to call
+ * again later.
+ *
+ * Permission: macOS shows a system prompt the first time an application asks to
+ * post notifications and silently drops toasts until the user allows them, so a
+ * portable program calls heliosview_notification_request_permission once at
+ * startup and checks the state before reporting success. Windows and Linux have
+ * no prompt: the request reports the current OS setting immediately.
  */
 
+/* Notification permission state. */
+typedef enum heliosview_notification_permission {
+    HELIOSVIEW_NOTIFICATION_PERMISSION_UNKNOWN = 0, /* not initialized / not yet asked */
+    HELIOSVIEW_NOTIFICATION_PERMISSION_GRANTED,     /* toasts will be shown */
+    HELIOSVIEW_NOTIFICATION_PERMISSION_DENIED,      /* the user or the OS turned them off */
+} heliosview_notification_permission_t;
+
+/* Permission result callback: `permission` is the resulting state, `userdata`
+ * the value passed to the request. Runs on an unspecified thread (macOS answers
+ * on a background queue) — do not touch windows/menus from it; use
+ * heliosview_post_event / heliosview_wake_loop to get back to the loop thread. */
+typedef void (*heliosview_notification_permission_cb)(heliosview_notification_permission_t permission,
+                                                      void* userdata);
+
+/* Ask for notification permission. On macOS this shows the system prompt (once;
+ * afterwards the stored answer is reported) and the callback may run later; on
+ * Windows/Linux it reports the current OS setting and may call back before
+ * returning. `callback` may be NULL to only trigger the prompt. Returns 0 when
+ * the request was accepted, negative when the backend cannot ask (call
+ * heliosview_notification_init first). Thread-safe.
+ *
+ * Windows note: the first run of a freshly registered application id reports
+ * UNKNOWN for the whole run (the OS picks the registration up asynchronously);
+ * UNKNOWN is not a denial — poll the state or ask again on a later run. */
+HELIOSVIEW_API int heliosview_notification_request_permission(
+    heliosview_notification_permission_cb callback, void* userdata);
+
+/* The last known permission state (UNKNOWN before init or before the first
+ * request). Thread-safe. */
+HELIOSVIEW_API heliosview_notification_permission_t heliosview_notification_permission_state(void);
+
+/* Callback for a user click on a posted notification (title/body as posted,
+ * `userdata` as passed below). Runs on an unspecified thread — marshal back to
+ * the loop thread before touching windows. NULL clears the callback. */
+typedef void (*heliosview_notification_click_cb)(const char* title, const char* body, void* userdata);
+
 /* Initialize the notification backend. Returns 0 on success, negative on failure
- * (e.g. no Windows). Thread-safe (first call initializes). */
-HELIOSVIEW_API int heliosview_notification_init(const char* app_user_model_id);
+ * (e.g. no notification service on this platform). Thread-safe (first call
+ * initializes). */
+HELIOSVIEW_API int heliosview_notification_init(const char* app_id);
+
+/* Register (or clear, with NULL) the click callback for notifications posted by
+ * heliosview_notification_show. 0 = success, negative = error (e.g. unsupported).
+ * Thread-safe. */
+HELIOSVIEW_API int heliosview_notification_set_click_callback(heliosview_notification_click_cb callback,
+                                                              void* userdata);
 
 /* Show a toast with a title and body. Returns 0 on success, negative on failure
- * (e.g. not initialized, or toasts unavailable). Thread-safe. */
+ * (e.g. not initialized, permission denied, or toasts unavailable). Thread-safe. */
 HELIOSVIEW_API int heliosview_notification_show(const char* title, const char* body);
 
 #ifdef __cplusplus

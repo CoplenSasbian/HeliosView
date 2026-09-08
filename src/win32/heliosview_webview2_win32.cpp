@@ -89,6 +89,14 @@ struct heliosview_webview {
      * these insets, so a strip (e.g. a title bar with the DWM caption buttons)
      * can stay visible around it. */
     bool has_insets = false;
+    int last_native_error = 0;  /* COREWEBVIEW2_WEB_ERROR_STATUS_* of the last failed navigation */
+
+    /* Bridge eval channel: the shim (window.__hvEval) evaluates scripts and
+     * awaits returned promises, which WebView2's ExecuteScript does not. Used
+     * once a document exists (shim_ready); ExecuteScript remains the fallback. */
+    bool shim_ready = false;    /* set on the first NavigationCompleted (document created) */
+    uint64_t next_eval_id = 1;
+    std::flat_map<uint64_t, std::pair<heliosview_webview_eval_cb, void*>> pending_evals;
     int32_t inset_top = 0, inset_right = 0, inset_bottom = 0, inset_left = 0;
 
     /* WebView2 status bar (hovered-link target URL, bottom-left); off by
@@ -193,6 +201,36 @@ RECT hv_webview_rect(const heliosview_webview_t* webview)
 
 namespace {
 
+/* Map the engine's navigation error to the portable heliosview_webview_error_t.
+ * The engine's own value is kept separately for heliosview_webview_last_native_error. */
+int hv_webview_error_from_native(COREWEBVIEW2_WEB_ERROR_STATUS status)
+{
+    switch (status) {
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID:
+        return HELIOSVIEW_WEBVIEW_ERROR_TLS;
+    case COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED:
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT:
+        return HELIOSVIEW_WEBVIEW_ERROR_CONNECTION_FAILED;
+    case COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT:
+        return HELIOSVIEW_WEBVIEW_ERROR_TIMEOUT;
+    case COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED:
+        return HELIOSVIEW_WEBVIEW_ERROR_HOST_NOT_FOUND;
+    case COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED:
+        return HELIOSVIEW_WEBVIEW_ERROR_CANCELLED;
+    case COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE:
+        return HELIOSVIEW_WEBVIEW_ERROR_HTTP;
+    default:
+        return HELIOSVIEW_WEBVIEW_ERROR_OTHER;
+    }
+}
+
 /* Post a raw envelope string to the JS page (must run on the UI thread). */
 void hv_post_string(heliosview_webview_t* wv, const std::string& s)
 {
@@ -207,10 +245,11 @@ void hv_post_string(heliosview_webview_t* wv, const std::string& s)
  * is subclassed so native broadcasts dispatch synthetic message events and page
  * postMessage()s are forwarded to native subscriptions; <helios-window-controls> is the
  * built-in title-bar button web component. The shim lives in a real .js file
- * (editable/versionable/lintable on its own): CMake wraps win32/webview_bridge.js
+ * (editable/versionable/lintable on its own): CMake wraps ../webview_bridge.js
  * into the generated webview_bridge.inc below (C++23 #embed is not supported by
- * MSVC yet). */
-#include "webview_bridge.inc" /* generated from win32/webview_bridge.js (see src/CMakeLists.txt): kWebView2BridgeScript */
+ * MSVC yet). The shim itself is engine-neutral — its transport adapter detects
+ * WebView2 / WKWebView / WebKitGTK — so the other backends embed the same file. */
+#include "webview_bridge.inc" /* generated from ../webview_bridge.js (see src/CMakeLists.txt): kWebView2BridgeScript */
 
 /* Bridge envelope wire format:
  *
@@ -562,6 +601,34 @@ bool parse_broadcast_envelope(const std::string& msg, std::string& name, std::st
     return true;
 }
 
+/* Parse the "HV\teval\t<id>\t<ok|error>\r\n\r\n<json|message>" reply the shim
+ * sends for a heliosview_webview_eval_async routed through window.__hvEval.
+ * Returns true when the message is such a reply. */
+bool parse_eval_reply(const std::string& msg, uint64_t& id, bool& ok, std::string& payload)
+{
+    id = 0;
+    ok = false;
+    payload.clear();
+    std::vector<std::string> head;
+    std::string body;
+    if (split_envelope(msg, head, body) == std::string::npos)
+        return false;
+    if (head.size() != 4 || head[1] != "eval")
+        return false;
+    uint64_t v = 0;
+    for (char c : head[2]) {
+        if (c < '0' || c > '9')
+            return false;
+        v = v * 10 + static_cast<uint64_t>(c - '0');
+    }
+    if (head[3] != "ok" && head[3] != "error")
+        return false;
+    id = v;
+    ok = (head[3] == "ok");
+    payload = body;
+    return true;
+}
+
 /* Dispatch a JS call to the bound native function. Runs on the UI thread. */
 void hv_dispatch_call(heliosview_webview_t* wv, uint64_t id, const char* name,
                       const char* args_json)
@@ -654,22 +721,6 @@ void hv_control_bind_cb(heliosview_webview_t* wv, uint64_t call_id, const char* 
         return;
     }
     heliosview_webview_resolve(wv, call_id, R"({"ok":true})");
-}
-
-/* Real Windows build number (RtlGetVersion — not affected by the per-app
- * compatibility shims that make GetVersionExW lie). Used to pick the caption
- * icon font: Windows 11 (build >= 22000) draws the title-bar buttons with
- * Segoe Fluent Icons, Windows 10 only ships Segoe MDL2 Assets. */
-int hv_os_build()
-{
-    typedef LONG(WINAPI* RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
-    static const auto rtl = reinterpret_cast<RtlGetVersionFn>(
-        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
-    if (!rtl)
-        return 0;
-    RTL_OSVERSIONINFOW ovi{};
-    ovi.dwOSVersionInfoSize = sizeof(ovi);
-    return rtl(&ovi) == 0 ? static_cast<int>(ovi.dwBuildNumber) : 0;
 }
 
 /* "__hv.state"() — the owner's show state (the component toggles the maximize /
@@ -906,6 +957,20 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
                     std::string bc_name, bc_data;
                     if (parse_broadcast_envelope(msg, bc_name, bc_data))
                         hv_dispatch_broadcast(webview, bc_name, bc_data);
+                    else {
+                        uint64_t eval_id = 0;
+                        bool eval_ok = false;
+                        std::string eval_payload;
+                        if (parse_eval_reply(msg, eval_id, eval_ok, eval_payload)) {
+                            const auto it = webview->pending_evals.find(eval_id);
+                            if (it != webview->pending_evals.end()) {
+                                const auto [cb, ud] = it->second;
+                                webview->pending_evals.erase(it);
+                                if (cb)
+                                    cb(eval_ok ? 0 : -1, eval_payload.c_str(), ud);
+                            }
+                        }
+                    }
                 }
             }
             return S_OK;
@@ -957,18 +1022,22 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
     auto* nav_handler = hv::hv_alloc<navigation_completed_handler>(
         [webview](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
             BOOL success = FALSE;
+            /* a document now exists, so the shim is installed in it */
+            webview->shim_ready = true;
             if (SUCCEEDED(args->get_IsSuccess(&success)) && success) {
+                webview->last_native_error = 0;
                 if (webview->nav_cb)
-                    webview->nav_cb(webview, 0, webview->nav_userdata);
+                    webview->nav_cb(webview, HELIOSVIEW_WEBVIEW_OK, webview->nav_userdata);
                 return S_OK;
             }
-            /* failed navigation: report the WebErrorStatus code
-             * (COREWEBVIEW2_WEB_ERROR_STATUS_*, 0 = UNKNOWN) */
+            /* Failed navigation: keep the engine's own code (COREWEBVIEW2_WEB_ERROR_STATUS_*)
+             * for heliosview_webview_last_native_error and report the portable
+             * heliosview_webview_error_t to the callback. */
             COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
             args->get_WebErrorStatus(&status);
+            webview->last_native_error = static_cast<int>(status);
             if (webview->nav_cb)
-                webview->nav_cb(webview, static_cast<int>(status) + 1,
-                                webview->nav_userdata);
+                webview->nav_cb(webview, hv_webview_error_from_native(status), webview->nav_userdata);
             return S_OK;
         });
     webview->webview->add_NavigationCompleted(nav_handler, &webview->nav_token);
@@ -1132,12 +1201,61 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
     return S_OK;
 }
 
+/* ================= WebView engine version / availability =================
+ *
+ * GetAvailableCoreWebView2BrowserVersionString is the documented way to detect
+ * an installed WebView2 Runtime (or a preview Edge channel): it returns a null
+ * version when neither is present. Used both by the public query and to fail
+ * creation with HELIOSVIEW_ERROR_UNSUPPORTED instead of an opaque HRESULT. */
+static std::wstring hv_webview2_runtime_version()
+{
+    LPWSTR version = nullptr;
+    std::wstring out;
+    if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &version)) && version && *version)
+        out = version;
+    if (version)
+        CoTaskMemFree(version);
+    return out;
+}
+
+int heliosview_webview_engine_version(char* buf, size_t size)
+{
+    if (!buf || size == 0)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "buf is NULL or size is 0");
+    buf[0] = '\0';
+    const std::wstring version = hv_webview2_runtime_version();
+    if (!version.empty()) {
+        const std::string utf8 = wide_to_utf8(version);
+        std::snprintf(buf, size, "%s", utf8.c_str());
+    }
+    return 0;
+}
+
 heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
                                                    const heliosview_webview_env_opts_t* opts)
 {
     const HWND parent_hwnd = hv_window_hwnd(parent);
-    if (!parent_hwnd)
+    if (!parent_hwnd) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "parent window is NULL or its native window is not created");
         return nullptr;
+    }
+
+    /* Fixed-version runtime folder (NULL/"" = the system WebView2 Runtime). */
+    const std::wstring browser_folder =
+        (opts && opts->browser_executable_folder && *opts->browser_executable_folder)
+            ? utf8_to_wide(opts->browser_executable_folder)
+            : std::wstring();
+
+    /* The WebView2 Runtime is a deploy-time component: preinstalled on Windows
+     * 11, present on most but not all Windows 10 devices. Report the honest
+     * "unsupported here" instead of an opaque HRESULT — but only when the caller
+     * did not pin a fixed-version folder, whose presence only the OS can tell. */
+    if (browser_folder.empty() && hv_webview2_runtime_version().empty()) {
+        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED,
+                "WebView2 Runtime is not installed — install the Evergreen Runtime, or pass a "
+                "fixed-version folder in heliosview_webview_env_opts_t::browser_executable_folder");
+        return nullptr;
+    }
 
     /* WebView2 requires a COM STA apartment on the calling thread (the UI
      * thread): the environment/controller completion callbacks are dispatched
@@ -1145,10 +1263,14 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
      * for the process lifetime (WebView objects outlive this call; repeated
      * calls return S_FALSE = already initialized). */
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (co == RPC_E_CHANGED_MODE)
+    if (co == RPC_E_CHANGED_MODE) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "thread is already in an MTA apartment; WebView2 requires STA");
         return nullptr; /* the thread is already MTA: WebView2 needs STA */
-    if (FAILED(co))
+    }
+    if (FAILED(co)) {
+        hv_fail_hresult(co, "CoInitializeEx failed");
         return nullptr;
+    }
 
     auto* webview = hv::hv_alloc<heliosview_webview>();
     webview->parent = parent_hwnd;
@@ -1163,10 +1285,6 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
      * environment is created); they cannot be changed afterwards. */
     if (opts && opts->user_data_folder && *opts->user_data_folder)
         webview->user_data_folder = utf8_to_wide(opts->user_data_folder);
-    const std::wstring browser_folder =
-        (opts && opts->browser_executable_folder && *opts->browser_executable_folder)
-            ? utf8_to_wide(opts->browser_executable_folder)
-            : std::wstring();
 
     /* hv_alloc + Release: hand the initial reference to the API (Release to zero deletes it when done) */
     auto* env_handler = hv::hv_alloc<env_completed_handler>(
@@ -1201,6 +1319,16 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
     if (FAILED(hr)) {
         RemoveWindowSubclass(webview->parent, hv_webview_subclass_proc, 0); /* undo the subclass above */
         hv::hv_dealloc(webview);
+        /* A fixed-version folder that does not exist (or a runtime removed
+         * between the check above and here) surfaces as a "not found" HRESULT:
+         * report it as the missing engine, not as an opaque platform code. */
+        if (browser_folder.empty()
+            && (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+                || hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)
+                || hr == HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND)))
+            hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "WebView2 Runtime is not installed");
+        else
+            hv_fail_hresult(hr, "CreateCoreWebView2EnvironmentWithOptions failed");
         return nullptr;
     }
     hv_webview_register_live(webview); /* track the instance for stale-call detection */
@@ -1358,6 +1486,22 @@ int heliosview_webview_reject(heliosview_webview_t* webview, uint64_t call_id, c
     return 0;
 }
 
+/* Send a script to the page's shim for evaluation (awaits promises) and, when
+ * `callback` is set, record it against a fresh eval id. Returns 0 on success. */
+int eval_via_shim(heliosview_webview_t* webview, const char* script,
+                  heliosview_webview_eval_cb callback, void* userdata)
+{
+    const uint64_t id = webview->next_eval_id++;
+    if (callback)
+        webview->pending_evals[id] = {callback, userdata};
+    std::string envelope = "HV\teval\t";
+    envelope += std::to_string(id);
+    envelope += "\r\n\r\n";
+    envelope += script;
+    hv_post_string(webview, envelope);
+    return 0;
+}
+
 int heliosview_webview_eval(heliosview_webview_t* webview, const char* script)
 {
     if (!webview || !script)
@@ -1366,6 +1510,8 @@ int heliosview_webview_eval(heliosview_webview_t* webview, const char* script)
         webview->pending_ops.push_back({script, false, nullptr, nullptr});
         return 0;
     }
+    if (webview->shim_ready)
+        return eval_via_shim(webview, script, nullptr, nullptr);
     const std::wstring wscript = utf8_to_wide(script);
     const HRESULT hr = webview->webview->ExecuteScript(wscript.c_str(), nullptr);
     return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "ExecuteScript failed");
@@ -1380,6 +1526,10 @@ int heliosview_webview_eval_async(heliosview_webview_t* webview, const char* scr
         webview->pending_ops.push_back({script, true, callback, userdata});
         return 0;
     }
+    /* The shim awaits promises; ExecuteScript (fallback, used before the first
+     * document exists) does not. */
+    if (webview->shim_ready)
+        return eval_via_shim(webview, script, callback, userdata);
     const std::wstring wscript = utf8_to_wide(script);
     auto* handler = hv::hv_alloc<execute_script_completed_handler>(
         [wv = webview, callback, userdata](HRESULT errorCode, LPCWSTR result) -> HRESULT {
@@ -1522,6 +1672,33 @@ int heliosview_webview_set_title_changed_callback(heliosview_webview_t* webview,
     webview->title_cb = callback;
     webview->title_userdata = userdata;
     webview->title_dtor = dtor;
+    return 0;
+}
+
+int heliosview_webview_last_native_error(heliosview_webview_t* webview)
+{
+    return webview ? webview->last_native_error : 0;
+}
+
+int heliosview_webview_local_url(heliosview_webview_t* webview, const char* host_name,
+                                 const char* path, char* buf, size_t size)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    if (!host_name || !*host_name)
+        return hv_fail(-2, "host_name is NULL or empty");
+    if (!buf || size == 0)
+        return hv_fail(-2, "buf is NULL or size is 0");
+    /* WebView2 virtual-host mappings are https origins; the host must use the
+     * .local suffix to be a trusted origin (see heliosview_webview_map_local_folder). */
+    std::string url = "https://";
+    url += host_name;
+    if (path && *path) {
+        if (*path != '/')
+            url += '/';
+        url += path;
+    }
+    std::snprintf(buf, size, "%s", url.c_str());
     return 0;
 }
 

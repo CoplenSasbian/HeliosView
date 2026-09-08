@@ -119,6 +119,222 @@ inline int hv_fail_hresult(HRESULT hr, const char* context)
     return g_hv_last_error_code;
 }
 
+/* ================= OS version =================
+ *
+ * Real Windows build number (RtlGetVersion — not affected by the per-app
+ * compatibility shims that make GetVersionExW lie). Backends use it to gate
+ * features that only exist on newer builds (DWMWA_SYSTEMBACKDROP_TYPE needs
+ * 22621, the dark-mode attribute 20 needs 19041) and to pick the caption icon
+ * font (Windows 11 = build 22000+). Returns 0 when it cannot be read. */
+inline int hv_os_build()
+{
+    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+    static const auto rtl = reinterpret_cast<RtlGetVersionFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    if (!rtl)
+        return 0;
+    RTL_OSVERSIONINFOW ovi{};
+    ovi.dwOSVersionInfoSize = sizeof(ovi);
+    return rtl(&ovi) == 0 ? static_cast<int>(ovi.dwBuildNumber) : 0;
+}
+
+/* ================= Hidden host window =================
+ *
+ * One hidden top-level window per thread, owned by the library. Subsystems that
+ * need a native window of their own (tray callbacks / TaskbarCreated, the owner
+ * of a window-less popup menu) use it. The host itself knows nothing about
+ * them: each subsystem registers its message handler here the first time it
+ * needs the host, and the host's procedure gives every message to the handlers
+ * in registration order. Defined in heliosview_host_win32.cpp. */
+
+/* A host message handler: return true when the message was consumed. */
+using hv_host_message_fn = bool (*)(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+
+/* Get (creating on first use) this thread's hidden host window, registering
+ * `handler` (idempotent, nullptr = none). Returns NULL on failure. */
+HWND hv_host_window(hv_host_message_fn handler = nullptr);
+
+/* Is `hwnd` the library's hidden host window? */
+bool hv_host_is(HWND hwnd);
+
+/* ================= Menu messages =================
+ *
+ * The menu backend routes selections and refreshes action state inside the real
+ * window procedure (not a comctl32 subclass: WM_MENUCOMMAND does not travel
+ * through the subclass chain). heliosview_wndproc_t calls this for every
+ * message of a library window, and it is registered as a host handler for
+ * window-less popups. Returns true when the message was consumed.
+ * Defined in heliosview_menu_win32.cpp. */
+bool hv_menu_handle_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+
+/* Tray messages (TaskbarCreated, tray callbacks); registered as a host handler
+ * by the tray backend. Returns true when consumed.
+ * Defined in heliosview_tray_win32.cpp. */
+bool hv_tray_handle_host_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+
+/* Application menu bar (heliosview_menu_set_app_menu) + keyboard accelerators.
+ * Defined in heliosview_menu_win32.cpp. */
+void hv_menu_apply_app_menu(HWND hwnd);          /* attach the current bar to a new window */
+bool hv_menu_translate_accelerator(MSG* msg);    /* true = consumed as an accelerator */
+
+/* Menu reference counting for other subsystems that display a menu (a tray's
+ * attached context menu). A menu's HMENU must outlive every holder, so a holder
+ * takes a reference and releases it when it stops displaying the menu.
+ * Defined in heliosview_menu_win32.cpp. */
+void hv_menu_retain(heliosview_menu_t* menu);
+void hv_menu_release(heliosview_menu_t* menu);
+
+/* ================= Keyboard shortcuts =================
+ *
+ * A portable shortcut string ("Primary+S", "Ctrl+Shift+Z", "F11", "Cmd+O") is
+ * parsed into a Win32 accelerator: modifier flags plus a virtual key.
+ * Primary/Cmd mean Command on macOS and Control elsewhere, so portable code
+ * writes one string for both. Shared by the menu backend (display) and the
+ * message loop (accelerator table). */
+
+struct hv_shortcut {
+    UINT vk = 0;   /* virtual key; 0 = unset/invalid */
+    BYTE mods = 0; /* MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN */
+};
+
+/* Virtual key for one key token ("s", "F11", "pageup"), 0 = unknown. */
+inline UINT hv_shortcut_key(const std::string& token)
+{
+    if (token.size() == 1) {
+        const char c = token[0];
+        if (c >= 'a' && c <= 'z') return static_cast<UINT>(c - 'a' + 'A');
+        if (c >= 'A' && c <= 'Z') return static_cast<UINT>(c);
+        if (c >= '0' && c <= '9') return static_cast<UINT>(c);
+        switch (c) {
+        case ',':  return VK_OEM_COMMA;
+        case '.':  return VK_OEM_PERIOD;
+        case '/':  return VK_OEM_2;
+        case ';':  return VK_OEM_1;
+        case '\'': return VK_OEM_7;
+        case '`':  return VK_OEM_3;
+        case '-':  return VK_OEM_MINUS;
+        case '=':  return VK_OEM_PLUS;
+        case '[':  return VK_OEM_4;
+        case ']':  return VK_OEM_6;
+        case '\\': return VK_OEM_5;
+        default:   return 0;
+        }
+    }
+    if (token.size() >= 2 && token[0] == 'f') {
+        const std::string digits = token.substr(1);
+        if (digits.find_first_not_of("0123456789") == std::string::npos) {
+            const int n = std::atoi(digits.c_str());
+            if (n >= 1 && n <= 24)
+                return VK_F1 + static_cast<UINT>(n - 1);
+        }
+        return 0;
+    }
+    static const struct { const char* name; UINT vk; } kNamed[] = {
+        {"escape", VK_ESCAPE}, {"esc", VK_ESCAPE}, {"return", VK_RETURN}, {"enter", VK_RETURN},
+        {"space", VK_SPACE}, {"tab", VK_TAB}, {"backspace", VK_BACK}, {"back", VK_BACK},
+        {"delete", VK_DELETE}, {"del", VK_DELETE}, {"insert", VK_INSERT}, {"ins", VK_INSERT},
+        {"home", VK_HOME}, {"end", VK_END}, {"pageup", VK_PRIOR}, {"pgup", VK_PRIOR},
+        {"pagedown", VK_NEXT}, {"pgdn", VK_NEXT}, {"left", VK_LEFT}, {"right", VK_RIGHT},
+        {"up", VK_UP}, {"down", VK_DOWN}, {"comma", VK_OEM_COMMA}, {"period", VK_OEM_PERIOD},
+        {"slash", VK_OEM_2}, {"semicolon", VK_OEM_1}, {"apostrophe", VK_OEM_7},
+        {"grave", VK_OEM_3}, {"minus", VK_OEM_MINUS}, {"equal", VK_OEM_PLUS},
+        {"backslash", VK_OEM_5}, {"bracketleft", VK_OEM_4}, {"bracketright", VK_OEM_6},
+    };
+    for (const auto& entry : kNamed) {
+        if (token == entry.name)
+            return entry.vk;
+    }
+    return 0;
+}
+
+/* Parse a portable shortcut string; vk == 0 means it could not be parsed. */
+inline hv_shortcut hv_parse_shortcut(const std::string& text)
+{
+    hv_shortcut sc;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t pos = text.find('+', start);
+        if (pos == std::string::npos)
+            pos = text.size();
+        std::string token = text.substr(start, pos - start);
+        const size_t b = token.find_first_not_of(" \t");
+        const size_t e = token.find_last_not_of(" \t");
+        token = (b == std::string::npos) ? std::string() : token.substr(b, e - b + 1);
+        for (char& c : token) {
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+        }
+
+        if (!token.empty()) {
+            if (token == "primary" || token == "cmd" || token == "command"
+                || token == "ctrl" || token == "control")
+                sc.mods |= MOD_CONTROL;
+            else if (token == "shift")
+                sc.mods |= MOD_SHIFT;
+            else if (token == "alt" || token == "option")
+                sc.mods |= MOD_ALT;
+            else if (token == "meta" || token == "win" || token == "super")
+                sc.mods |= MOD_WIN;
+            else if (pos == text.size())
+                sc.vk = hv_shortcut_key(token); /* last token = the key */
+            else
+                return hv_shortcut{}; /* a modifier was expected */
+        }
+        if (pos == text.size())
+            break;
+        start = pos + 1;
+    }
+    return sc; /* vk == 0 when no key token was present */
+}
+
+/* Human-readable form for menu display ("Ctrl+Shift+Z"). */
+inline std::wstring hv_shortcut_display(const hv_shortcut& sc)
+{
+    if (sc.vk == 0)
+        return {};
+    std::wstring out;
+    if (sc.mods & MOD_CONTROL) out += L"Ctrl+";
+    if (sc.mods & MOD_ALT)     out += L"Alt+";
+    if (sc.mods & MOD_SHIFT)   out += L"Shift+";
+    if (sc.mods & MOD_WIN)     out += L"Win+";
+    if ((sc.vk >= 'A' && sc.vk <= 'Z') || (sc.vk >= '0' && sc.vk <= '9')) {
+        out += static_cast<wchar_t>(sc.vk);
+    } else if (sc.vk >= VK_F1 && sc.vk <= VK_F24) {
+        out += L"F" + std::to_wstring(sc.vk - VK_F1 + 1);
+    } else {
+        switch (sc.vk) {
+        case VK_ESCAPE:     out += L"Esc"; break;
+        case VK_RETURN:     out += L"Enter"; break;
+        case VK_SPACE:      out += L"Space"; break;
+        case VK_TAB:        out += L"Tab"; break;
+        case VK_BACK:       out += L"Backspace"; break;
+        case VK_DELETE:     out += L"Del"; break;
+        case VK_INSERT:     out += L"Ins"; break;
+        case VK_HOME:       out += L"Home"; break;
+        case VK_END:        out += L"End"; break;
+        case VK_PRIOR:      out += L"PgUp"; break;
+        case VK_NEXT:       out += L"PgDn"; break;
+        case VK_LEFT:       out += L"Left"; break;
+        case VK_RIGHT:      out += L"Right"; break;
+        case VK_UP:         out += L"Up"; break;
+        case VK_DOWN:       out += L"Down"; break;
+        case VK_OEM_COMMA:  out += L","; break;
+        case VK_OEM_PERIOD: out += L"."; break;
+        case VK_OEM_1:      out += L";"; break;
+        case VK_OEM_2:      out += L"/"; break;
+        case VK_OEM_3:      out += L"`"; break;
+        case VK_OEM_4:      out += L"["; break;
+        case VK_OEM_5:      out += L"\\"; break;
+        case VK_OEM_6:      out += L"]"; break;
+        case VK_OEM_7:      out += L"'"; break;
+        case VK_OEM_MINUS:  out += L"-"; break;
+        case VK_OEM_PLUS:   out += L"="; break;
+        default:            out += L"?"; break;
+        }
+    }
+    return out;
+}
+
 /* ================= Title-bar strip metric =================
  *
  * Frameless windows draw all their chrome in the page (optionally with the
@@ -134,19 +350,6 @@ inline int hv_title_bar_height(HWND hwnd)
 {
     return MulDiv(kTitleBarHeight, GetDpiForWindow(hwnd), 96);
 }
-
-/* ================= Routing id allocation (caller-registered ids) =================
- *
- * The window keeps a per-window routing id space (WM_APP range) that
- * heliosview_window_add_item draws from for caller-registered ids. The tray
- * backend uses its own process-wide callback message + a TLS uID table, and
- * menu item ids are menu-local (MNS_NOTIFYBYPOS / WM_MENUCOMMAND routing) —
- * neither touches this space. */
-
-/* Allocate the window's next routing id without registering anything; 0 when
- * the window or its native handle is missing. Defined in
- * heliosview_window_win32.cpp. */
-uint32_t hv_window_next_routing_id(heliosview_window_t* window);
 
 /* ================= Window handle (HWND) =================
  *

@@ -1,7 +1,17 @@
-// HeliosView bridge shim — injected into every document via
-// AddScriptToExecuteOnDocumentCreated. CMake wraps this file into a generated
-// webview_bridge.inc (kWebView2BridgeScript), which heliosview_webview2_win32.cpp
-// #includes (C++23 #embed is not supported by MSVC yet).
+// HeliosView bridge shim — injected into every document before any page script
+// (Windows: AddScriptToExecuteOnDocumentCreated; macOS/Linux: the engine's
+// user-script hook). CMake wraps this file into a generated webview_bridge.inc
+// (kWebView2BridgeScript), which heliosview_webview2_win32.cpp #includes (C++23
+// #embed is not supported by MSVC yet).
+//
+// Three layers, deliberately separated:
+//   1. protocol  — the "HV" envelope and window.helios.call / BroadcastChannel
+//                  semantics below. Engine-independent.
+//   2. transport — the small adapter right below (post / listen), one branch per
+//                  engine: WebView2, WKWebView, WebKitGTK.
+//   3. page API  — window.helios and the <helios-window-controls> component.
+// Only the transport changes per platform; the protocol and the page API are
+// shared, so a new engine only needs a new transport branch.
 //
 // Wire format (shared with the C side — see the comment near hv_valid_name in
 // heliosview_webview2_win32.cpp): a "HV" magic + tab-separated kind and fields, then a
@@ -25,11 +35,71 @@
     for (var i = 0; i < fields.length; i++) s += '\t' + fields[i];
     return s + '\r\n\r\n' + (payload === undefined ? '' : payload);
   }
-  function post(s) { window.chrome.webview.postMessage(s); }
+
+  /* ================= transport adapter =================
+   * Uniform interface: post(string) sends a page -> native envelope;
+   * listen(handler) delivers native -> page envelopes as plain strings.
+   * One branch per engine; the protocol above never sees the difference.
+   *   webview2  window.chrome.webview.postMessage / 'message' event
+   *   webkit    window.webkit.messageHandlers.<handler>.postMessage (WKWebView
+   *             and WebKitGTK 2.40+); native delivers by evaluating
+   *             window.__hvRecv("<envelope>") — the name below.
+   * An unknown engine leaves the transport inert: window.helios.call rejects
+   * with a clear message instead of throwing, so pages degrade gracefully. */
+  var transport = (function () {
+    if (window.chrome && window.chrome.webview) {
+      return {
+        name: 'webview2',
+        post: function (s) { window.chrome.webview.postMessage(s); },
+        listen: function (handler) {
+          window.chrome.webview.addEventListener('message', function (e) { handler(e.data); });
+        }
+      };
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.helios) {
+      var handler = window.webkit.messageHandlers.helios;
+      return {
+        name: 'webkit',
+        post: function (s) { handler.postMessage(s); },
+        listen: function (h) { window.__hvRecv = h; }   /* native: evaluateJavaScript("__hvRecv(...)") */
+      };
+    }
+    return null;
+  })();
+
+  function post(s) {
+    if (transport) transport.post(s);
+  }
+
+  /* Native -> page eval request (kind "eval", payload = script text): run the
+     script in the global scope (same semantics as the engine's own script
+     evaluation), await a returned promise, then reply
+     "HV\teval\t<id>\t<ok|error>\r\n\r\n<json|message>". This is what makes
+     heliosview_webview_eval_async await promises — the engine's ExecuteScript
+     hands back the promise object itself, not its value. */
+  function safeJson(v) {
+    try { return JSON.stringify(v === undefined ? null : v); }
+    catch (err) { return 'null'; }        /* circular / non-serializable */
+  }
+  function hvEval(script, id) {
+    function reply(kind, text) { post(pack('eval', [String(id), kind], text)); }
+    var value;
+    try {
+      value = (0, eval)(script);          /* indirect eval: global scope */
+    } catch (err) {
+      reply('error', String((err && err.message) || err));
+      return;
+    }
+    if (value && typeof value.then === 'function') {
+      value.then(function (v) { reply('ok', safeJson(v)); },
+                 function (err) { reply('error', String((err && err.message) || err)); });
+    } else {
+      reply('ok', safeJson(value));
+    }
+  }
 
   /* Native -> page: parse an envelope string and dispatch. */
-  function recv(e) {
-    var m = e.data;
+  function recv(m) {
     if (typeof m !== 'string') return;
     var sep = m.indexOf('\r\n\r\n');
     if (sep < 0) return;
@@ -60,14 +130,20 @@
       var data = null;
       try { data = body === '' ? null : JSON.parse(body); } catch (e4) {}
       dispatchBC(h[2], data);
+    } else if (h[1] === 'eval' && h.length >= 3) {
+      hvEval(body, h[2]);
     }
   }
 
-  window.chrome.webview.addEventListener('message', recv);
+  if (transport) transport.listen(recv);
 
   window.helios = {
     call: function (name) {
       var args = Array.prototype.slice.call(arguments, 1);
+      if (!transport) {
+        return Promise.reject(new Error(
+          'HeliosView: no bridge transport for this engine (WebView2 / WKWebView / WebKitGTK)'));
+      }
       return new Promise(function (resolve, reject) {
         var id = ++seq;
         pending.set(id, { resolve: resolve, reject: reject });

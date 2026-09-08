@@ -1,4 +1,5 @@
 #include <HeliosView/heliosview.h>
+#include "../heliosview_backend.h"
 #include "../heliosview_internal.h"
 // HeliosView.dll — Windows implementation: windows, message loop, native-message → event conversion.
 // The cross-platform interface is in heliosview.h; the win32 layer is split by subsystem:
@@ -47,6 +48,7 @@ struct heliosview_window {
     int height = 0;
     std::string title; /* UTF-8 */
     heliosview_window_style_t style = HELIOSVIEW_WINDOW_NORMAL;
+    uint32_t flags = 0;       /* heliosview_window_flag_t bits the window was created with */
     HWND hwnd = nullptr;
     void* userdata = nullptr; /* caller data (the C++ wrapper stores an object pointer) */
     HICON icon = nullptr;     /* custom window icon (owned; NULL = default) */
@@ -60,20 +62,6 @@ struct heliosview_window {
     DWORD fs_restore_style = 0;    /* pre-fullscreen window style */
     DWORD fs_restore_exstyle = 0;  /* pre-fullscreen extended style */
     std::vector<RECT> drag_regions; /* client-area move regions (WM_NCHITTEST -> HTCAPTION) */
-
-    /* Routing ids (tray callback messages, caller-registered ids) are allocated
-     * from one per-window id space (next_route_id; WM_APP range, so every id is
-     * a valid WM_APP message / fits a WM_COMMAND LOWORD). Each id becomes one
-     * comctl32 window subclass entry (uIdSubclass = the id, dwRefData = the
-     * userdata), so the id → userdata binding lives in the subclass entry — no
-     * lookup table. Menu item ids are menu-local (MNS_NOTIFYBYPOS / WM_MENUCOMMAND
-     * routing, see heliosview_menu_win32.cpp) and do NOT come from this space;
-     * trays allocate their callback message ids here. `registry` below is the
-     * PREVIOUS routing design's table
-     * (id → userdata); it is dead now and kept only as leftover — deletable
-     * with <flat_map>. */
-    uint32_t next_route_id = WM_APP + 0x100;       /* per-window routing id allocator */
-    std::flat_map<uint32_t, void*> registry;        /* dead: old routing table (id → userdata), superseded by subclasses */
 };
 
 /* ================= Window style mapping ================= */
@@ -96,6 +84,19 @@ DWORD map_win32_style(const heliosview_window_t* window)
     }
     if (!window->resizable)
         style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    /* Explicit flag restrictions (see heliosview_window_flag_t): the three
+     * affordance bits, when any of them is present, define the complete set. */
+    const uint32_t affordances = HELIOSVIEW_WINDOW_FLAG_CLOSABLE
+                               | HELIOSVIEW_WINDOW_FLAG_MINIMIZABLE
+                               | HELIOSVIEW_WINDOW_FLAG_RESIZABLE;
+    if (window->flags & affordances) {
+        if (!(window->flags & HELIOSVIEW_WINDOW_FLAG_RESIZABLE))
+            style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+        if (!(window->flags & HELIOSVIEW_WINDOW_FLAG_MINIMIZABLE))
+            style &= ~WS_MINIMIZEBOX;
+        if (!(window->flags & HELIOSVIEW_WINDOW_FLAG_CLOSABLE))
+            style &= ~WS_SYSMENU;
+    }
     return style;
 }
 
@@ -186,19 +187,6 @@ const bool g_common_controls_initialized = [] {
 /* Register the platform wake callback with the cross-platform core (static init, before main) */
 const bool g_wake_registered = (hv::g_platform_wake = [] { SetEvent(g_wakeup_event); }, true);
 
-/* Per-thread library state. The win32 implementation is single-UI-thread by
- * design — the same model as the cross-platform event queue (hv::tls_event_queue in
- * heliosview_internal.h): windows are created, looked up and destroyed on the
- * thread that runs the message loop, so the live-window count is thread-local
- * state, not a process-global variable. There is no id → window registry at
- * all: a window's identity is its native handle (HWND), which events carry and
- * heliosview_window_from_id resolves via IsWindow + GWLP_USERDATA — nothing to
- * keep in sync with destroy, and a stale queued event resolves to NULL. */
-struct hv_ui_state {
-    int32_t window_count = 0; /* live windows on this thread (create/destroy) */
-};
-thread_local hv_ui_state tls_ui_state;
-
 /* Session-end (WM_QUERYENDSESSION) callback: runs synchronously on the message-loop
  * thread before shutdown/logoff; return non-zero to veto. */
 heliosview_session_end_cb g_session_end_cb = nullptr;
@@ -216,6 +204,54 @@ heliosview_keycode_t map_vk(UINT vk)
     case VK_RIGHT:  return HELIOSVIEW_KEY_RIGHT;
     case VK_UP:     return HELIOSVIEW_KEY_UP;
     case VK_DOWN:   return HELIOSVIEW_KEY_DOWN;
+    case VK_TAB:    return HELIOSVIEW_KEY_TAB;
+    case VK_BACK:   return HELIOSVIEW_KEY_BACKSPACE;
+    case VK_DELETE: return HELIOSVIEW_KEY_DELETE;
+    case VK_INSERT: return HELIOSVIEW_KEY_INSERT;
+    case VK_HOME:   return HELIOSVIEW_KEY_HOME;
+    case VK_END:    return HELIOSVIEW_KEY_END;
+    case VK_PRIOR:  return HELIOSVIEW_KEY_PAGE_UP;
+    case VK_NEXT:   return HELIOSVIEW_KEY_PAGE_DOWN;
+    case VK_LSHIFT: return HELIOSVIEW_KEY_LEFT_SHIFT;
+    case VK_RSHIFT: return HELIOSVIEW_KEY_RIGHT_SHIFT;
+    case VK_LCONTROL: return HELIOSVIEW_KEY_LEFT_CTRL;
+    case VK_RCONTROL: return HELIOSVIEW_KEY_RIGHT_CTRL;
+    case VK_LMENU:  return HELIOSVIEW_KEY_LEFT_ALT;
+    case VK_RMENU:  return HELIOSVIEW_KEY_RIGHT_ALT;
+    case VK_LWIN:   return HELIOSVIEW_KEY_LEFT_META;
+    case VK_RWIN:   return HELIOSVIEW_KEY_RIGHT_META;
+    case VK_OEM_MINUS:  return HELIOSVIEW_KEY_MINUS;
+    case VK_OEM_PLUS:   return HELIOSVIEW_KEY_EQUAL;
+    case VK_OEM_4:      return HELIOSVIEW_KEY_LEFT_BRACKET;
+    case VK_OEM_6:      return HELIOSVIEW_KEY_RIGHT_BRACKET;
+    case VK_OEM_5:      return HELIOSVIEW_KEY_BACKSLASH;
+    case VK_OEM_1:      return HELIOSVIEW_KEY_SEMICOLON;
+    case VK_OEM_7:      return HELIOSVIEW_KEY_APOSTROPHE;
+    case VK_OEM_3:      return HELIOSVIEW_KEY_GRAVE;
+    case VK_OEM_COMMA:  return HELIOSVIEW_KEY_COMMA;
+    case VK_OEM_PERIOD: return HELIOSVIEW_KEY_PERIOD;
+    case VK_OEM_2:      return HELIOSVIEW_KEY_SLASH;
+    case VK_CAPITAL:    return HELIOSVIEW_KEY_CAPS_LOCK;
+    case VK_NUMLOCK:    return HELIOSVIEW_KEY_NUM_LOCK;
+    case VK_SCROLL:     return HELIOSVIEW_KEY_SCROLL_LOCK;
+    case VK_SNAPSHOT:   return HELIOSVIEW_KEY_PRINT_SCREEN;
+    case VK_PAUSE:      return HELIOSVIEW_KEY_PAUSE;
+    case VK_APPS:       return HELIOSVIEW_KEY_MENU;
+    case VK_NUMPAD0:    return HELIOSVIEW_KEY_NUMPAD_0;
+    case VK_NUMPAD1:    return HELIOSVIEW_KEY_NUMPAD_1;
+    case VK_NUMPAD2:    return HELIOSVIEW_KEY_NUMPAD_2;
+    case VK_NUMPAD3:    return HELIOSVIEW_KEY_NUMPAD_3;
+    case VK_NUMPAD4:    return HELIOSVIEW_KEY_NUMPAD_4;
+    case VK_NUMPAD5:    return HELIOSVIEW_KEY_NUMPAD_5;
+    case VK_NUMPAD6:    return HELIOSVIEW_KEY_NUMPAD_6;
+    case VK_NUMPAD7:    return HELIOSVIEW_KEY_NUMPAD_7;
+    case VK_NUMPAD8:    return HELIOSVIEW_KEY_NUMPAD_8;
+    case VK_NUMPAD9:    return HELIOSVIEW_KEY_NUMPAD_9;
+    case VK_DECIMAL:    return HELIOSVIEW_KEY_NUMPAD_DECIMAL;
+    case VK_DIVIDE:     return HELIOSVIEW_KEY_NUMPAD_DIVIDE;
+    case VK_MULTIPLY:   return HELIOSVIEW_KEY_NUMPAD_MULTIPLY;
+    case VK_SUBTRACT:   return HELIOSVIEW_KEY_NUMPAD_SUBTRACT;
+    case VK_ADD:        return HELIOSVIEW_KEY_NUMPAD_ADD;
     default:
         if (vk >= 'A' && vk <= 'Z')
             return static_cast<heliosview_keycode_t>(HELIOSVIEW_KEY_A + (vk - 'A'));
@@ -227,61 +263,61 @@ heliosview_keycode_t map_vk(UINT vk)
     }
 }
 
-/* ================= Routing subclasses (caller-registered ids) =================
- *
- * The public heliosview_window_add_item / _remove_item let callers register
- * their own routing ids: each id becomes one comctl32 window subclass whose
- * uIdSubclass IS the id and whose dwRefData is the userdata — the id → userdata
- * association lives in the subclass entry itself, no lookup table. The tray and
- * menu backends do NOT go through this anymore: each of them registers its own
- * dedicated callout (hv_tray_subclass_proc / hv_menu_subclass_proc, in their
- * own files). This generic callout only serves caller-registered ids:
- *   - a message whose number is the id (tray-style WM_APP callback messages),
- *   - a WM_COMMAND whose LOWORD(wParam) is the id (menu-style command ids).
- * Every other message is forwarded down the chain (DefSubclassProc). The
- * callout never dereferences dwRefData unless one of its own messages actually
- * arrived: WM_NCDESTROY and every other message can never match a routing id
- * (ids are >= WM_APP + 0x100) nor WM_COMMAND, so they are forwarded without
- * touching the item — safe even when the item was already destroyed. */
-LRESULT CALLBACK hv_routing_subclass_proc(HWND hwnd, UINT message, WPARAM wparam,
-                                          LPARAM lparam, UINT_PTR id, DWORD_PTR ref)
+/* Modifier state at the time of the message. GetKeyState (not GetAsyncKeyState)
+ * is the right one here: it reflects the keyboard state the message was posted
+ * with, and works on the message-loop thread. */
+uint32_t map_modifiers()
 {
-    heliosview_event_t ev{};
-    ev.window_id = reinterpret_cast<uintptr_t>(hwnd);
-    ev.timestamp_ms = hv::now_ms();
-
-    if (message == WM_COMMAND && LOWORD(wparam) == static_cast<UINT>(id)) {
-        /* Menu item selection: TrackPopupMenu posts WM_COMMAND with the item's
-         * id in LOWORD(wParam). Only a registered routing id matches here;
-         * WM_COMMAND for regular child controls/buttons never collides (their
-         * ids are not registered). */
-        ev.type = HELIOSVIEW_EVENT_MENU_SELECT;
-        ev.menu_item = LOWORD(wparam);
-        ev.userdata = reinterpret_cast<void*>(ref);
-        hv::queue_push(ev);
-        return 1; /* handled: stop the subclass chain, no DefWindowProc */
-    }
-
-    if (message == static_cast<UINT>(id)) {
-        /* Tray icon callback messages (posted by Shell_NotifyIcon when an icon
-         * is clicked). The message id IS the per-window routing id (>= WM_APP),
-         * which is exactly what this callout is registered under. */
-        switch (lparam) {
-        case WM_LBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK; break;
-        case WM_LBUTTONDBLCLK:   ev.type = HELIOSVIEW_EVENT_TRAY_LEFT_DOUBLE_CLICK; break;
-        case WM_RBUTTONUP:
-        case WM_CONTEXTMENU:     ev.type = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK; break;
-        case WM_MBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK; break;
-        default:
-            return 1; /* consume; not a click we translate */
-        }
-        ev.userdata = reinterpret_cast<void*>(ref);
-        hv::queue_push(ev);
-        return 1; /* consumed: this callback message belongs to a registered id */
-    }
-
-    return DefSubclassProc(hwnd, message, wparam, lparam);
+    uint32_t m = HELIOSVIEW_MOD_NONE;
+    auto down = [](int vk) { return (GetKeyState(vk) & 0x8000) != 0; };
+    if (down(VK_LSHIFT))   m |= HELIOSVIEW_MOD_LEFT_SHIFT;
+    if (down(VK_RSHIFT))   m |= HELIOSVIEW_MOD_RIGHT_SHIFT;
+    if (down(VK_LCONTROL)) m |= HELIOSVIEW_MOD_LEFT_CTRL;
+    if (down(VK_RCONTROL)) m |= HELIOSVIEW_MOD_RIGHT_CTRL;
+    if (down(VK_LMENU))    m |= HELIOSVIEW_MOD_LEFT_ALT;
+    if (down(VK_RMENU))    m |= HELIOSVIEW_MOD_RIGHT_ALT;
+    if (down(VK_LWIN))     m |= HELIOSVIEW_MOD_LEFT_META;
+    if (down(VK_RWIN))     m |= HELIOSVIEW_MOD_RIGHT_META;
+    if (m & (HELIOSVIEW_MOD_LEFT_SHIFT | HELIOSVIEW_MOD_RIGHT_SHIFT))
+        m |= HELIOSVIEW_MOD_SHIFT;
+    if (m & (HELIOSVIEW_MOD_LEFT_CTRL | HELIOSVIEW_MOD_RIGHT_CTRL))
+        m |= HELIOSVIEW_MOD_CTRL;
+    if (m & (HELIOSVIEW_MOD_LEFT_ALT | HELIOSVIEW_MOD_RIGHT_ALT))
+        m |= HELIOSVIEW_MOD_ALT;
+    if (m & (HELIOSVIEW_MOD_LEFT_META | HELIOSVIEW_MOD_RIGHT_META))
+        m |= HELIOSVIEW_MOD_META;
+    if (GetKeyState(VK_CAPITAL) & 0x0001)
+        m |= HELIOSVIEW_MOD_CAPS_LOCK;
+    if (GetKeyState(VK_NUMLOCK) & 0x0001)
+        m |= HELIOSVIEW_MOD_NUM_LOCK;
+    return m;
 }
+
+/* UTF-8 encode one codepoint; returns the byte count (1..4). */
+int utf8_encode_cp(uint32_t cp, char* out)
+{
+    if (cp < 0x80) {
+        out[0] = static_cast<char>(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (cp >> 6));
+        out[1] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (cp >> 12));
+        out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (cp >> 18));
+    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
+    return 4;
+}
+
 
 int default_native_convert(void* native_msg, uintptr_t window_id)
 {
@@ -415,15 +451,59 @@ int default_native_convert(void* native_msg, uintptr_t window_id)
         }
         return -1;
     case WM_KEYDOWN:
-        if ((msg->lParam & 0x40000000) != 0)
-            return 0; /* filter keyboard auto-repeat */
+    case WM_SYSKEYDOWN: /* Alt+key is still a key press; the system menu is separate */
         ev.type = HELIOSVIEW_EVENT_KEY_DOWN;
         ev.key = map_vk(static_cast<UINT>(msg->wParam));
+        ev.modifiers = map_modifiers();
+        /* bit 30 = the key was already down: OS auto-repeat. Reported through the
+         * flag instead of being dropped, so callers decide whether to act on it. */
+        if ((msg->lParam & 0x40000000) != 0)
+            ev.flags |= HELIOSVIEW_EVENT_FLAG_KEY_REPEAT;
         return emit();
     case WM_KEYUP:
+    case WM_SYSKEYUP:
         ev.type = HELIOSVIEW_EVENT_KEY_UP;
         ev.key = map_vk(static_cast<UINT>(msg->wParam));
+        ev.modifiers = map_modifiers();
         return emit();
+    case WM_CHAR: {
+        /* Text entry. TranslateMessage turns WM_KEYDOWN into WM_CHAR using the
+         * active keyboard layout, and IME commits arrive here as WM_CHAR too, so
+         * this is the single text-input path. wParam is one UTF-16 code unit; a
+         * character outside the BMP arrives as two (surrogate pair), so the high
+         * half is buffered until its low half shows up. */
+        static thread_local wchar_t pending_high_surrogate = 0;
+        const wchar_t unit = static_cast<wchar_t>(msg->wParam);
+        if (unit < 0x20 || unit == 0x7F)
+            return 1; /* backspace/tab/CR/LF/ESC are key events, not text */
+
+        auto emit_codepoint = [&](uint32_t cp) {
+            ev.type = HELIOSVIEW_EVENT_TEXT_INPUT;
+            ev.modifiers = map_modifiers();
+            ev.text_len = static_cast<uint32_t>(utf8_encode_cp(cp, ev.text));
+            ev.text[ev.text_len] = '\0';
+            return emit();
+        };
+
+        if (pending_high_surrogate != 0) {
+            const wchar_t high = pending_high_surrogate;
+            pending_high_surrogate = 0;
+            if (unit >= 0xDC00 && unit <= 0xDFFF) {
+                return emit_codepoint(0x10000u + ((static_cast<uint32_t>(high) - 0xD800u) << 10)
+                                                + (static_cast<uint32_t>(unit) - 0xDC00u));
+            }
+            /* Orphan high surrogate: report one replacement character, then fall
+             * through so the unit that arrived instead is not lost. */
+            emit_codepoint(0xFFFD);
+        }
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+            pending_high_surrogate = unit;
+            return 1; /* wait for the low half */
+        }
+        if (unit >= 0xDC00 && unit <= 0xDFFF)
+            return emit_codepoint(0xFFFD); /* lone low surrogate */
+        return emit_codepoint(static_cast<uint32_t>(unit));
+    }
     case WM_MOUSEMOVE:
         ev.type = HELIOSVIEW_EVENT_MOUSE_MOVE;
         break;
@@ -433,16 +513,101 @@ int default_native_convert(void* native_msg, uintptr_t window_id)
     case WM_LBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_LEFT; break;
     case WM_RBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_RIGHT; break;
     case WM_MBUTTONUP:   ev.type = HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;   ev.mouse_button = HELIOSVIEW_MOUSE_MIDDLE; break;
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+        ev.type = (msg->message == WM_XBUTTONDOWN) ? HELIOSVIEW_EVENT_MOUSE_BUTTON_DOWN
+                                                   : HELIOSVIEW_EVENT_MOUSE_BUTTON_UP;
+        ev.mouse_button = (HIWORD(msg->wParam) == XBUTTON1) ? HELIOSVIEW_MOUSE_X1
+                                                           : HELIOSVIEW_MOUSE_X2;
+        break;
     default:
         return -1; /* unhandled → hand off to DefWindowProc */
     }
 
     ev.x = static_cast<int32_t>(static_cast<int16_t>(LOWORD(msg->lParam)));
     ev.y = static_cast<int32_t>(static_cast<int16_t>(HIWORD(msg->lParam)));
+    ev.modifiers = map_modifiers();
     return emit();
 }
 
+/* ================= Native filter pipeline (middleware) =================
+ *
+ * The filter chain runs BEFORE the built-in conversion: each registered filter
+ * may pre-process, call next() to forward downstream, and post-process. The
+ * terminal stage is the built-in conversion -> legacy converters -> DefWindowProcW.
+ * File scope on purpose: a namespace cannot be declared inside a function. */
+
+struct FilterChainState {
+    const hv::heliosview_filter_entry* filters;
+    size_t count;
+    size_t current_index;
+    HWND hwnd;
+    UINT message;
+    WPARAM wparam;
+    LPARAM lparam;
+};
+
+void run_next_filter(heliosview_native_context_t* ctx, void* next_ud)
+{
+    auto* state = static_cast<FilterChainState*>(next_ud);
+    if (state->current_index < state->count) {
+        const auto& entry = state->filters[state->current_index++];
+        entry.filter(ctx, run_next_filter, state, entry.userdata);
+    } else {
+        /* Terminal stage: default library conversion -> legacy handlers -> DefWindowProcW */
+        int handled = default_native_convert(static_cast<MSG*>(ctx->native_msg), ctx->window_id);
+        if (handled == -1) {
+            for (const auto& [id, h] : hv::g_native_handlers) {
+                if (!h)
+                    continue;
+                handled = h(ctx->native_msg, ctx->window_id);
+                if (handled != -1)
+                    break;
+            }
+        }
+        if (handled == 1 || handled == 0) {
+            ctx->is_handled = 1;
+            ctx->result = 0;
+        } else {
+            ctx->result = DefWindowProcW(state->hwnd, state->message, state->wparam, state->lparam);
+        }
+    }
+}
+
 } // namespace
+
+/* ================= Backend entry points (see heliosview_backend.h) =================
+ *
+ * File scope (outside the anonymous namespace) because the core links against
+ * them. Window bookkeeping — live count and id → window lookup — lives in the
+ * core's thread-local registry (hv::tls_windows, heliosview_internal.h): this
+ * backend registers a window once its HWND exists, unregisters it before
+ * destroying it, and validates a handle on demand below. The core exposes that
+ * as heliosview_window_count / heliosview_window_from_id. */
+
+const char* hv_backend_name()
+{
+    return "win32";
+}
+
+bool hv_backend_window_alive(uintptr_t window_id)
+{
+    const HWND hwnd = reinterpret_cast<HWND>(window_id);
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+    /* Only this library's windows carry one of these class names; a stale or
+     * reused HWND from another process/window class is rejected here. The CLASS
+     * is the stable identity — NOT GWLP_WNDPROC: a WebView attached to the
+     * window installs a comctl32 subclass (SetWindowSubclass), which replaces
+     * GWLP_WNDPROC with comctl32's master procedure, so comparing procedures
+     * would reject our own windows and break all event routing. */
+    wchar_t cls[32];
+    if (!GetClassNameW(hwnd, cls, 32))
+        return false;
+    return std::wcscmp(cls, L"HeliosViewWindow") == 0
+        || std::wcscmp(cls, L"HeliosViewWindowBorderless") == 0
+        || std::wcscmp(cls, L"HeliosViewWindowFrameless") == 0;
+}
 
 /* ================= Window procedure (per-style, template + if constexpr) =================
  *
@@ -482,10 +647,10 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
      * message loop. Windows are now created in the constructor, so a never-
      * shown window can be destroyed while others are alive; only the last
      * window's destruction may quit the loop. (heliosview_window_destroy
-     * decrements the count before DestroyWindow, so WM_DESTROY sees the
-     * remaining live windows.) */
+     * unregisters the window first, so WM_DESTROY sees the remaining live
+     * windows.) */
     if (message == WM_DESTROY) {
-        if (tls_ui_state.window_count > 0)
+        if (hv::hv_window_count() > 0)
             return 0; /* more windows alive: swallow DefWindowProc's WM_QUIT */
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
@@ -599,33 +764,59 @@ LRESULT CALLBACK heliosview_wndproc_t(HWND hwnd, UINT message, WPARAM wparam, LP
         return TRUE; /* allow the session to end */
     }
 
+    /* Menu routing: WM_MENUCOMMAND (a selection in one of this window's menus)
+     * and WM_INITMENUPOPUP (refresh action state before a menu pops up). Handled
+     * here rather than in a comctl32 subclass because WM_MENUCOMMAND is not
+     * delivered through the subclass chain. */
+    if (hv_menu_handle_message(hwnd, message, wparam, lparam))
+        return 0;
+
     MSG native{};
     native.hwnd = hwnd;
     native.message = message;
     native.wParam = wparam;
     native.lParam = lparam;
 
-    /* The library's built-in conversion always runs first (window/keyboard/mouse;
-     * tray/menu routing happens earlier still, in their per-id window subclasses,
-     * which consume their messages before this procedure runs). If it does not
-     * handle the message (-1), try each registered converter in order; the first
-     * that returns 1 (posted events via heliosview_post_event) or 0 (consumed)
-     * wins. Otherwise fall through to DefWindowProc. The native handle IS the
-     * window_id: it is passed to every converter, which stamps it on the
-     * events it posts, so routing needs no id registry here. */
     const uintptr_t window_id = reinterpret_cast<uintptr_t>(hwnd);
-    int handled = default_native_convert(&native, window_id);
-    if (handled == -1) {
-        for (const auto& [id, h] : hv::g_native_handlers) {
-            (void)id;
-            if (!h)
-                continue;
-            handled = h(&native, window_id);
-            if (handled != -1)
-                break;
+
+    /* Fast path when no middleware filters are registered */
+    if (hv::g_native_filters.empty()) {
+        int handled = default_native_convert(&native, window_id);
+        if (handled == -1) {
+            for (const auto& [id, h] : hv::g_native_handlers) {
+                if (!h)
+                    continue;
+                handled = h(&native, window_id);
+                if (handled != -1)
+                    break;
+            }
         }
+        return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
     }
-    return handled == 1 || handled == 0 ? 0 : DefWindowProcW(hwnd, message, wparam, lparam);
+
+    /* Pipeline filter dispatch (middleware / onion model). The snapshot is owned
+     * by the core and only rebuilt when the registry changes, so this path does
+     * not allocate per message. */
+    const std::vector<hv::heliosview_filter_entry>& active_filters = hv::native_filters_snapshot();
+
+    heliosview_native_context_t ctx{};
+    ctx.window_id = window_id;
+    ctx.native_msg = &native;
+    ctx.result = 0;
+    ctx.is_handled = 0;
+
+    FilterChainState state{
+        active_filters.data(),
+        active_filters.size(),
+        0,
+        hwnd,
+        message,
+        wparam,
+        lparam
+    };
+
+    run_next_filter(&ctx, &state);
+    return static_cast<LRESULT>(ctx.result);
 }
 
 /* Explicit instantiations, one per style (the only WndProcs the library uses). */
@@ -643,6 +834,11 @@ void heliosview_pump_events(void)
             heliosview_quit();
             break;
         }
+        /* action shortcuts (menu accelerators): TranslateAccelerator turns a
+         * matching key message into WM_COMMAND, which the window procedure
+         * routes to the action. Must run before TranslateMessage/DispatchMessage. */
+        if (hv_menu_translate_accelerator(&msg))
+            continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -681,6 +877,14 @@ heliosview_window_t* heliosview_window_create(int width, int height, const char*
 heliosview_window_t* heliosview_window_create_ex(int width, int height, const char* title,
                                                  heliosview_window_style_t style, void* userdata)
 {
+    return heliosview_window_create_ex2(width, height, title, style,
+                                        HELIOSVIEW_WINDOW_FLAG_NONE, userdata);
+}
+
+heliosview_window_t* heliosview_window_create_ex2(int width, int height, const char* title,
+                                                  heliosview_window_style_t style, uint32_t flags,
+                                                  void* userdata)
+{
     if (!title) {
         hv_fail(-1, "title is NULL");
         return nullptr;
@@ -690,11 +894,24 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
     window->height = height;
     window->title = title;
     window->style = style;
+    window->flags = flags;
     window->userdata = userdata;
+    /* On Windows the three title-bar flags all mean "no native caption; the
+     * client area is the whole window" — i.e. the FRAMELESS layout, which is
+     * what WM_NCCALCSIZE in that window procedure implements. */
+    if (style == HELIOSVIEW_WINDOW_NORMAL
+        && (flags & (HELIOSVIEW_WINDOW_FLAG_TITLEBAR_HIDDEN
+                     | HELIOSVIEW_WINDOW_FLAG_TITLEBAR_TRANSPARENT
+                     | HELIOSVIEW_WINDOW_FLAG_FULL_SIZE_CONTENT)))
+        window->style = HELIOSVIEW_WINDOW_FRAMELESS;
 
     /* create the native window immediately (the constructor-created model: the
      * window exists as a native window from creation; show() only makes it
      * visible). Message-loop thread. */
+    static std::once_flag s_dpi_init_once;
+    std::call_once(s_dpi_init_once, [] {
+        heliosview_set_dpi_awareness();
+    });
     hv_ensure_common_controls_ctx(); /* v6 theming for this window's controls */
 
     /* Pick the window class + procedure for this style. Each style gets its own
@@ -739,11 +956,12 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
      * (client + caption + frame); BORDERLESS and FRAMELESS are entirely client
      * area (WM_NCCALCSIZE), so the requested client size is the window size. */
     const DWORD win_style = map_win32_style(window);
+    const DWORD ex_style = (window->flags & HELIOSVIEW_WINDOW_FLAG_TOOLWINDOW) ? WS_EX_TOOLWINDOW : 0;
     RECT rect{0, 0, window->width, window->height};
     if (window->style == HELIOSVIEW_WINDOW_NORMAL)
         AdjustWindowRect(&rect, win_style, FALSE);
 
-    window->hwnd = CreateWindowExW(0, class_name, title_w.c_str(), win_style,
+    window->hwnd = CreateWindowExW(ex_style, class_name, title_w.c_str(), win_style,
                                    CW_USEDEFAULT, CW_USEDEFAULT,
                                    rect.right - rect.left, rect.bottom - rect.top,
                                    nullptr, nullptr, GetModuleHandleW(nullptr), window);
@@ -757,7 +975,10 @@ heliosview_window_t* heliosview_window_create_ex(int width, int height, const ch
     if (!GetWindowLongPtrW(window->hwnd, GWLP_USERDATA))
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
 
-    tls_ui_state.window_count++;
+    /* core-owned registry: heliosview_window_count / _from_id read this */
+    hv::hv_register_window(reinterpret_cast<uintptr_t>(window->hwnd), window);
+    /* a window created after heliosview_menu_set_app_menu still gets the bar */
+    hv_menu_apply_app_menu(window->hwnd);
     return window;
 }
 
@@ -772,45 +993,21 @@ void heliosview_window_set_userdata(heliosview_window_t* window, void* userdata)
         window->userdata = userdata;
 }
 
-/* Look a window up by its native handle (the window_id an event carries).
- * The handle must still exist and be one of this library's windows, so a
- * destroyed window safely resolves to NULL (stale queued events become no-ops)
- * and a foreign window that reused the handle never hands back a garbage
- * pointer. Message-loop thread. */
-heliosview_window_t* heliosview_window_from_id(uintptr_t window_id)
-{
-    const HWND hwnd = reinterpret_cast<HWND>(window_id);
-    if (!hwnd || !IsWindow(hwnd))
-        return nullptr;
-    /* Only this library's windows store a heliosview_window_t* in GWLP_USERDATA;
-     * verify the window is one of ours before trusting it. The window CLASS is
-     * the stable identity here - NOT GWLP_WNDPROC: a WebView attached to the
-     * window installs a comctl32 subclass (SetWindowSubclass), which replaces
-     * GWLP_WNDPROC with comctl32's master procedure, so the procedure comparison
-     * would reject our own windows (and break all event routing for WebView
-     * windows). A stale/reused HWND from another process or window class does
-     * not carry one of these class names. */
-    wchar_t cls[32];
-    if (!GetClassNameW(hwnd, cls, 32))
-        return nullptr;
-    if (std::wcscmp(cls, L"HeliosViewWindow") != 0
-        && std::wcscmp(cls, L"HeliosViewWindowBorderless") != 0
-        && std::wcscmp(cls, L"HeliosViewWindowFrameless") != 0)
-        return nullptr;
-    return reinterpret_cast<heliosview_window_t*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-}
-
-int heliosview_window_count(void)
-{
-    return static_cast<int>(tls_ui_state.window_count);
-}
+/* Look a window up by its native handle (the window_id an event carries):
+ * heliosview_window_from_id / heliosview_window_count live in the core
+ * (src/heliosview.cpp) and read the registry this backend fills; the backend
+ * contributes only the handle validation (hv_backend_window_alive above), so a
+ * destroyed or reused HWND resolves to NULL and a stale queued event is a no-op.
+ * Message-loop thread. */
 
 void heliosview_window_destroy(heliosview_window_t* window)
 {
     if (!window)
         return;
-    tls_ui_state.window_count--;
+    /* Unregister BEFORE DestroyWindow: the WM_DESTROY handler decides whether
+     * the message loop may quit by looking at the remaining live windows. */
     if (window->hwnd) {
+        hv::hv_unregister_window(reinterpret_cast<uintptr_t>(window->hwnd));
         SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd); /* triggers WM_DESTROY → PostQuitMessage → message loop exits */
     }
@@ -832,47 +1029,6 @@ int heliosview_window_show(heliosview_window_t* window)
 uintptr_t heliosview_window_id(const heliosview_window_t* window)
 {
     return window ? reinterpret_cast<uintptr_t>(window->hwnd) : 0;
-}
-
-/* Allocate the window's next routing id (WM_APP range) WITHOUT registering
- * anything; 0 when the window or its native handle is missing. Internal: the
- * tray backend allocates its callback message id from this space, and
- * heliosview_window_add_item wraps it for caller-registered ids. */
-uint32_t hv_window_next_routing_id(heliosview_window_t* window)
-{
-    if (!window || !window->hwnd)
-        return 0;
-    return window->next_route_id++;
-}
-
-uint32_t heliosview_window_add_item(heliosview_window_t* window, void* userdata)
-{
-    /* A caller-registered routing id is one comctl32 window subclass: key = the
-     * id (uIdSubclass, from the per-window id space), value = the userdata
-     * (dwRefData); the generic callout (hv_routing_subclass_proc) above routes
-     * the id's messages. */
-    const uint32_t id = hv_window_next_routing_id(window);
-    if (!id) {
-        hv_fail(-1, "window is NULL or its native window is not created");
-        return 0;
-    }
-    if (!SetWindowSubclass(window->hwnd, hv_routing_subclass_proc,
-                           static_cast<UINT_PTR>(id), reinterpret_cast<DWORD_PTR>(userdata))) {
-        window->next_route_id--; /* keep the id space contiguous on failure */
-        hv_fail(-1, "SetWindowSubclass failed (routing id not registered)");
-        return 0;
-    }
-    return id;
-}
-
-int heliosview_window_remove_item(heliosview_window_t* window, uint32_t id)
-{
-    if (!window || !window->hwnd)
-        return hv_fail(-1, "window is NULL or its native window is not created");
-    if (!RemoveWindowSubclass(window->hwnd, hv_routing_subclass_proc,
-                              static_cast<UINT_PTR>(id)))
-        return hv_fail(-1, "routing id is not registered (removed twice?)");
-    return 0;
 }
 
 /* ================= Window operations (show state / close / focus) ================= */
@@ -1037,6 +1193,12 @@ int heliosview_window_set_topmost(heliosview_window_t* window, int on)
 
 int heliosview_window_set_icon(heliosview_window_t* window, const char* icon_path)
 {
+    return heliosview_window_set_icon_ex(window, icon_path, HELIOSVIEW_ICON_FLAG_NONE);
+}
+
+int heliosview_window_set_icon_ex(heliosview_window_t* window, const char* icon_path, uint32_t flags)
+{
+    (void)flags; /* HELIOSVIEW_ICON_FLAG_TEMPLATE is a macOS concept */
     if (!window || !window->hwnd)
         return -1;
     HICON new_icon = nullptr;
@@ -1162,6 +1324,19 @@ int32_t heliosview_window_title_bar_height(const heliosview_window_t* window)
     if (window->style != HELIOSVIEW_WINDOW_FRAMELESS)
         return 0; /* only the frameless style reserves a title-bar strip */
     return hv_title_bar_height(window->hwnd);
+}
+
+uint32_t heliosview_window_flags(const heliosview_window_t* window)
+{
+    return window ? window->flags : 0;
+}
+
+float heliosview_window_scale_factor(const heliosview_window_t* window)
+{
+    if (!window || !window->hwnd)
+        return 1.0f;
+    const UINT dpi = GetDpiForWindow(window->hwnd);
+    return dpi ? static_cast<float>(dpi) / 96.0f : 1.0f;
 }
 
 int heliosview_window_set_min_size(heliosview_window_t* window, int32_t min_width, int32_t min_height)
@@ -1458,7 +1633,18 @@ int heliosview_window_clear_progress(heliosview_window_t* window)
 int heliosview_window_set_backdrop(heliosview_window_t* window, heliosview_backdrop_t backdrop)
 {
     if (!window || !window->hwnd)
-        return -1;
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "window is NULL or its native window is not created");
+    /* DWMWA_SYSTEMBACKDROP_TYPE exists on Windows 11 22H2 (build 22621) and
+     * later only. On Windows 10 DwmSetWindowAttribute fails with E_INVALIDARG,
+     * which would surface as an opaque negated HRESULT; report the honest
+     * "unsupported here" instead so callers can degrade. NONE is already the
+     * Windows 10 default, so it stays a successful no-op there. */
+    if (hv_os_build() < 22621) {
+        if (backdrop == HELIOSVIEW_BACKDROP_NONE)
+            return 0;
+        return hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED,
+                       "system backdrop (Mica/Acrylic) requires Windows 11 22H2 (build 22621) or later");
+    }
     int type = DWMSBT_NONE;
     switch (backdrop) {
     case HELIOSVIEW_BACKDROP_MICA:    type = DWMSBT_MAINWINDOW; break;
@@ -1475,12 +1661,22 @@ int heliosview_window_set_backdrop(heliosview_window_t* window, heliosview_backd
 int heliosview_window_set_dark_mode(heliosview_window_t* window, int on)
 {
     if (!window || !window->hwnd)
-        return -1;
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "window is NULL or its native window is not created");
     const BOOL enable = on != 0;
-    const HRESULT hr = DwmSetWindowAttribute(window->hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                                             &enable, sizeof(enable));
-    return SUCCEEDED(hr) ? 0
-                         : hv_fail_hresult(hr, "DwmSetWindowAttribute (dark mode) failed");
+    /* Attribute 20 is Windows 10 20H1 (build 19041)+; 1809-1909 only accept the
+     * pre-release attribute 19, so fall back to it on E_INVALIDARG. */
+    HRESULT hr = DwmSetWindowAttribute(window->hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                       &enable, sizeof(enable));
+    if (hr == E_INVALIDARG) {
+        constexpr DWORD kDarkModeBefore20H1 = 19;
+        hr = DwmSetWindowAttribute(window->hwnd, kDarkModeBefore20H1, &enable, sizeof(enable));
+    }
+    if (SUCCEEDED(hr))
+        return 0;
+    if (hr == E_INVALIDARG && hv_os_build() < 17763)
+        return hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED,
+                       "dark-mode title bar requires Windows 10 1809 (build 17763) or later");
+    return hv_fail_hresult(hr, "DwmSetWindowAttribute (dark mode) failed");
 }
 
 /* ================= Native dialogs & system helpers ================= */
@@ -1506,31 +1702,71 @@ HRESULT hv_ensure_com()
     return S_OK;
 }
 
-/* Parse a "Name1 (*.ext)|*.ext|Name2|..." filter string into COMDLG_FILTERSPEC
- * pairs. An empty/absent filter yields the "All files" default. */
-void build_filterspec(const char* filter, std::vector<std::wstring>& owned,
+/* Convert heliosview_file_filter_t array into COMDLG_FILTERSPEC pairs.
+ * An empty/absent filter array yields the "All files" default.
+ *
+ * Two passes on purpose: COMDLG_FILTERSPEC stores raw pointers into `owned`, so
+ * every std::wstring must exist before the pointers are taken. Filling `owned`
+ * while storing pointers into it would dangle them as soon as the vector grows
+ * (a move relocates the wstring objects, and short strings live in their SSO
+ * buffer). */
+void build_filterspec(const heliosview_file_filter_t* filters, size_t filter_count,
+                      std::vector<std::wstring>& owned,
                       std::vector<COMDLG_FILTERSPEC>& specs)
 {
-    std::vector<std::string> parts;
-    if (filter && *filter) {
-        std::string s(filter);
-        size_t start = 0;
-        for (size_t pos = 0; pos <= s.size(); ++pos) {
-            if (pos == s.size() || s[pos] == '|') {
-                parts.push_back(s.substr(start, pos - start));
-                start = pos + 1;
+    /* ---- pass 1: all wide strings ---- */
+    specs.clear();
+    owned.clear();
+
+    if (!filters || filter_count == 0) {
+        owned.push_back(L"All files (*.*)");
+        owned.push_back(L"*.*");
+    } else {
+        for (size_t i = 0; i < filter_count; ++i) {
+            const auto& f = filters[i];
+            std::string ext_spec;
+            if (f.extensions && *f.extensions) {
+                /* Semicolon-separated: "png;jpg" or "*.png;*.jpg" -> "*.png;*.jpg" */
+                std::string exts(f.extensions);
+                size_t start = 0;
+                while (start < exts.size()) {
+                    size_t pos = exts.find(';', start);
+                    if (pos == std::string::npos)
+                        pos = exts.size();
+                    std::string item = exts.substr(start, pos - start);
+                    while (!item.empty() && item.front() == ' ') item.erase(item.begin());
+                    while (!item.empty() && item.back() == ' ') item.pop_back();
+                    if (!item.empty()) {
+                        if (!ext_spec.empty())
+                            ext_spec += ';';
+                        if (item.front() != '*') {
+                            if (item.front() != '.')
+                                ext_spec += "*.";
+                            else
+                                ext_spec += '*';
+                        }
+                        ext_spec += item;
+                    }
+                    start = pos + 1;
+                }
             }
+            if (ext_spec.empty())
+                ext_spec = "*.*";
+
+            std::string name_spec = f.name && *f.name ? f.name : ext_spec;
+            if (name_spec.find('(') == std::string::npos) {
+                name_spec += " (" + ext_spec + ")";
+            }
+
+            owned.push_back(utf8_to_wide(name_spec));
+            owned.push_back(utf8_to_wide(ext_spec));
         }
     }
-    if (parts.empty() || (parts.size() & 1) != 0) {
-        parts = {"All files (*.*)", "*.*"};
-    }
-    specs.clear();
-    for (size_t i = 0; i + 1 < parts.size(); i += 2) {
-        owned.push_back(utf8_to_wide(parts[i]));
-        owned.push_back(utf8_to_wide(parts[i + 1]));
-        specs.push_back({owned[owned.size() - 2].c_str(), owned.back().c_str()});
-    }
+
+    /* ---- pass 2: point the COM filter specs at the now-final strings ---- */
+    specs.reserve(owned.size() / 2);
+    for (size_t i = 0; i + 1 < owned.size(); i += 2)
+        specs.push_back({owned[i].c_str(), owned[i + 1].c_str()});
 }
 
 /* Return a fresh library-allocated UTF-8 copy of a wide string. */
@@ -1591,7 +1827,8 @@ int heliosview_select_folder(heliosview_window_t* window, const char* title, cha
     return result;
 }
 
-int heliosview_open_files(heliosview_window_t* window, const char* title, const char* filter,
+int heliosview_open_files(heliosview_window_t* window, const char* title,
+                          const heliosview_file_filter_t* filters, size_t filter_count,
                           int multi, char*** out_paths)
 {
     if (out_paths)
@@ -1605,7 +1842,7 @@ int heliosview_open_files(heliosview_window_t* window, const char* title, const 
     int result = -1;
     std::vector<std::wstring> filter_owned;
     std::vector<COMDLG_FILTERSPEC> filter_specs;
-    build_filterspec(filter, filter_owned, filter_specs);
+    build_filterspec(filters, filter_count, filter_owned, filter_specs);
 
     do {
         Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
@@ -1689,7 +1926,8 @@ void heliosview_free_paths(char** paths)
     heliosview_free(paths);
 }
 
-int heliosview_save_file(heliosview_window_t* window, const char* title, const char* filter,
+int heliosview_save_file(heliosview_window_t* window, const char* title,
+                         const heliosview_file_filter_t* filters, size_t filter_count,
                          const char* default_name, char** out_path)
 {
     if (out_path)
@@ -1703,7 +1941,7 @@ int heliosview_save_file(heliosview_window_t* window, const char* title, const c
     int result = -1;
     std::vector<std::wstring> filter_owned;
     std::vector<COMDLG_FILTERSPEC> filter_specs;
-    build_filterspec(filter, filter_owned, filter_specs);
+    build_filterspec(filters, filter_count, filter_owned, filter_specs);
 
     do {
         Microsoft::WRL::ComPtr<IFileSaveDialog> dialog;

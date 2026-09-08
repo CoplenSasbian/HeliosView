@@ -52,13 +52,13 @@ int main(void)
     g_win = heliosview_window_create(800, 600, "C demo");
     heliosview_window_show(g_win);
 
-    /* tray icon + balloon (works with no setup) */
-    heliosview_tray_t* tray = heliosview_tray_create(g_win, "C tray", NULL, NULL);
+    /* tray icon + balloon (works with no setup and no window dependency) */
+    heliosview_tray_t* tray = heliosview_tray_create("C tray", NULL, NULL);
     if (tray)
         heliosview_tray_notify(tray, "Tray", "Hello from C", HELIOSVIEW_TRAY_NOTIFY_INFO, 3000);
 
-    /* popup menu */
-    g_menu = heliosview_menu_create(g_win, NULL);
+    /* popup menu (standalone; the owner window is passed to _show) */
+    g_menu = heliosview_menu_create(NULL);
     heliosview_menu_add_item(g_menu, "Quit", NULL);
 
     /* modal message box */

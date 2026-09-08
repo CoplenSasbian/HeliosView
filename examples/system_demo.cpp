@@ -31,14 +31,18 @@ int main()
         case helios::KeyCode::F2: {
             const auto files = helios::openFiles(
                 window.nativeHandle(), "Pick images",
-                "Images (*.png;*.jpg)|*.png;*.jpg|All files (*.*)|*.*", /*multi=*/true);
+                std::vector<helios::FileFilter>{
+                    {"Images", "png;jpg;jpeg"},
+                    {"All files", "*.*"}
+                }, /*multi=*/true);
             for (const auto& f : files)
                 std::println("[demo] file: {}", f);
             break;
         }
         case helios::KeyCode::F3: {
             std::string path;
-            if (helios::saveFile(window.nativeHandle(), "Save as", "Text (*.txt)|*.txt",
+            if (helios::saveFile(window.nativeHandle(), "Save as",
+                                 std::vector<helios::FileFilter>{{"Text files", "txt"}},
                                  "out.txt", path))
                 std::println("[demo] save to: {}", path);
             break;

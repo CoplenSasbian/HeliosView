@@ -1,69 +1,48 @@
 // HeliosView.dll — Windows tray icon backend (heliosview_tray_* API).
 //
-// A tray icon is attached to a window and shown in the OS notification area via
-// Shell_NotifyIcon. When the icon is clicked, the shell posts ONE shared
-// callback message (kTrayCallbackMessage, the same for every tray) to the
-// icon's window with:
+// Standalone tray icon backend, completely decoupled from business windows.
 //
-//     wParam = the tray icon's id (uID)     ← the per-tray identity
-//     lParam = the mouse event (WM_LBUTTONUP, ...)
-//
-// Routing: ONE comctl32 subclass callout per window (fixed key, installed
-// lazily by the first tray on it; the (proc, key) pair is unique per window,
-// and the key value is arbitrary — it coexists with the WebView's and menu's
-// own (proc, 0) entries because those are different procs). The callout
-// resolves the tray from wParam (uID) through a THREAD-LOCAL table
-// (tls_tray_userdata): uIDs come from a process-global counter and are never
-// reused, so a uID maps to at most one live tray — destroyed trays erase their
-// entry (fail-closed). No per-tray registration, no routing-id allocation, no
-// registries beyond the one small TLS table.
-//
-// Threading: trays are created, used and clicked on the message-loop thread;
-// the table is thread-local to match (the event queue is thread-local too).
+// Architecture:
+// - Shell_NotifyIcon callback messages and the system-wide TaskbarCreated
+//   broadcast are delivered to the library's hidden host window
+//   (hv_host_window(), shared with window-less popup menus — see
+//   heliosview_host_win32.cpp). hv_tray_handle_host_message() below is the hook
+//   that window's procedure calls.
+// - Multiple trays share the host window, differentiated by uID (wParam).
+// - Business windows are never subclassed.
 
 #include <HeliosView/heliosview.h>
 #include "../heliosview_internal.h"    /* hv::hv_alloc / hv_dealloc / event queue */
-#include "heliosview_win32_internal.h" /* utf8_to_wide / hv_window_hwnd */
+#include "heliosview_win32_internal.h" /* utf8_to_wide / hv_fail_win32 */
 
 #include <shellapi.h> /* Shell_NotifyIcon / NOTIFYICONDATAW */
 
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <flat_map>
 #include <string>
+#include <vector>
 
-/* ================= Tray icon (Shell_NotifyIcon) ================= */
+/* ================= Tray icon structure ================= */
 
 struct heliosview_tray {
-    HWND hwnd = nullptr;       /* owning window (receives the callback messages) */
-    UINT uid = 0;              /* tray icon id (process-unique; the routing key in tls_tray_userdata) */
-    HICON icon = nullptr;      /* current icon (owned; NULL = default) */
+    HWND hwnd = nullptr;       /* hidden host window that receives callback messages */
+    UINT uid = 0;              /* tray icon id (process-unique; key in tls_tray_userdata) */
+    HICON icon = nullptr;      /* current icon (NULL = default) */
+    bool icon_owned = false;   /* true when `icon` came from LoadImage and must be destroyed */
     std::string tooltip;       /* UTF-8 */
     bool added = false;        /* NIM_ADD succeeded (so NIM_DELETE is safe) */
-    void* userdata = nullptr;  /* caller data (the C++ wrapper stores an object pointer) */
+    void* userdata = nullptr;  /* caller data (C++ wrapper object pointer) */
+    heliosview_menu_t* menu = nullptr; /* attached context menu (refcounted; NULL = none) */
 };
 
 namespace {
 
-/* One process-wide callback message shared by EVERY tray: the shell routes the
- * event to the right window, and wParam carries the tray's uID, so per-tray
- * message numbers are unnecessary. WM_APP + 0x42 avoids WM_APP + 0x41 (the
- * WebView's deferred sync message) and the WM_APP + 0x100+ caller-routing ids. */
+/* One process-wide callback message shared by every tray: wParam carries the tray's uID */
 constexpr UINT kTrayCallbackMessage = WM_APP + 0x42;
 
-/* Subclass key of the tray callout: unique among hv_tray_subclass_proc's own
- * entries on a window (the tray installs at most one per window), any value
- * works — 0 coexists with the WebView's and menu's (proc, 0) entries because
- * those are different procs. */
-constexpr UINT_PTR kTraySubclassKey = 0;
-
-/* "TaskbarCreated": a registered window message the shell broadcasts to every
- * top-level window when the taskbar (Shell_NotifyIcon) is (re)created — e.g.
- * Explorer starting, restarting, or crashing and coming back. On receipt the
- * shell has dropped all our icons, so every live tray on the window must be
- * re-added (NIM_ADD). Registered lazily on the message-loop thread; the value
- * is arbitrary but stable for the process. */
+/* TaskbarCreated broadcast message: registered when Explorer restarts */
 UINT g_taskbar_created_message = 0;
 
 UINT taskbar_created_message()
@@ -73,44 +52,45 @@ UINT taskbar_created_message()
     return g_taskbar_created_message;
 }
 
-/* Tray icon id allocator: per-process, never reused while a tray lives, so the
- * uID → userdata table below has no collisions and no stale entries. */
+/* Tray icon id allocator: process-unique */
 std::atomic<UINT> g_next_tray_uid{1};
 
-/* uID → userdata (thread-local: trays live on the message-loop thread). A
- * destroyed tray erases its entry, so a late callback for it fails the lookup
- * (fail-closed). */
+/* Thread-local tray registries (message loop thread) */
 inline thread_local std::flat_map<UINT, void*> tls_tray_userdata;
+inline thread_local std::flat_map<UINT, heliosview_tray_t*> tls_tray_objects;
+inline thread_local std::vector<heliosview_tray_t*> tls_trays;
 
-/* hwnd → the live heliosview_tray_t* on that window. Used to re-add every icon
- * when the shell posts "TaskbarCreated" (Explorer restart / slow start). */
-inline thread_local std::flat_map<HWND, std::vector<heliosview_tray_t*>> tls_window_trays;
-
-/* Forward: defined below, used by the TaskbarCreated handler in the callout. */
 int tray_apply(heliosview_tray_t* tray, DWORD msg);
 
-/* The tray routing callout: installed ONCE per window (fixed key), shared by
- * all trays on it. Shell_NotifyIcon posts kTrayCallbackMessage with the tray's
- * uID in wParam; resolve the userdata from the TLS table, translate the mouse
- * event in lParam into a TRAY_* event. Every other message is forwarded. */
-LRESULT CALLBACK hv_tray_subclass_proc(HWND hwnd, UINT message, WPARAM wparam,
-                                       LPARAM lparam, UINT_PTR, DWORD_PTR)
+} // namespace
+
+/* Hook called by the hidden host window's procedure (heliosview_host_win32.cpp).
+ * Returns true when the message belonged to the tray subsystem. */
+bool hv_tray_handle_host_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    (void)hwnd;
     if (message == taskbar_created_message()) {
-        /* Explorer (re)created the taskbar: it dropped every tray icon we had
-         * shown, so re-add all live trays on this window. NIM_ADD upserts, so
-         * this is safe to run even if a tray was never added. */
-        const auto it = tls_window_trays.find(hwnd);
-        if (it != tls_window_trays.end())
-            for (heliosview_tray_t* t : it->second)
-                tray_apply(t, NIM_ADD);
-        return 0; /* handled: the shell does not expect us to forward this */
+        /* Explorer restarted: re-add all live trays on this thread */
+        for (heliosview_tray_t* t : tls_trays)
+            tray_apply(t, NIM_ADD);
+        return true;
     }
+
     if (message == kTrayCallbackMessage) {
-        const auto it = tls_tray_userdata.find(static_cast<UINT>(wparam)); /* wParam = the tray's uID */
+        const auto it = tls_tray_userdata.find(static_cast<UINT>(wparam));
         if (it != tls_tray_userdata.end()) {
+            heliosview_tray_t* tray = tls_tray_objects.contains(static_cast<UINT>(wparam))
+                                          ? tls_tray_objects[static_cast<UINT>(wparam)]
+                                          : nullptr;
+            /* An attached context menu replaces the right-click event: the
+             * library opens the menu (the shell does that on macOS/Linux, where
+             * the event may never arrive — see heliosview.h). */
+            if (tray && tray->menu && (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU)) {
+                heliosview_menu_show(tray->menu, nullptr); /* hidden host window is the owner */
+                return true;
+            }
             heliosview_event_t ev{};
-            ev.window_id = reinterpret_cast<uintptr_t>(hwnd);
+            ev.window_id = 0; /* decoupled from business windows */
             ev.timestamp_ms = hv::now_ms();
             switch (lparam) {
             case WM_LBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_LEFT_CLICK; break;
@@ -119,35 +99,46 @@ LRESULT CALLBACK hv_tray_subclass_proc(HWND hwnd, UINT message, WPARAM wparam,
             case WM_CONTEXTMENU:     ev.type = HELIOSVIEW_EVENT_TRAY_RIGHT_CLICK; break;
             case WM_MBUTTONUP:       ev.type = HELIOSVIEW_EVENT_TRAY_MIDDLE_CLICK; break;
             default:
-                return 1; /* consume; not a click we translate */
+                return true; /* consume other mouse events */
             }
             ev.userdata = it->second;
             hv::queue_push(ev);
-            return 1; /* consumed: this tray's callback */
+            return true;
         }
     }
-    return DefSubclassProc(hwnd, message, wparam, lparam);
+    return false;
 }
 
-/* Install the tray callout on `hwnd`. Idempotent: SetWindowSubclass upserts
- * the same (proc, key) pair — one entry per window, shared by all its trays. */
-void tray_ensure_window_subclass(HWND hwnd)
-{
-    if (hwnd)
-        SetWindowSubclass(hwnd, hv_tray_subclass_proc, kTraySubclassKey, 0);
-}
+namespace {
 
-/* Load an icon from a file path (UTF-8), or the default application icon when NULL/empty */
-HICON load_tray_icon(const char* path)
+/* Load an icon from a file path (UTF-8), or the shared default application icon.
+ * `owned` reports whether the returned handle is ours to destroy — the shared
+ * IDI_APPLICATION handle must never be passed to DestroyIcon. */
+HICON load_tray_icon(const char* path, bool* owned)
 {
+    if (owned)
+        *owned = false;
     if (path && *path) {
         const std::wstring wpath = utf8_to_wide(path);
-        return static_cast<HICON>(LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
+        HICON loaded = static_cast<HICON>(LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, 0, 0,
+                                                    LR_LOADFROMFILE));
+        if (loaded && owned)
+            *owned = true;
+        return loaded;
     }
     return LoadIconW(nullptr, reinterpret_cast<LPCWSTR>(IDI_APPLICATION));
 }
 
-/* Build the NOTIFYICONDATA for this tray (fresh each call; uFlags always set) */
+/* Release a tray's current icon unless it is the shared default. */
+void release_tray_icon(heliosview_tray_t* tray)
+{
+    if (tray->icon && tray->icon_owned)
+        DestroyIcon(tray->icon);
+    tray->icon = nullptr;
+    tray->icon_owned = false;
+}
+
+/* Build NOTIFYICONDATAW for Shell_NotifyIcon */
 NOTIFYICONDATAW tray_nid(const heliosview_tray_t* tray)
 {
     NOTIFYICONDATAW nid{};
@@ -155,7 +146,7 @@ NOTIFYICONDATAW tray_nid(const heliosview_tray_t* tray)
     nid.hWnd = tray->hwnd;
     nid.uID = tray->uid;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    nid.uCallbackMessage = kTrayCallbackMessage; /* shared by all trays; wParam carries the uID */
+    nid.uCallbackMessage = kTrayCallbackMessage;
     nid.hIcon = tray->icon;
     if (!tray->tooltip.empty()) {
         const std::wstring wtip = utf8_to_wide(tray->tooltip);
@@ -164,7 +155,6 @@ NOTIFYICONDATAW tray_nid(const heliosview_tray_t* tray)
     return nid;
 }
 
-/* Apply a Shell_NotifyIcon operation; returns 0 on success, negative on failure */
 int tray_apply(heliosview_tray_t* tray, DWORD msg)
 {
     if (!tray || !tray->hwnd)
@@ -175,37 +165,33 @@ int tray_apply(heliosview_tray_t* tray, DWORD msg)
 
 } // namespace
 
-heliosview_tray_t* heliosview_tray_create(heliosview_window_t* window, const char* tooltip,
-                                          const char* icon_path, void* userdata)
+/* ================= Public Tray C API ================= */
+
+heliosview_tray_t* heliosview_tray_create(const char* tooltip, const char* icon_path, void* userdata)
 {
-    if (!window || !hv_window_hwnd(window)) { /* the window must exist to receive callback messages */
-        hv_fail(-1, "window must exist (native window created) before creating a tray");
+    HWND host = hv_host_window(&hv_tray_handle_host_message);
+    if (!host) {
+        hv_fail(-1, "failed to create tray host window");
         return nullptr;
     }
 
     auto* tray = hv::hv_alloc<heliosview_tray>();
-    tray->hwnd = hv_window_hwnd(window);
+    tray->hwnd = host;
     tray->uid = g_next_tray_uid.fetch_add(1);
     tray->tooltip = tooltip ? tooltip : "";
-    tray->icon = load_tray_icon(icon_path);
+    tray->icon = load_tray_icon(icon_path, &tray->icon_owned);
     tray->userdata = userdata;
 
-    /* Associate the uID with the userdata in the TLS table and make sure this
-     * window has the shared tray callout — the rest of the routing (message,
-     * wParam) is handled by the OS + the one callout. */
     tls_tray_userdata[tray->uid] = userdata;
-    tls_window_trays[tray->hwnd].push_back(tray);
-    tray_ensure_window_subclass(tray->hwnd);
+    tls_tray_objects[tray->uid] = tray;
+    tls_trays.push_back(tray);
 
     if (tray_apply(tray, NIM_ADD) != 0) {
         hv_fail_win32(GetLastError(), "Shell_NotifyIcon (NIM_ADD) failed — tray not created");
         tls_tray_userdata.erase(tray->uid);
-        auto& v = tls_window_trays[tray->hwnd];
-        v.erase(std::remove(v.begin(), v.end(), tray), v.end());
-        if (v.empty())
-            tls_window_trays.erase(tray->hwnd);
-        if (tray->icon)
-            DestroyIcon(tray->icon);
+        tls_tray_objects.erase(tray->uid);
+        tls_trays.erase(std::remove(tls_trays.begin(), tls_trays.end(), tray), tls_trays.end());
+        release_tray_icon(tray);
         hv::hv_dealloc(tray);
         return nullptr;
     }
@@ -223,13 +209,35 @@ int heliosview_tray_set_tooltip(heliosview_tray_t* tray, const char* tooltip)
 
 int heliosview_tray_set_icon(heliosview_tray_t* tray, const char* icon_path)
 {
+    return heliosview_tray_set_icon_ex(tray, icon_path, HELIOSVIEW_ICON_FLAG_NONE);
+}
+
+int heliosview_tray_set_icon_ex(heliosview_tray_t* tray, const char* icon_path, uint32_t flags)
+{
+    (void)flags; /* HELIOSVIEW_ICON_FLAG_TEMPLATE is a macOS concept */
     if (!tray)
         return hv_fail(-1, "tray is NULL");
-    HICON new_icon = load_tray_icon(icon_path);
-    if (tray->icon)
-        DestroyIcon(tray->icon);
+    bool owned = false;
+    HICON new_icon = load_tray_icon(icon_path, &owned);
+    if ((icon_path && *icon_path) && !new_icon)
+        return hv_fail_win32(GetLastError(), "LoadImageW failed — tray icon unchanged");
+    release_tray_icon(tray);
     tray->icon = new_icon;
+    tray->icon_owned = owned;
     return tray->added ? tray_apply(tray, NIM_MODIFY) : 0;
+}
+
+int heliosview_tray_set_menu(heliosview_tray_t* tray, heliosview_menu_t* menu)
+{
+    if (!tray)
+        return hv_fail(-1, "tray is NULL");
+    if (tray->menu == menu)
+        return 0;
+    heliosview_menu_t* previous = tray->menu;
+    tray->menu = menu;
+    hv_menu_retain(menu); /* the tray displays it until detached or destroyed */
+    hv_menu_release(previous);
+    return 0;
 }
 
 void heliosview_tray_destroy(heliosview_tray_t* tray)
@@ -238,18 +246,14 @@ void heliosview_tray_destroy(heliosview_tray_t* tray)
         return;
     if (tray->added)
         tray_apply(tray, NIM_DELETE);
-    tls_tray_userdata.erase(tray->uid); /* the window's shared callout stays (dies with the window) */
 
-    /* Unregister from the per-window tray list (needed for TaskbarCreated re-add). */
-    const auto wit = tls_window_trays.find(tray->hwnd);
-    if (wit != tls_window_trays.end()) {
-        auto& v = wit->second;
-        v.erase(std::remove(v.begin(), v.end(), tray), v.end());
-        if (v.empty())
-            tls_window_trays.erase(wit);
-    }
-    if (tray->icon)
-        DestroyIcon(tray->icon);
+    tls_tray_userdata.erase(tray->uid);
+    tls_tray_objects.erase(tray->uid);
+    tls_trays.erase(std::remove(tls_trays.begin(), tls_trays.end(), tray), tls_trays.end());
+
+    release_tray_icon(tray);
+    hv_menu_release(tray->menu);
+
     hv::hv_dealloc(tray);
 }
 

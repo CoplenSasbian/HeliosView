@@ -12,6 +12,7 @@
 
 #include <HeliosView/heliosview.h>
 
+#include <span>
 #include <string>
 #include <vector>
 
@@ -89,15 +90,26 @@ inline bool selectFolder(const char* title, std::string& out_path)
 
 /* ---------- file pickers ---------- */
 
-// Open-file dialog. `filter` uses the "Name1 (*.ext)|*.ext|Name2|..." format
-// (nullptr = all files); `multi` enables multi-selection. Returns the chosen
-// path(s), or an empty vector on cancel / failure. UTF-8 paths.
+// File dialog filter rule (display name and extensions, e.g. {"Images", "png;jpg;jpeg"} or {"All files", "*"})
+struct FileFilter {
+    std::string name;
+    std::string extensions;
+};
+
+// Open-file dialog. `filters` is a span or initializer list of FileFilter rules.
+// `multi` enables multi-selection. Returns the chosen path(s), or an empty vector on cancel / failure.
 inline std::vector<std::string> openFiles(heliosview_window_t* parent, const char* title,
-                                          const char* filter = nullptr, bool multi = false)
+                                          std::span<const FileFilter> filters = {}, bool multi = false)
 {
+    std::vector<heliosview_file_filter_t> c_filters;
+    c_filters.reserve(filters.size());
+    for (const auto& f : filters) {
+        c_filters.push_back({f.name.c_str(), f.extensions.c_str()});
+    }
+
     char** paths = nullptr;
     std::vector<std::string> out;
-    const int n = heliosview_open_files(parent, title, filter, multi ? 1 : 0, &paths);
+    const int n = heliosview_open_files(parent, title, c_filters.data(), c_filters.size(), multi ? 1 : 0, &paths);
     if (n > 0 && paths) {
         out.reserve(static_cast<size_t>(n));
         for (char** p = paths; *p; ++p)
@@ -108,19 +120,26 @@ inline std::vector<std::string> openFiles(heliosview_window_t* parent, const cha
 }
 
 // Convenience: an unparented open-file dialog.
-inline std::vector<std::string> openFiles(const char* title, const char* filter = nullptr,
-                                          bool multi = false)
+inline std::vector<std::string> openFiles(const char* title,
+                                          std::span<const FileFilter> filters = {}, bool multi = false)
 {
-    return openFiles(nullptr, title, filter, multi);
+    return openFiles(nullptr, title, filters, multi);
 }
 
 // Save-file dialog. Returns true when the user chose a path (out_path receives
 // its UTF-8 path), false on cancel / failure.
-inline bool saveFile(heliosview_window_t* parent, const char* title, const char* filter,
+inline bool saveFile(heliosview_window_t* parent, const char* title,
+                     std::span<const FileFilter> filters,
                      const char* default_name, std::string& out_path)
 {
+    std::vector<heliosview_file_filter_t> c_filters;
+    c_filters.reserve(filters.size());
+    for (const auto& f : filters) {
+        c_filters.push_back({f.name.c_str(), f.extensions.c_str()});
+    }
+
     char* path = nullptr;
-    const int rc = heliosview_save_file(parent, title, filter, default_name, &path);
+    const int rc = heliosview_save_file(parent, title, c_filters.data(), c_filters.size(), default_name, &path);
     if (rc <= 0)
         return false;
     out_path = path ? path : "";
@@ -129,10 +148,11 @@ inline bool saveFile(heliosview_window_t* parent, const char* title, const char*
 }
 
 // Convenience: an unparented save-file dialog.
-inline bool saveFile(const char* title, const char* filter, const char* default_name,
+inline bool saveFile(const char* title,
+                     std::span<const FileFilter> filters, const char* default_name,
                      std::string& out_path)
 {
-    return saveFile(nullptr, title, filter, default_name, out_path);
+    return saveFile(nullptr, title, filters, default_name, out_path);
 }
 
 } // namespace helios

@@ -37,7 +37,9 @@ include(cmake/ensure-submodule.cmake)
 #                  Boost.JSON for the WebView bridge auto-binding (WebViewJson.h).
 #                  Do NOT run `git submodule update --init --recursive` on
 #                  HeliosView: it would fetch all ~160 Boost libraries; the
-#                  selective init runs automatically at configure time.
+#                  selective init runs automatically at configure time
+#                  (cmake/ensure-submodule.cmake issues one `git submodule
+#                  update` call with every lib in HELIOSVIEW_BOOST_LIBS).
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
 # zip of headers + the WebView2Loader loader library/dll), so consumers do not
@@ -256,10 +258,16 @@ target_include_directories(HeliosView.Core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-# stdexec + boost + boost_json + openssl propagate via INTERFACE: targets linking
+# stdexec + boost + boost_json propagate via INTERFACE: targets linking
 # HeliosView::Core (e.g. the examples) automatically get their include paths
 # and the C++23 requirement
-target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec boost boost_json openssl)
+target_link_libraries(HeliosView.Core INTERFACE HeliosView stdexec boost boost_json)
+if(WIN32)
+    # OpenSSL is vendored from NuGet above. Another platform provides it itself
+    # (HeliosViewCore/Http.h needs it for https): add find_package(OpenSSL) and
+    # link OpenSSL::SSL/OpenSSL::Crypto here when that backend lands.
+    target_link_libraries(HeliosView.Core INTERFACE openssl)
+endif()
 # exported to consumers: any target linking HeliosView::Core is compiled as C++23
 target_compile_features(HeliosView.Core INTERFACE cxx_std_23)
 

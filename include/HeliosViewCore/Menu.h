@@ -1,45 +1,45 @@
 #pragma once
 
 /**
- * HeliosView.Core -- Menu: a popup / context menu.
+ * HeliosView.Core -- Menu: a display structure for actions.
  *
- * Built on the C layer's per-window routing ids (each registered id is a window
- * subclass carrying the item's userdata, no lookup table): each item is
- * registered on the owner window, so choosing it posts a
- * HELIOSVIEW_EVENT_MENU_SELECT event (menu_item = the item id, userdata = the
- * Menu object). Like Tray, a Menu works without a C++ Window wrapper — only the
- * raw handle is needed.
+ * A menu is a standalone object (like Tray): it is created and filled with no
+ * window at all, and only show() needs an owner. Its entries are actions,
+ * submenus and separators — the menu owns the *layout*, the Action owns the
+ * command (label, state, triggered).
+ *
+ * Actions added with addAction() are shared: the same Action may appear in
+ * several menus and fires one triggered signal. Actions created by addItem() /
+ * addCheckItem() are owned by the menu and behave like the classic per-item API.
+ *
+ * Choosing an item posts a HELIOSVIEW_EVENT_MENU_SELECT event (menu_item = the
+ * action id, userdata = the Action object), routed back to the Action.
  *
  * Usage (from the README):
- *   helios::Menu menu(window.nativeHandle());
+ *   helios::Menu menu;                          // no window needed
  *   helios::Menu::Item* show = menu.addItem("Show / Restore");
  *   helios::Menu::Item* quit = menu.addItem("Quit");
  *   helios::Menu::Item* top = menu.addCheckItem("Toggle Topmost"); // checkable
  *   helios::Menu::Item* disabled = menu.addItem("Unavailable");
  *   disabled->setEnabled(false);               // grayed out, not selectable
  *   menu.addSeparator();
- *   show->setDefault(true);                    // bold default item
+ *   menu.setDefaultAction(*show);              // bold default item (Enter activates)
  *   show->triggered.connect([&] { window.showNormal(); });
  *   quit->triggered.connect([&] { app.quit(); });
- *   top->triggered.connect([&] {
- *       top->setChecked(!top->checked()); // toggle the on-screen checkmark
- *       ...
- *   });
  *   ...
- *   menu.show(window.nativeHandle());   // popup at the current cursor position
+ *   menu.show(window.nativeHandle());   // popup at the cursor; NULL = standalone
  *
- * Items are owned by the menu; the returned Item pointers stay valid until
- * the menu is destroyed. Submenus are owned by their parent. Destroy the
- * menu before its window.
+ * Items are owned by the menu; the returned pointers stay valid until the menu
+ * is destroyed. Submenus are owned by their parent.
  */
 
+#include <HeliosViewCore/Action.h>
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Error.h>
-#include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/Types.h>
 
 #include <cstdint>
-#include <flat_map>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -47,58 +47,34 @@ namespace helios {
 
 class Menu {
 public:
-    // One menu item: triggered fires (UI thread) when the user chooses it.
-    struct Item {
-        Signal<> triggered;
+    // A menu item is an Action (kept as an alias for the classic spelling).
+    using Item = Action;
 
-        // Checkable items (see addCheckItem): read / update the on-screen
-        // checkmark. The underlying Win32 call works for any item, so these
-        // can be used as toggles even without addCheckItem.
-        bool checked() const { return m_menu && m_menu->itemChecked(m_id); }
-        void setChecked(bool on)
-        {
-            if (m_menu)
-                m_menu->setItemChecked(m_id, on);
-        }
-
-        // Enabled state: disabled items are grayed out and cannot be chosen.
-        bool enabled() const { return m_menu && m_menu->itemEnabled(m_id); }
-        void setEnabled(bool on)
-        {
-            if (m_menu)
-                m_menu->setItemEnabled(m_id, on);
-        }
-
-        // Default item: shown bold and activated by Enter / double-click.
-        // A menu has at most one default item (setting another moves it).
-        bool isDefault() const { return m_menu && m_menu->itemDefault(m_id); }
-        void setDefault(bool on)
-        {
-            if (m_menu)
-                m_menu->setItemDefault(m_id, on);
-        }
-
-    private:
-        friend class Menu;
-        Menu* m_menu = nullptr; /* owning menu (for the C-layer checkmark calls) */
-        uint32_t m_id = 0;      /* this item's routing id */
-    };
-
-    // Create an empty popup menu attached to `window`. Not copyable/movable.
-    Menu(heliosview_window_t* window)
-        : m_window(window)
-        , m_menu(heliosview_menu_create(window, this))
+    // Create an empty standalone menu (no window needed — like Tray). The menu
+    // is shown with show(window), where the owner window is optional.
+    // Not copyable/movable.
+    Menu()
+        : m_menu(heliosview_menu_create(this))
     {
-        if (m_menu)
-            m_sink = App::instance()->addSink([this](const Event& ev) { return handleEvent(ev); });
+    }
+
+    /**
+     * @deprecated A menu no longer belongs to a window; the argument is ignored.
+     * Use Menu() and pass the owner to show() instead.
+     */
+    [[deprecated("Menu no longer requires a window; use Menu() and show(window) instead")]]
+    explicit Menu(heliosview_window_t* /*window*/)
+        : Menu()
+    {
     }
 
     ~Menu()
     {
-        if (m_sink != 0)
-            App::instance()->removeSink(m_sink);
         if (m_owned)
-            heliosview_menu_destroy(m_menu);
+            heliosview_menu_destroy(m_menu); /* drops this object's reference; a parent
+                                              * menu, the app bar or a tray may keep it alive */
+        /* m_owned_actions are destroyed here (after the C menu): each releases
+         * its own reference, so the last one frees the action. */
     }
 
     Menu(const Menu&) = delete;
@@ -107,50 +83,70 @@ public:
     // True when the menu was created successfully
     bool valid() const { return m_menu != nullptr; }
 
-    // Add a text item (UTF-8); returns its Item (owned by this menu).
-    // Throws std::runtime_error on failure (e.g. the menu or its owner window
-    // is not valid) with the reason recorded by the C layer.
-    Item* addItem(const char* text)
+    // The underlying C handle (e.g. to attach the menu to a Tray)
+    heliosview_menu_t* handle() const { return m_menu; }
+
+    // Add a text item (UTF-8); returns its Action, owned by this menu.
+    // Throws std::runtime_error on failure with the reason recorded by the C layer.
+    Action* addItem(const char* text)
     {
-        uint32_t id = 0;
-        if (heliosview_menu_add_item(m_menu, text, &id) != 0)
+        auto owned = std::make_unique<Action>(text);
+        if (!owned->valid() || heliosview_menu_add_action(m_menu, owned->handle()) != 0)
             throwLastError("menu addItem");
-        auto& item = m_items[id] = std::make_unique<Item>();
-        item->m_id = id;
-        item->m_menu = this;
-        return item.get();
+        Action* raw = owned.get();
+        m_owned_actions.push_back(std::move(owned));
+        return raw;
     }
 
     // Add a checkable text item (UTF-8): a checkmark shows next to its text
     // while checked (starts checked when `checked`). Update it from the item's
-    // triggered signal, e.g. `item->setChecked(!item->checked())`, to make a
-    // toggle. Returns its Item (owned by this menu).
-    // Throws std::runtime_error on failure (same conditions as addItem).
-    Item* addCheckItem(const char* text, bool checked = false)
+    // triggered signal, e.g. `item->setChecked(!item->checked())`.
+    Action* addCheckItem(const char* text, bool checked = false)
     {
-        uint32_t id = 0;
-        if (heliosview_menu_add_checkable_item(m_menu, text, checked ? 1 : 0, &id) != 0)
-            throwLastError("menu addCheckItem");
-        auto& item = m_items[id] = std::make_unique<Item>();
-        item->m_id = id;
-        item->m_menu = this;
-        return item.get();
+        Action* item = addItem(text);
+        item->setCheckable(true);
+        item->setChecked(checked);
+        return item;
     }
+
+    // Add a standard role item (MenuRole::Quit, ::Copy, ::Cut, ::Minimize, ...):
+    // the library supplies the platform's label and shortcut and performs the
+    // action where the application cannot. `text` overrides the default label.
+    // Returns the action (owned by this menu).
+    Action* addRole(MenuRole role, const char* text = nullptr)
+    {
+        auto owned = std::make_unique<Action>(role, text);
+        if (!owned->valid() || heliosview_menu_add_action(m_menu, owned->handle()) != 0)
+            throwLastError("menu addRole");
+        Action* raw = owned.get();
+        m_owned_actions.push_back(std::move(owned));
+        return raw;
+    }
+
+    // Add an action created by the caller (shared): the same Action may be added
+    // to several menus, fires one triggered signal and has one state. The action
+    // must outlive the menus displaying it (each menu holds a reference).
+    // Throws std::runtime_error on failure.
+    Action* addAction(Action& action)
+    {
+        if (heliosview_menu_add_action(m_menu, action.handle()) != 0)
+            throwLastError("menu addAction");
+        return &action;
+    }
+    Action* addAction(Action* action) { return action ? addAction(*action) : nullptr; }
 
     // Add a visual separator line
     void addSeparator() { heliosview_menu_add_separator(m_menu); }
 
     // Add a submenu under `text`; the submenu is owned by this menu. Returns
     // the submenu (for adding items to it). Throws std::runtime_error on
-    // failure (e.g. the menu or its owner window is not valid) with the reason
-    // recorded by the C layer.
-    // The submenu's C-layer handle is owned by this menu's C layer (destroying
-    // this menu destroys the submenu's handle), so this wrapper marks itself
-    // m_owned = false to avoid a double destroy — but keeps the handle so
-    // addItem()/addSeparator() on the submenu keep working.
+    // failure. The submenu's C-layer handle is owned by this menu's C layer
+    // (destroying this menu destroys the submenu's handle), so this wrapper
+    // marks itself m_owned = false to avoid a double destroy — but keeps the
+    // handle so addItem()/addSeparator() on the submenu keep working.
     Menu* addSubmenu(const char* text)
     {
-        auto submenu = std::make_unique<Menu>(m_window);
+        auto submenu = std::make_unique<Menu>();
         if (!submenu->valid() ||
             heliosview_menu_add_submenu(m_menu, text, submenu->m_menu) != 0)
             throwLastError("menu addSubmenu");
@@ -160,63 +156,72 @@ public:
         return raw;
     }
 
+    // Make `action` the menu's default item (bold; Enter / double-click
+    // activates it; one per menu). The action must already be in this menu.
+    void setDefaultAction(Action& action)
+    {
+        if (heliosview_menu_set_default_action(m_menu, action.handle()) != 0)
+            throwLastError("menu setDefaultAction");
+    }
+
     // Show the popup at the current cursor position, owned by `window`
-    // (its HWND receives the WM_COMMAND that yields the MENU_SELECT event).
+    // (dispatches the MenuSelect event). `window` may be nullptr: the library
+    // then uses a hidden owner window.
     void show(heliosview_window_t* window) { heliosview_menu_show(m_menu, window); }
 
+    // Install this menu as the application menu bar: macOS puts it in the one
+    // global bar (its first submenu becomes the App menu); Windows/Linux show
+    // it as the menu bar of every HeliosView window, including future ones.
+    // The bar keeps a reference to the menu, so destroying the Menu object only
+    // drops the caller's reference — the bar keeps displaying it until
+    // clearAppMenu() / another setAppMenu().
+    void setAppMenu()
+    {
+        if (heliosview_menu_set_app_menu(m_menu) != 0)
+            throwLastError("menu setAppMenu");
+    }
+
+    // Remove the current application menu bar (windows keep their own layout).
+    static void clearAppMenu() { heliosview_menu_set_app_menu(nullptr); }
+
+    // Mark this submenu as a standard menu (MenuKind::App / Services / Window /
+    // Help): macOS wires the corresponding system menu with it; other platforms
+    // treat it as a hint.
+    void setKind(MenuKind kind)
+    {
+        if (heliosview_menu_set_kind(m_menu, static_cast<heliosview_menu_kind_t>(kind)) != 0)
+            throwLastError("menu setKind");
+    }
+    MenuKind kind() const
+    {
+        return static_cast<MenuKind>(heliosview_menu_kind(m_menu));
+    }
+
+    // Populate the menu lazily: the callback runs every time this menu (or this
+    // submenu) is about to open, before item state is refreshed, and may add
+    // actions/submenus (recent files, state-dependent items). Pass nullptr to
+    // clear it.
+    using OpenCallback = std::function<void(Menu&)>;
+    void setOpenCallback(OpenCallback callback)
+    {
+        m_openCallback = std::move(callback);
+        heliosview_menu_set_open_callback(m_menu, m_openCallback ? &Menu::openTrampoline : nullptr,
+                                          m_openCallback ? this : nullptr);
+    }
+
 private:
-    // Route MENU_SELECT events for this menu to the matching item's signal
-    bool handleEvent(const Event& ev)
+    static void openTrampoline(heliosview_menu_t* /*menu*/, void* userdata)
     {
-        if (ev.userdata != this || ev.type != EventType::MenuSelect)
-            return false;
-        if (auto it = m_items.find(ev.menuItem); it != m_items.end())
-            it->second->triggered();
-        return true; // consumed even for unknown ids (they belong to this menu)
+        auto* self = static_cast<Menu*>(userdata);
+        if (self && self->m_openCallback)
+            self->m_openCallback(*self);
     }
 
-    // Checkmark state of the item with the given id (Item::checked / setChecked)
-    bool itemChecked(uint32_t id) const
-    {
-        int on = 0;
-        return m_menu && heliosview_menu_is_item_checked(m_menu, id, &on) == 0 && on != 0;
-    }
-    void setItemChecked(uint32_t id, bool on)
-    {
-        if (m_menu)
-            heliosview_menu_set_item_checked(m_menu, id, on ? 1 : 0);
-    }
-
-    // Enabled state of the item (Item::enabled / setEnabled)
-    bool itemEnabled(uint32_t id) const
-    {
-        int on = 0;
-        return m_menu && heliosview_menu_is_item_enabled(m_menu, id, &on) == 0 && on != 0;
-    }
-    void setItemEnabled(uint32_t id, bool on)
-    {
-        if (m_menu)
-            heliosview_menu_set_item_enabled(m_menu, id, on ? 1 : 0);
-    }
-
-    // Default-item state (Item::isDefault / setDefault)
-    bool itemDefault(uint32_t id) const
-    {
-        int on = 0;
-        return m_menu && heliosview_menu_is_item_default(m_menu, id, &on) == 0 && on != 0;
-    }
-    void setItemDefault(uint32_t id, bool on)
-    {
-        if (m_menu)
-            heliosview_menu_set_item_default(m_menu, id, on ? 1 : 0);
-    }
-
-    heliosview_window_t* m_window = nullptr;
     heliosview_menu_t* m_menu = nullptr;
     bool m_owned = true; /* false = submenu (the parent menu's C layer owns the handle) */
-    App::SinkId m_sink = 0;
-    std::flat_map<uint32_t, std::unique_ptr<Item>> m_items; /* item id -> Item */
-    std::vector<std::unique_ptr<Menu>> m_submenus;          /* owned submenus */
+    OpenCallback m_openCallback;                          /* lazy population */
+    std::vector<std::unique_ptr<Action>> m_owned_actions; /* actions created by addItem */
+    std::vector<std::unique_ptr<Menu>> m_submenus;        /* owned submenus */
 };
 
 } // namespace helios
