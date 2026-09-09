@@ -188,6 +188,19 @@ inline void queue_push(const heliosview_event_t& event)
         g_platform_wake();
 }
 
+/* ---------- Loop timers (min-heap keyed by due time) ----------
+ *
+ * Implemented in the core (src/heliosview.cpp): public heliosview_delay /
+ * heliosview_interval / heliosview_timer_cancel manage a vector sorted by
+ * due_ms. The backend's message loop calls these helpers so it wakes at exactly
+ * the next due time instead of polling: run_due_timers() fires every timer whose
+ * due time has passed (returning true if any ran); next_timer_wait_ms() reports
+ * how long to wait (in ms) until the next due timer — -1 when none is pending,
+ * 0 when one is already due. */
+
+bool run_due_timers();
+int64_t next_timer_wait_ms();
+
 } // namespace hv
 
 /* ================= Last-error (platform-independent) =================

@@ -14,6 +14,7 @@
  *   - Window.h        top-level window + signals + taskbar/backdrop APIs
  *   - Dialogs.h       native dialogs (folder/file pickers, message box)
  *   - System.h        system helpers (open URL, show in folder, clipboard)
+ *   - Timer.h         message-loop timers (delay/interval on the UI thread)
  *   - Notification.h  OS toast notifications (thread-safe)
  *   - Tray.h          system notification-area (tray) icon + signals + balloon
  *   - Menu.h          popup / context menu + signals
@@ -50,6 +51,7 @@
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/String.h>
 #include <HeliosViewCore/System.h>
+#include <HeliosViewCore/Timer.h>
 #include <HeliosViewCore/Tray.h>
 #include <HeliosViewCore/Types.h>
 #include <HeliosViewCore/WebViewJson.h>

@@ -74,6 +74,32 @@ inline std::string hv_format_message(DWORD code)
     return wide_to_utf8(w);
 }
 
+/* ShellExecuteW/ShellExecuteExW signal failure with small positive SE_ERR_*
+ * values rather than system error codes (2/3/5/8/26–32 in shellapi.h; a NULL
+ * hwnd form also returns them directly). FormatMessageW would render those as
+ * unrelated messages (e.g. SE_ERR_NOASSOC (31) comes out as ERROR_GEN_FAILURE
+ * "A device attached to the system is not functioning"), so map the common ones
+ * to their own text here. Returns nullptr when `code` is not a known SE_ERR
+ * value — callers then format it as a normal system code. */
+inline const char* hv_se_err_text(DWORD code)
+{
+    switch (code) {
+    case 0:  return "out of memory";
+    case 2:  return "file not found";
+    case 3:  return "path not found";
+    case 5:  return "access denied";
+    case 8:  return "out of memory";
+    case 26: return "the file cannot be opened for sharing";
+    case 27: return "the file association is incomplete";
+    case 28: return "DDE timed out";
+    case 29: return "the DDE transaction failed";
+    case 30: return "DDE is busy";
+    case 31: return "no application is associated with this file type";
+    case 32: return "a required DLL was not found";
+    default: return nullptr;
+    }
+}
+
 /* Record a Win32 GetLastError-style failure: error code = -win32_code (or -1
  * when 0, i.e. the call did not set a usable error), message =
  * "<context>: <system message>" (with a numeric fallback when the system does
@@ -83,7 +109,8 @@ inline int hv_fail_win32(DWORD win32_code, const char* context)
     g_hv_last_error_code = win32_code ? -static_cast<int>(win32_code) : -1;
     std::string msg = context ? context : "";
     if (win32_code) {
-        const std::string fmt = hv_format_message(win32_code);
+        const char* se = hv_se_err_text(win32_code);
+        const std::string fmt = se ? std::string(se) : hv_format_message(win32_code);
         if (!fmt.empty())
             msg += ": " + fmt;
         else {

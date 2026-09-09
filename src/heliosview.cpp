@@ -12,6 +12,10 @@
 #include <cwchar>
 #include <thread>
 
+#include <algorithm>
+#include <mutex>
+#include <vector>
+
 /* ================= Version ================= */
 
 const char* heliosview_version(void)
@@ -124,6 +128,121 @@ void heliosview_wake_loop(void)
 {
     if (hv::g_platform_wake)
         hv::g_platform_wake();
+}
+
+/* ================= Loop timers =================
+ *
+ * A min-heap — a vector kept sorted by due_ms — of one-shot (delay) and
+ * repeating (interval) callbacks that fire on the message-loop thread. The
+ * backend's loop calls hv::run_due_timers() each iteration and sizes its wait
+ * with hv::next_timer_wait_ms(), so an idle process sleeps until its next due
+ * timer instead of polling. Mutex-guarded so scheduling and cancelling are safe
+ * from any thread; the callbacks themselves run on the loop thread, outside the
+ * lock, so a callback may freely schedule or cancel timers. */
+
+namespace {
+
+struct hv_timer {
+    uint32_t id;
+    int64_t due_ms;
+    uint32_t interval_ms; /* 0 = one-shot (delay) */
+    heliosview_timer_cb cb;
+    void* userdata;
+};
+
+std::mutex g_timer_mutex;
+std::vector<hv_timer> g_timers; /* ascending by due_ms */
+std::atomic<uint32_t> g_next_timer_id{1};
+
+void timer_insert(hv_timer t)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_timer_mutex);
+        const auto it = std::lower_bound(g_timers.begin(), g_timers.end(), t.due_ms,
+                                         [](const hv_timer& a, int64_t due) { return a.due_ms < due; });
+        g_timers.insert(it, std::move(t));
+    }
+    if (hv::g_platform_wake)
+        hv::g_platform_wake(); /* wake the loop so it recomputes its wait time */
+}
+
+} // namespace
+
+uint32_t heliosview_delay(uint32_t delay_ms, heliosview_timer_cb cb, void* userdata)
+{
+    if (!cb) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "cb is NULL");
+        return 0;
+    }
+    const uint32_t id = g_next_timer_id.fetch_add(1);
+    if (id == 0) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "loop-timer id space exhausted");
+        return 0;
+    }
+    hv_timer t{id, hv::now_ms() + delay_ms, 0, cb, userdata};
+    timer_insert(std::move(t));
+    return id;
+}
+
+uint32_t heliosview_interval(uint32_t interval_ms, heliosview_timer_cb cb, void* userdata)
+{
+    if (interval_ms == 0) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "interval_ms must be > 0");
+        return 0;
+    }
+    if (!cb) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "cb is NULL");
+        return 0;
+    }
+    const uint32_t id = g_next_timer_id.fetch_add(1);
+    if (id == 0) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "loop-timer id space exhausted");
+        return 0;
+    }
+    hv_timer t{id, hv::now_ms() + interval_ms, interval_ms, cb, userdata};
+    timer_insert(std::move(t));
+    return id;
+}
+
+void heliosview_timer_cancel(uint32_t timer_id)
+{
+    if (timer_id == 0)
+        return;
+    std::lock_guard<std::mutex> lock(g_timer_mutex);
+    g_timers.erase(std::remove_if(g_timers.begin(), g_timers.end(),
+                                  [timer_id](const hv_timer& t) { return t.id == timer_id; }),
+                   g_timers.end());
+}
+
+bool hv::run_due_timers()
+{
+    bool any = false;
+    for (;;) {
+        hv_timer t;
+        {
+            std::lock_guard<std::mutex> lock(g_timer_mutex);
+            if (g_timers.empty() || g_timers.front().due_ms > hv::now_ms())
+                break;
+            t = g_timers.front();
+            g_timers.erase(g_timers.begin());
+        }
+        any = true;
+        if (t.interval_ms != 0) {
+            t.due_ms = hv::now_ms() + t.interval_ms; /* re-arm past the missed ticks */
+            timer_insert(std::move(t));
+        }
+        t.cb(t.id, t.userdata); /* outside the lock so the callback may schedule/cancel */
+    }
+    return any;
+}
+
+int64_t hv::next_timer_wait_ms()
+{
+    std::lock_guard<std::mutex> lock(g_timer_mutex);
+    if (g_timers.empty())
+        return -1;
+    const int64_t wait = g_timers.front().due_ms - hv::now_ms();
+    return wait > 0 ? wait : 0;
 }
 
 /* ================= Window registry & backend identity (core-owned) =================

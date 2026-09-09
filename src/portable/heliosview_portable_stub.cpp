@@ -1,4 +1,4 @@
-// HeliosView - portable stub backend.
+﻿// HeliosView - portable stub backend.
 //
 // Built on platforms that have no real backend yet (see the else() branch in
 // src/CMakeLists.txt). Every feature reports HELIOSVIEW_ERROR_UNSUPPORTED (-4)
@@ -643,7 +643,25 @@ int heliosview_open_url(const char*)
 {
     return HV_STUB_UNSUPPORTED;
 }
+int heliosview_open_path(const char*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
 int heliosview_show_in_folder(const char*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_run_program(const char*, const char*, heliosview_program_show_t)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_run_program_wait(const char*, const char*, heliosview_program_show_t, int* out_exit_code)
+{
+    if (out_exit_code)
+        *out_exit_code = 0;
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_run_program_elevated(const char*, const char*)
 {
     return HV_STUB_UNSUPPORTED;
 }
@@ -656,6 +674,31 @@ int heliosview_clipboard_get_text(char** out)
     if (out)
         *out = nullptr;
     return HV_STUB_UNSUPPORTED;
+}
+int heliosview_system_path(heliosview_system_path_kind_t, char** out)
+{
+    if (out)
+        *out = nullptr;
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_os_version(char* buf, size_t size)
+{
+    if (!buf || size == 0)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "buf is NULL or size is 0");
+    buf[0] = '\0';
+    return 0;
+}
+int heliosview_system_power(heliosview_power_action_t)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+uint32_t heliosview_hotkey_register(const char*, heliosview_hotkey_cb, void*)
+{
+    return 0;
+}
+void heliosview_hotkey_unregister(uint32_t)
+{
+    /* no state to release */
 }
 int heliosview_notification_request_permission(heliosview_notification_permission_cb, void*)
 {

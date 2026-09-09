@@ -29,7 +29,8 @@ $coreSymbols = @(
     'heliosview_remove_native_handler', 'heliosview_window_from_id',
     'heliosview_window_count', 'heliosview_action_from_id',
     'heliosview_app_init', 'heliosview_app_id', 'heliosview_set_activation_policy',
-    'heliosview_activation_policy'
+    'heliosview_activation_policy', 'heliosview_delay', 'heliosview_interval',
+    'heliosview_timer_cancel'
 )
 
 # Functions whose stub body is not just "unsupported": the out-parameters must be
@@ -79,6 +80,31 @@ int heliosview_clipboard_get_text(char** out)
     if (out)
         *out = nullptr;
     return HV_STUB_UNSUPPORTED;
+}
+'@
+    'heliosview_run_program_wait' = @'
+int heliosview_run_program_wait(const char*, const char*, heliosview_program_show_t, int* out_exit_code)
+{
+    if (out_exit_code)
+        *out_exit_code = 0;
+    return HV_STUB_UNSUPPORTED;
+}
+'@
+    'heliosview_system_path' = @'
+int heliosview_system_path(heliosview_system_path_kind_t, char** out)
+{
+    if (out)
+        *out = nullptr;
+    return HV_STUB_UNSUPPORTED;
+}
+'@
+    'heliosview_os_version' = @'
+int heliosview_os_version(char* buf, size_t size)
+{
+    if (!buf || size == 0)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "buf is NULL or size is 0");
+    buf[0] = '\0';
+    return 0;
 }
 '@
     'heliosview_window_scale_factor' = @'

@@ -18,7 +18,11 @@
 
 #include "heliosview_win32_internal.h" /* shared codecs + helpers; defines WIN32_LEAN_AND_MEAN/_WIN32_WINNT and includes windows.h/commctrl.h */
 #include <wrl/client.h> /* ComPtr (taskbar / file dialogs) */
-#include <shellapi.h> /* ShellExecuteW (open URL / Explorer) */
+#include <shellapi.h> /* ShellExecuteW (open URL / Explorer / runas) */
+#include <shlobj.h>   /* SHGetKnownFolderPath (system_path) */
+#include <knownfolders.h> /* FOLDERID_* (system_path) */
+#include <winreg.h>   /* RegOpenKeyExW/RegQueryValueExW (os_version) */
+#include <reason.h>   /* SHTDN_REASON_* (system_power) */
 #include <objbase.h>  /* CoCreateInstance */
 #include <shobjidl.h> /* IFileOpenDialog / IShellItem (file pickers) / ITaskbarList3 */
 #include <dwmapi.h>   /* DwmSetWindowAttribute (backdrop / dark mode) */
@@ -849,17 +853,25 @@ int heliosview_run(heliosview_loop_callback frame_callback, void* userdata)
     hv::g_quit = false;
     while (!hv::g_quit.load()) {
         heliosview_pump_events();
+        /* Fire any loop timers (delay/interval) that have come due. */
+        hv::run_due_timers();
         if (hv::g_quit.load())
             break;
         if (frame_callback && frame_callback(userdata) != 0) {
             hv::g_quit = true;
             break;
         }
-        /* Wait for a new native message or a wake-up from post_event/postTask/quit.
-         * 10ms polling timeout: does not depend on the wake event / ResetEvent timing;
-         * cross-thread tasks and events are delayed at most 10ms. */
+        /* Wait for a new native message, a wake-up from post_event/postTask/quit,
+         * or the next due loop timer — sleeping exactly until the next task
+         * instead of polling. When no timer is scheduled, fall back to a 10ms
+         * poll so the loop does not depend on wake-event / ResetEvent timing
+         * (cross-thread tasks and events are then delayed at most 10ms). */
         ResetEvent(g_wakeup_event);
-        const DWORD result = MsgWaitForMultipleObjectsEx(1, &g_wakeup_event, 10,
+        const int64_t timer_wait = hv::next_timer_wait_ms();
+        const DWORD timeout = (timer_wait < 0)
+                                  ? 10
+                                  : static_cast<DWORD>(std::min<int64_t>(timer_wait, 0x7FFFFFFF));
+        const DWORD result = MsgWaitForMultipleObjectsEx(1, &g_wakeup_event, timeout,
                                                          QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (result == WAIT_FAILED)
             break;
@@ -2035,6 +2047,18 @@ int heliosview_open_url(const char* url)
     return hv_fail_win32(static_cast<DWORD>(r), "ShellExecuteW failed to open the URL");
 }
 
+int heliosview_open_path(const char* path)
+{
+    if (!path || !*path)
+        return -1;
+    const std::wstring wpath = utf8_to_wide(path);
+    const INT_PTR r = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", wpath.c_str(),
+                                                             nullptr, nullptr, SW_SHOWNORMAL));
+    if (r > 32)
+        return 0;
+    return hv_fail_win32(static_cast<DWORD>(r), "ShellExecuteW failed to open the path");
+}
+
 int heliosview_show_in_folder(const char* path)
 {
     if (!path || !*path)
@@ -2049,6 +2073,101 @@ int heliosview_show_in_folder(const char* path)
     /* ShellExecuteW failures are small positive SE_ERR_* values; format whatever
      * the system knows about them. */
     return hv_fail_win32(static_cast<DWORD>(r), "ShellExecuteW failed to open Explorer");
+}
+
+int heliosview_run_program(const char* exe, const char* args, heliosview_program_show_t show)
+{
+    if (!exe || !*exe)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "exe is NULL or empty");
+    /* CreateProcessW (the process launcher; ShellExecuteW stays for association
+     * opening) may scribble on the command-line buffer, so keep a mutable wide
+     * copy. A bare name (no path separator) is resolved via the PATH search —
+     * matching posix_spawnp on POSIX — by leaving lpApplicationName NULL so the
+     * first command-line token becomes the executable; a path with a separator
+     * is pinned exactly through lpApplicationName. */
+    const std::wstring wexe = utf8_to_wide(exe);
+    const bool has_sep = wexe.find(L'\\') != std::wstring::npos ||
+                         wexe.find(L'/') != std::wstring::npos;
+    const wchar_t* app = has_sep ? wexe.c_str() : nullptr;
+    std::wstring cmdline = wexe;
+    if (args && *args) {
+        cmdline += L' ';
+        cmdline += utf8_to_wide(args);
+    }
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = (show == HELIOSVIEW_PROGRAM_SHOW_HIDDEN) ? SW_HIDE : SW_SHOWNORMAL;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(app, cmdline.data(), nullptr, nullptr, FALSE,
+                        CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
+        return hv_fail_win32(GetLastError(), "CreateProcessW failed to run the program");
+    /* Fire-and-forget: the handles only matter for waiting on the process. */
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 0;
+}
+
+int heliosview_run_program_wait(const char* exe, const char* args,
+                                heliosview_program_show_t show, int* out_exit_code)
+{
+    if (out_exit_code)
+        *out_exit_code = -1; /* exit code 0 is valid; never report it on failure */
+    if (!exe || !*exe)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "exe is NULL or empty");
+    const std::wstring wexe = utf8_to_wide(exe);
+    const bool has_sep = wexe.find(L'\\') != std::wstring::npos ||
+                         wexe.find(L'/') != std::wstring::npos;
+    const wchar_t* app = has_sep ? wexe.c_str() : nullptr;
+    std::wstring cmdline = wexe;
+    if (args && *args) {
+        cmdline += L' ';
+        cmdline += utf8_to_wide(args);
+    }
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = (show == HELIOSVIEW_PROGRAM_SHOW_HIDDEN) ? SW_HIDE : SW_SHOWNORMAL;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(app, cmdline.data(), nullptr, nullptr, FALSE,
+                        CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
+        return hv_fail_win32(GetLastError(), "CreateProcessW failed to run the program");
+    CloseHandle(pi.hThread);
+    /* Block until the child exits — call from a worker thread, not the loop. */
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    if (out_exit_code)
+        *out_exit_code = static_cast<int>(code);
+    return 0;
+}
+
+int heliosview_run_program_elevated(const char* exe, const char* args)
+{
+    if (!exe || !*exe)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "exe is NULL or empty");
+    const std::wstring wexe = utf8_to_wide(exe);
+    const std::wstring wargs = args ? utf8_to_wide(args) : std::wstring();
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS; /* useful if a wait variant is added */
+    sei.lpVerb = L"runas";               /* UAC elevation prompt */
+    sei.lpFile = wexe.c_str();
+    sei.lpParameters = wargs.empty() ? nullptr : wargs.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei)) {
+        /* On failure GetLastError carries a small SE_ERR_* value (e.g.
+         * SE_ERR_ACCESSDENIED when the UAC prompt is cancelled), which
+         * hv_fail_win32 formats from its SE_ERR table. */
+        return hv_fail_win32(GetLastError(), "ShellExecuteExW failed to run elevated");
+    }
+    if (sei.hProcess)
+        CloseHandle(sei.hProcess);
+    return 0;
 }
 
 int heliosview_clipboard_set_text(const char* text)
@@ -2108,4 +2227,197 @@ int heliosview_clipboard_get_text(char** out)
     }
     CloseClipboard();
     return result;
+}
+
+int heliosview_system_path(heliosview_system_path_kind_t kind, char** out)
+{
+    if (!out)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "out is NULL");
+    *out = nullptr;
+
+    if (kind == HELIOSVIEW_SYSTEM_PATH_TEMP) {
+        wchar_t buf[MAX_PATH];
+        const DWORD n = GetTempPathW(MAX_PATH, buf);
+        if (n == 0)
+            return hv_fail_win32(GetLastError(), "GetTempPathW failed");
+        if (n >= MAX_PATH)
+            return hv_fail(HELIOSVIEW_ERROR_GENERIC, "system temp path is too long");
+        *out = hv_strdup_utf8(buf);
+        return *out ? 1 : hv_fail(HELIOSVIEW_ERROR_GENERIC, "allocation failed");
+    }
+
+    const KNOWNFOLDERID* fid = nullptr;
+    switch (kind) {
+    case HELIOSVIEW_SYSTEM_PATH_HOME:       fid = &FOLDERID_Profile; break;
+    case HELIOSVIEW_SYSTEM_PATH_DOCUMENTS:  fid = &FOLDERID_Documents; break;
+    case HELIOSVIEW_SYSTEM_PATH_DOWNLOADS:  fid = &FOLDERID_Downloads; break;
+    case HELIOSVIEW_SYSTEM_PATH_DESKTOP:    fid = &FOLDERID_Desktop; break;
+    case HELIOSVIEW_SYSTEM_PATH_APPDATA:    fid = &FOLDERID_RoamingAppData; break;
+    case HELIOSVIEW_SYSTEM_PATH_LOCAL_DATA: fid = &FOLDERID_LocalAppData; break;
+    case HELIOSVIEW_SYSTEM_PATH_CACHE:      fid = &FOLDERID_LocalAppData; break;
+    case HELIOSVIEW_SYSTEM_PATH_TEMP:       /* handled above */ break;
+    default:
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "unknown system path kind");
+    }
+    /* FOLDERID can be unset for the current user in rare configurations; treat
+     * E_FAIL as "no such folder" (0) rather than an error. */
+    PWSTR raw = nullptr;
+    const HRESULT hr = SHGetKnownFolderPath(*fid, KF_FLAG_DEFAULT, nullptr, &raw);
+    if (FAILED(hr)) {
+        if (hr == E_FAIL)
+            return 0;
+        return hv_fail_hresult(hr, "SHGetKnownFolderPath failed");
+    }
+    const std::wstring w(raw);
+    CoTaskMemFree(raw);
+    *out = hv_strdup_utf8(w);
+    return *out ? 1 : hv_fail(HELIOSVIEW_ERROR_GENERIC, "allocation failed");
+}
+
+int heliosview_os_version(char* buf, size_t size)
+{
+    if (!buf || size == 0)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "buf is NULL or size is 0");
+    buf[0] = '\0';
+
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                      0, KEY_READ, &key) != ERROR_SUCCESS)
+        return 0; /* cannot determine: report "" */
+    const auto read = [key](const wchar_t* name, std::wstring& val) {
+        wchar_t raw[128];
+        DWORD len = sizeof(raw);
+        if (RegQueryValueExW(key, name, nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(raw), &len) == ERROR_SUCCESS &&
+            len >= sizeof(wchar_t))
+            val.assign(raw, len / sizeof(wchar_t) - 1); /* len includes the NUL */
+    };
+    std::wstring product, display, build;
+    read(L"ProductName", product);
+    read(L"DisplayVersion", display);
+    read(L"CurrentBuildNumber", build);
+    RegCloseKey(key);
+
+    /* e.g. "Windows 11 Pro 24H2 (build 26100)" */
+    std::wstring v;
+    if (!product.empty()) v = product;
+    if (!display.empty()) { if (!v.empty()) v += L' '; v += display; }
+    if (!build.empty())  { if (!v.empty()) v += L' '; v += L"(build " + build + L")"; }
+    if (!v.empty()) {
+        const std::string utf8 = wide_to_utf8(v);
+        std::snprintf(buf, size, "%s", utf8.c_str());
+    }
+    return 0;
+}
+
+int heliosview_system_power(heliosview_power_action_t action)
+{
+    UINT flags = 0;
+    switch (action) {
+    case HELIOSVIEW_POWER_SHUTDOWN: flags = EWX_SHUTDOWN | EWX_POWEROFF; break;
+    case HELIOSVIEW_POWER_REBOOT:   flags = EWX_REBOOT; break;
+    case HELIOSVIEW_POWER_LOGOFF:   flags = EWX_LOGOFF; break;
+    default:
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "unknown power action");
+    }
+    if (!ExitWindowsEx(flags, SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_FLAG_PLANNED))
+        return hv_fail_win32(GetLastError(), "ExitWindowsEx failed");
+    return 0;
+}
+
+/* ================= Global hotkeys =================
+ *
+ * Reuses the library's hidden per-thread host window (hv_host_window) instead of
+ * creating another one: each hotkey is registered against that HWND, and its
+ * window procedure already walks the registered message handlers, so WM_HOTKEY
+ * reaches us through hv_hotkey_handle_host_message. Everything runs on the
+ * message-loop thread (the host window's thread) so WM_HOTKEY is pumped and
+ * dispatched where the loop lives.
+ * macOS: RegisterEventHotKey; Linux: no universal API — the stub reports
+ * HELIOSVIEW_ERROR_UNSUPPORTED. */
+
+namespace {
+
+struct HotkeyEntry {
+    heliosview_hotkey_cb cb = nullptr;
+    void* userdata = nullptr;
+};
+
+std::mutex g_hotkey_mutex;
+std::map<uint32_t, HotkeyEntry> g_hotkey_table;
+std::atomic<uint32_t> g_hotkey_next_id{1};
+
+/* Host-window message handler: WM_HOTKEY arrives here against the host window we
+ * registered the hotkeys on. Runs on the message-loop thread. */
+bool hv_hotkey_handle_host_message(HWND, UINT message, WPARAM wparam, LPARAM)
+{
+    if (message != WM_HOTKEY)
+        return false;
+    const uint32_t id = static_cast<uint32_t>(wparam); /* = the RegisterHotKey id */
+    HotkeyEntry e;
+    {
+        std::lock_guard<std::mutex> lock(g_hotkey_mutex);
+        const auto it = g_hotkey_table.find(id);
+        if (it == g_hotkey_table.end())
+            return false;
+        e = it->second; /* copy so the callback may register/unregister freely */
+    }
+    e.cb(id, e.userdata);
+    return true;
+}
+
+} // namespace
+
+uint32_t heliosview_hotkey_register(const char* shortcut, heliosview_hotkey_cb cb, void* userdata)
+{
+    if (!shortcut || !*shortcut) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "shortcut is NULL or empty");
+        return 0;
+    }
+    if (!cb) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "cb is NULL");
+        return 0;
+    }
+    const hv_shortcut sc = hv_parse_shortcut(shortcut);
+    if (sc.vk == 0) {
+        hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "unrecognized shortcut key");
+        return 0;
+    }
+
+    const HWND host = hv_host_window(&hv_hotkey_handle_host_message);
+    if (!host) {
+        hv_fail_win32(GetLastError(), "failed to create the hotkey host window");
+        return 0;
+    }
+
+    const uint32_t id = g_hotkey_next_id.fetch_add(1);
+    if (id == 0 || id >= 0xBFFF) { /* RegisterHotKey ids must stay in 0x0000..0xBFFF */
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "hotkey id space exhausted");
+        return 0;
+    }
+    /* MOD_NOREPEAT: fire once per physical press rather than on key auto-repeat. */
+    const DWORD mods = static_cast<DWORD>(sc.mods) | MOD_NOREPEAT;
+    if (!RegisterHotKey(host, static_cast<int>(id), mods, sc.vk)) {
+        hv_fail_win32(GetLastError(), "RegisterHotKey failed (combination already in use?)");
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_hotkey_mutex);
+        g_hotkey_table.emplace(id, HotkeyEntry{cb, userdata});
+    }
+    return id;
+}
+
+void heliosview_hotkey_unregister(uint32_t hotkey_id)
+{
+    if (hotkey_id == 0)
+        return;
+    const HWND host = hv_host_window(); /* the host already exists; no handler to add */
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(g_hotkey_mutex);
+        found = g_hotkey_table.erase(hotkey_id) != 0;
+    }
+    if (found && host)
+        UnregisterHotKey(host, static_cast<int>(hotkey_id));
 }
