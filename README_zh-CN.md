@@ -60,6 +60,7 @@ std::thread worker([app] {
 | 系统辅助 | 剪贴板、打开 URL、资源管理器定位（`System.h`） |
 | 通知（toast） | `heliosview_notification_*` / `Notification.h`（任意线程） |
 | 消息循环、`std::execution` scheduler | `heliosview_run` / `App` |
+| 异步 + HTTP 客户端 | `Async`（asio 线程池：定时器、socket）/ `http::Client`（keep-alive 连接池、TLS） |
 
 ---
 
@@ -323,7 +324,39 @@ int main()
 
 > **生命周期：** 只在没有 `bindJson` task 或 `evalAsync` 调用仍在执行时销毁 `WebViewWindow`。WebView 必须在它的父窗口之前销毁。
 
-### 5. 线程契约实战
+### 5. Async + HTTP 客户端（连接池）
+
+`helios::Async` 是一个接入 `std::execution` 的 asio 线程池：定时器、socket 和 HTTP 客户端都跑在同一批工作线程上。`helios::http::Client` 是轻量句柄（可拷贝、可作临时对象），按 origin 维护 **keep-alive 连接**并复用：
+
+```cpp
+helios::Async async;                       // app 级成员
+helios::http::Client client{async};        // 一个句柄，共享同一个连接池
+
+window->bindJson<Req>("api", [&client](Req r) -> std::execution::task<boost::json::value> {
+    auto resp = co_await client.get(r.url);          // 能复用就走池里的连接
+    co_return boost::json::value{{"status", resp.status}, {"body", resp.body}};
+});
+```
+
+连接池参数（都可选；默认空闲 60 秒、每个 origin 最多留 4 条、总共 16 条）：
+
+```cpp
+helios::http::PoolOptions opt;
+opt.idle_timeout = 30s;        // 空闲超过这个时间就丢弃
+opt.max_idle_per_origin = 2;
+opt.max_idle_total = 8;
+opt.dns_cache_ttl = 60s;       // 解析结果按 origin 缓存
+opt.keep_alive = false;        // 关闭池化：发 "Connection: close"，不缓存连接
+helios::http::Client client{async, 10s, "cacert.pem", opt};
+
+client.idle_connections();     // 诊断用
+client.close_idle();           // 立刻丢弃空闲连接
+client.clear_dns_cache();
+```
+
+空闲连接可能被服务端单方面关闭：此时**幂等**请求（GET/HEAD/OPTIONS/PUT/DELETE/TRACE）会在新连接上重试一次，而 POST/PATCH 直接报错，避免重复副作用。每一步（解析、连接、TLS 握手、收发）都受客户端超时约束。`https://` 会用 `cacert.pem`（或 OpenSSL 默认路径）校验证书，并且每个 client 只建一次 SSL context。
+
+### 6. 线程契约实战
 
 所有 UI API 运行在 `App::exec` 线程。后台工作在你自己管理的线程 / 线程池 / 任意异步库里进行 —— 通过 `App::postTask` 回到 UI 线程：
 
@@ -344,7 +377,7 @@ worker.detach();
 return app.exec();
 ```
 
-### 6. 对话框与系统辅助
+### 7. 对话框与系统辅助
 
 所有原生对话框都是模态的，必须在消息循环线程调用。选中的路径以 UTF-8 `std::string` 返回：
 
@@ -383,7 +416,7 @@ helios::openUrl("https://example.com");
 helios::showInFolder("C:\\path\\to\\file.txt");
 ```
 
-### 7. 通知（toast）
+### 8. 通知（toast）
 
 现代 OS toast。**与线程无关**：可从任意线程调用（回调运行在未指定的线程上，碰 UI 前先切回循环线程）。启动时初始化一次（注册应用标识：Windows 是 AppUserModelID + 开始菜单快捷方式，macOS 是 bundle id，Linux 是 desktop id）：
 
@@ -402,7 +435,7 @@ helios::notificationShow("Download", "Finished");     // 任意线程
 
 macOS 在用户授权前会静默丢弃通知，所以启动时就申请权限。Windows 上全新应用标识的**首次运行**会返回 `NotificationPermission::Unknown`（系统异步注册），这不代表被拒绝。
 
-### 8. 托盘图标 + 弹出 / 右键菜单
+### 9. 托盘图标 + 弹出 / 右键菜单
 
 `helios::Tray` 在系统通知区显示一个图标；`helios::Menu` 是弹出 / 右键菜单。菜单是**独立对象**（构建时不需要窗口，`show(window)` 的 owner 可空），它显示的是 **action**：action 拥有命令本身（文本、启用/勾选状态、`triggered`），菜单只拥有布局。同一个 action 可以出现在多个菜单里：
 
@@ -466,7 +499,7 @@ w.scaleFactor();      // 1.0 / 2.0 —— 逻辑单位换算到物理像素
 w.flags();            // 创建时传入的 flags
 ```
 
-### 9. C API
+### 10. C API
 
 每个 C++ 特性都是对 `include/HeliosView/heliosview.h` 的薄封装 —— 纯 C 头（`extern "C"`、POD 类型、ABI 上不跨 C++ 对象或异常）。它足够完整，可以**完全不写 C++** 就构建应用（见 C99 示例 `HeliosViewCDemo`）。所有字符串都是 UTF-8。
 

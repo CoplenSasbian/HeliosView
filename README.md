@@ -75,6 +75,7 @@ std::thread worker([app] {
 | system helpers | clipboard, open-URL, show-in-folder (`System.h`) |
 | notifications (toasts) | `heliosview_notification_*` / `Notification.h` (any thread) |
 | message loop, `std::execution` scheduler | `heliosview_run` / `App` |
+| async + HTTP client | `Async` (asio thread pool: timers, sockets) / `http::Client` (keep-alive connection pool, TLS) |
 
 ---
 
@@ -467,7 +468,48 @@ are thread-safe.
 > `evalAsync` call is still in flight. The WebView must be destroyed before its
 > parent window.
 
-### 5. Threading contract in practice
+### 5. Async + HTTP client (connection pooling)
+
+`helios::Async` is one asio thread pool plugged into `std::execution`: timers,
+sockets and the HTTP client all run on the same workers. `helios::http::Client`
+is a lightweight handle (copyable, may be a temporary) that keeps **keep-alive
+connections per origin** and reuses them:
+
+```cpp
+helios::Async async;                       // app-scoped member
+helios::http::Client client{async};        // one handle, shared pool
+
+window->bindJson<Req>("api", [&client](Req r) -> std::execution::task<boost::json::value> {
+    auto resp = co_await client.get(r.url);          // pooled connection when possible
+    co_return boost::json::value{{"status", resp.status}, {"body", resp.body}};
+});
+```
+
+Pool tuning (all optional; defaults reuse connections for 60 s and keep up to 4
+idle per origin, 16 overall):
+
+```cpp
+helios::http::PoolOptions opt;
+opt.idle_timeout = 30s;        // drop idle connections older than this
+opt.max_idle_per_origin = 2;
+opt.max_idle_total = 8;
+opt.dns_cache_ttl = 60s;       // resolved endpoints are cached per origin
+opt.keep_alive = false;        // opt out: "Connection: close", nothing pooled
+helios::http::Client client{async, 10s, "cacert.pem", opt};
+
+client.idle_connections();     // diagnostics
+client.close_idle();           // drop idle connections now
+client.clear_dns_cache();
+```
+
+A pooled connection can be closed by the server while idle; an idempotent
+request (GET/HEAD/OPTIONS/PUT/DELETE/TRACE) is then retried once on a fresh
+connection, while POST/PATCH reports the error instead of risking a duplicate
+side effect. Every step (resolve, connect, TLS handshake, exchange) is bounded
+by the client timeout. `https://` verifies certificates against `cacert.pem`
+(or the OpenSSL default paths) and reuses one SSL context per client.
+
+### 6. Threading contract in practice
 
 All UI APIs run on the `App::exec` thread. Background work lives in your own
 threads / a thread pool / any async library — and returns to the UI thread
@@ -490,7 +532,7 @@ worker.detach();
 return app.exec();
 ```
 
-### 6. Dialogs & system helpers
+### 7. Dialogs & system helpers
 
 All native dialogs are modal and must be called on the message-loop thread.
 Picked paths are returned as UTF-8 `std::string`:
@@ -530,7 +572,7 @@ helios::openUrl("https://example.com");
 helios::showInFolder("C:\\path\\to\\file.txt");
 ```
 
-### 7. Notifications (toasts)
+### 8. Notifications (toasts)
 
 Modern OS toasts. **Thread-agnostic**: call from any thread (the callbacks run on
 an unspecified thread — marshal back to the loop thread before touching UI).
@@ -555,7 +597,7 @@ startup. On Windows the first run of a brand-new app id reports
 `NotificationPermission::Unknown` (the OS registers it asynchronously); that is
 not a denial.
 
-### 8. Tray icon + popup / context menu
+### 9. Tray icon + popup / context menu
 
 `helios::Tray` shows an icon in the notification area; `helios::Menu` is a
 popup / context menu. A menu is **standalone** (no window needed to build it;
@@ -633,7 +675,7 @@ w.scaleFactor();      // 1.0 / 2.0 — logical units -> device pixels
 w.flags();            // the flags it was created with
 ```
 
-### 9. The C API
+### 10. The C API
 
 Every C++ feature is a thin wrapper over `include/HeliosView/heliosview.h` — a
 pure C header (`extern "C"`, POD types, no C++ objects or exceptions across the
