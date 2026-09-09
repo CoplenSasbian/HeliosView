@@ -1,4 +1,4 @@
-﻿// HeliosView - portable stub backend.
+// HeliosView - portable stub backend.
 //
 // Built on platforms that have no real backend yet (see the else() branch in
 // src/CMakeLists.txt). Every feature reports HELIOSVIEW_ERROR_UNSUPPORTED (-4)
@@ -378,6 +378,11 @@ heliosview_menu_t* heliosview_menu_create_bar(void*)
     HV_STUB_UNSUPPORTED;
     return nullptr;
 }
+heliosview_menu_t* heliosview_menubar_create(void*)
+{
+    HV_STUB_UNSUPPORTED;
+    return nullptr;
+}
 int heliosview_menu_add_action(heliosview_menu_t*, heliosview_action_t*)
 {
     return HV_STUB_UNSUPPORTED;
@@ -399,6 +404,10 @@ int heliosview_menu_set_open_callback(heliosview_menu_t*, heliosview_menu_open_c
     return HV_STUB_UNSUPPORTED;
 }
 int heliosview_menu_set_app_menu(heliosview_menu_t*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_menubar_set_app_menu(heliosview_menu_t*)
 {
     return HV_STUB_UNSUPPORTED;
 }
@@ -456,6 +465,10 @@ int heliosview_menu_add_separator(heliosview_menu_t*)
     return HV_STUB_UNSUPPORTED;
 }
 int heliosview_menu_add_submenu(heliosview_menu_t*, const char*, heliosview_menu_t*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_menubar_add_menu(heliosview_menu_t*, const char*, heliosview_menu_t*)
 {
     return HV_STUB_UNSUPPORTED;
 }

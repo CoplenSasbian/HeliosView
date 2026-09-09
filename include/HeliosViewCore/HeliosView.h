@@ -17,6 +17,7 @@
  *   - Notification.h  OS toast notifications (thread-safe)
  *   - Tray.h          system notification-area (tray) icon + signals + balloon
  *   - Menu.h          popup / context menu + signals
+ *   - MenuBar.h       horizontal application / window menu bar
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
  *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
  *   - WebViewJson.h   Boost.JSON auto-binding sugar for the WebView bridge (bindJson / subscribeJson)
@@ -44,6 +45,7 @@
 #include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Execution.h>
 #include <HeliosViewCore/Menu.h>
+#include <HeliosViewCore/MenuBar.h>
 #include <HeliosViewCore/Notification.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/String.h>

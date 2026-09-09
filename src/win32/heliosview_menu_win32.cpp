@@ -786,6 +786,16 @@ heliosview_menu_t* heliosview_menu_create_bar(void* userdata)
     return menu;
 }
 
+heliosview_menu_t* heliosview_menubar_create(void* userdata)
+{
+    return heliosview_menu_create_bar(userdata);
+}
+
+int heliosview_menubar_set_app_menu(heliosview_menu_t* menu)
+{
+    return heliosview_menu_set_app_menu(menu);
+}
+
 void heliosview_menu_destroy(heliosview_menu_t* menu)
 {
     /* Drops the caller's reference; the menu (and its HMENU) is freed only when
@@ -918,6 +928,12 @@ int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
     menu->entries.push_back(entry);
     menu_retain(submenu);
     return 0;
+}
+
+int heliosview_menubar_add_menu(heliosview_menu_t* bar, const char* text,
+                                heliosview_menu_t* menu)
+{
+    return heliosview_menu_add_submenu(bar, text, menu);
 }
 
 int heliosview_menu_set_item_checked(heliosview_menu_t* menu, uint32_t id, int checked)

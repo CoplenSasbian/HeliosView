@@ -1236,6 +1236,9 @@ HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create(void* userdata);
  * Returns NULL on failure. */
 HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create_bar(void* userdata);
 
+/* Alias for heliosview_menu_create_bar: create a horizontal menu bar. */
+HELIOSVIEW_API heliosview_menu_t* heliosview_menubar_create(void* userdata);
+
 /* Add an action to the menu (in order). The same action may be added to several
  * menus; the menu holds a reference (see heliosview_action_destroy) and borrows
  * nothing else. 0 = success, negative = error code. */
@@ -1295,6 +1298,9 @@ HELIOSVIEW_API int heliosview_menu_set_open_callback(heliosview_menu_t* menu,
  * windows showing it; destroying it detaches it from every window first.
  * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_set_app_menu(heliosview_menu_t* menu);
+
+/* Alias for heliosview_menu_set_app_menu. */
+HELIOSVIEW_API int heliosview_menubar_set_app_menu(heliosview_menu_t* menu);
 
 /* The current application menu bar (NULL when unset). */
 HELIOSVIEW_API heliosview_menu_t* heliosview_menu_app_menu(void);
@@ -1375,6 +1381,11 @@ HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);
  * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
                                                heliosview_menu_t* submenu);
+
+/* Add a top-level menu to the menu bar under `text` (e.g. "File", "Edit").
+ * Alias for heliosview_menu_add_submenu on a menu bar. */
+HELIOSVIEW_API int heliosview_menubar_add_menu(heliosview_menu_t* bar, const char* text,
+                                               heliosview_menu_t* menu);
 
 /* Show a POPUP menu (heliosview_menu_create) at the current cursor position.
  * `window` is the owner: it

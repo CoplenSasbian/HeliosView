@@ -466,14 +466,14 @@ helios::Action open("Open…", "Primary+O");           // 可移植快捷键字�
 open.triggered.connect(&onOpen, this);
 fileMenu->addAction(open);
 
-// 应用菜单栏：macOS 装进唯一那条全局菜单栏（第一个子菜单 = App 菜单）；
-// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）。菜单栏是独立的菜单
-// 类别（Win32 是 CreateMenu；macOS 是装成 NSApp.mainMenu 的那个 NSMenu；
-// Linux 是 GtkMenuBar）——只有菜单栏能挂到窗口，弹出/子菜单只能用默认的
-// popup（Menu()）。
-helios::Menu bar = helios::Menu::createBar();
-bar.addSubmenu("File")->addAction(open);
-bar.addSubmenu("Edit")->addRole(helios::MenuRole::Copy);
+// 应用菜单栏：macOS 装进唯一那条全局菜单栏（第一个菜单 = App 菜单）；
+// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）。
+// helios::MenuBar 是独立的横向菜单栏类（Win32 是 CreateMenu；macOS 是装成
+// NSApp.mainMenu 的那个 NSMenu；Linux 是 GtkMenuBar），里面横向排列一个个
+// 垂直的 Menu（通过 bar.addMenu() 添加）。
+helios::MenuBar bar;
+bar.addMenu("File")->addAction(open);
+bar.addMenu("Edit")->addRole(helios::MenuRole::Copy);
 bar.setAppMenu();
 
 // action 上的快捷键就是全局加速键：heliosview_run / heliosview_pump_events 会翻译；

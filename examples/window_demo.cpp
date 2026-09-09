@@ -48,26 +48,24 @@ int main()
     std::printf("[native] flags=0x%X scale=%.2f\n", helios::toUint(native.flags()),
                 native.scaleFactor());
 
-    // Application menu bar. macOS: the one global bar (the first submenu becomes
+    // Application menu bar. macOS: the one global bar (the first menu becomes
     // the App menu). Windows: the menu bar of every HeliosView window. Roles
     // supply the platform's labels/shortcuts and the actions the app cannot do
-    // itself (Ctrl+C/X/V go to the focused control). A bar is created with
-    // createBar() — Win32 distinguishes menu bars (CreateMenu) from popup menus
-    // (CreatePopupMenu), and only a bar can be attached to a window (SetMenu).
-    helios::Menu bar = helios::Menu::createBar();
-    bar.addSubmenu("File")->addRole(helios::MenuRole::Quit);
-    helios::Menu* editMenu = bar.addSubmenu("Edit");
+    // itself (Ctrl+C/X/V go to the focused control).
+    helios::MenuBar bar;
+    bar.addMenu("File")->addRole(helios::MenuRole::Quit);
+    helios::Menu* editMenu = bar.addMenu("Edit");
     editMenu->addRole(helios::MenuRole::Undo);
     editMenu->addRole(helios::MenuRole::Cut);
     editMenu->addRole(helios::MenuRole::Copy);
     editMenu->addRole(helios::MenuRole::Paste);
-    helios::Menu* windowMenu = bar.addSubmenu("Window");
+    helios::Menu* windowMenu = bar.addMenu("Window");
     windowMenu->setKind(helios::MenuKind::Window);   // macOS wires NSApp.windowsMenu
     windowMenu->addRole(helios::MenuRole::Minimize);
     windowMenu->addRole(helios::MenuRole::Zoom);
     helios::Action toggleFull("Toggle Fullscreen", "Primary+F");   // custom accelerator
     toggleFull.triggered.connect([&window] { window.setFullscreen(!window.isFullscreen()); });
-    bar.addSubmenu("View")->addAction(toggleFull);
+    bar.addMenu("View")->addAction(toggleFull);
     bar.setAppMenu();
 
     helios::Menu menu;   // standalone popup: no window needed until show()
