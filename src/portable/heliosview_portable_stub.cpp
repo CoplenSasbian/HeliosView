@@ -373,6 +373,11 @@ heliosview_menu_t* heliosview_menu_create(void*)
     HV_STUB_UNSUPPORTED;
     return nullptr;
 }
+heliosview_menu_t* heliosview_menu_create_bar(void*)
+{
+    HV_STUB_UNSUPPORTED;
+    return nullptr;
+}
 int heliosview_menu_add_action(heliosview_menu_t*, heliosview_action_t*)
 {
     return HV_STUB_UNSUPPORTED;

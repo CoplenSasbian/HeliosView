@@ -285,7 +285,8 @@ struct heliosview_menu_entry {
 
 struct heliosview_menu {
     HWND hwnd = nullptr;                     /* owner window used the last time the popup was shown */
-    HMENU hmenu = nullptr;                   /* Win32 popup menu (MNS_NOTIFYBYPOS) — the routing identity */
+    HMENU hmenu = nullptr;                   /* Win32 menu (MNS_NOTIFYBYPOS) — the routing identity */
+    bool is_bar = false;                     /* true = CreateMenu (window menu bar); false = CreatePopupMenu */
     void* userdata = nullptr;                /* caller data (the C++ wrapper stores an object pointer) */
     uint32_t next_item_id = 1;               /* menu-local command id allocator (only for id-less entries) */
     heliosview_menu_kind_t kind = HELIOSVIEW_MENU_KIND_NORMAL; /* standard-menu hint (macOS wires it) */
@@ -718,6 +719,13 @@ int heliosview_menu_set_app_menu(heliosview_menu_t* menu)
 {
     if (menu && !menu->hmenu)
         return hv_fail(-1, "invalid menu (hmenu is NULL)");
+    /* Only a MENU BAR (CreateMenu) can be attached to windows with SetMenu: the
+     * Win32 API rejects a popup menu (CreatePopupMenu) with ERROR_INVALID_PARAMETER
+     * (see heliosview_menu_create_bar). */
+    if (menu && !menu->is_bar)
+        return hv_fail(-1, "the application menu bar must be created with "
+                           "heliosview_menu_create_bar (a window menu bar is a "
+                           "CreateMenu; popup menus cannot be attached to windows)");
     if (tls_app_menu == menu)
         return 0;
     heliosview_menu_t* previous = tls_app_menu;
@@ -741,9 +749,28 @@ heliosview_menu_t* heliosview_menu_create(void* userdata)
 {
     auto* menu = hv::hv_alloc<heliosview_menu>();
     menu->userdata = userdata;
-    /* CreateMenu (not CreatePopupMenu): the same handle is used both as a popup
-     * (TrackPopupMenu) and as a window menu bar (SetMenu) — and only a menu
-     * created by CreateMenu can be attached to a window. */
+    /* A POPUP menu (CreatePopupMenu): shown with heliosview_menu_show, attached
+     * to a tray, or added as a submenu. NOT a window menu bar — for that use
+     * heliosview_menu_create_bar (CreateMenu): only a menu bar can be attached
+     * to a window with SetMenu; popup handles are rejected there. */
+    menu->hmenu = CreatePopupMenu();
+    if (!menu->hmenu) {
+        hv_fail(-1, "CreatePopupMenu failed");
+        hv::hv_dealloc(menu);
+        return nullptr;
+    }
+    menu_enable_notify_by_pos(menu->hmenu, menu); /* WM_MENUCOMMAND routing */
+    return menu;
+}
+
+heliosview_menu_t* heliosview_menu_create_bar(void* userdata)
+{
+    auto* menu = hv::hv_alloc<heliosview_menu>();
+    menu->userdata = userdata;
+    menu->is_bar = true;
+    /* A window MENU BAR (CreateMenu). Only this kind can be installed as the
+     * application menu bar (SetMenu). It holds top-level items — typically
+     * submenus (popups) — and is never shown with TrackPopupMenu. */
     menu->hmenu = CreateMenu();
     if (!menu->hmenu) {
         hv_fail(-1, "CreateMenu failed");
@@ -871,6 +898,11 @@ int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
 {
     if (!menu || !menu->hmenu || !submenu || !submenu->hmenu)
         return hv_fail(-1, "invalid menu or submenu (hmenu is NULL)");
+    /* MF_POPUP items must be POPUP menus (CreatePopupMenu, see
+     * heliosview_menu_create); a menu bar is not a valid submenu. */
+    if (submenu->is_bar)
+        return hv_fail(-1, "a submenu must be a popup menu (heliosview_menu_create), "
+                           "not a menu bar (heliosview_menu_create_bar)");
     const std::wstring wtext = utf8_to_wide(text ? text : "");
     if (!AppendMenuW(menu->hmenu, MF_POPUP,
                      reinterpret_cast<UINT_PTR>(submenu->hmenu), wtext.c_str()))

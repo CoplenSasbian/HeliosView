@@ -1172,10 +1172,19 @@ HELIOSVIEW_API heliosview_action_t* heliosview_action_from_id(uint32_t id);
  * without any window, and only showing it needs an owner (the OS delivers the
  * selection to the owner's message queue).
  *
- * heliosview_menu_show(menu, window) pops it up at the current cursor position;
- * `window` may be NULL, in which case the library uses its own hidden owner
- * window — so a menu can be shown from a tray icon even when the application has
- * no window at all (MENU_SELECT then carries window_id = 0).
+ * Two kinds exist, mirroring the Win32 factories behind them:
+ *   - a POPUP menu (heliosview_menu_create; CreatePopupMenu on Windows): the
+ *     normal case — a context menu (heliosview_menu_show), a tray menu, or a
+ *     submenu (heliosview_menu_add_submenu);
+ *   - a MENU BAR (heliosview_menu_create_bar; CreateMenu on Windows): the
+ *     application menu bar installed with heliosview_menu_set_app_menu. Only a
+ *     menu bar can serve as a window menu, so heliosview_menu_set_app_menu
+ *     rejects popup menus and heliosview_menu_add_submenu rejects bars.
+ *
+ * heliosview_menu_show(menu, window) pops a menu up at the current cursor
+ * position; `window` may be NULL, in which case the library uses its own hidden
+ * owner window — so a menu can be shown from a tray icon even when the
+ * application has no window at all (MENU_SELECT then carries window_id = 0).
  *
  * Each item is assigned a unique id; choosing an item posts a
  * HELIOSVIEW_EVENT_MENU_SELECT event (menu_item = the item id, userdata = the
@@ -1200,11 +1209,23 @@ enum {
     HELIOSVIEW_MENU_ITEM_DEFAULT    = 1 << 3  /* default item: bold, Enter / double-click activates */
 };
 
-/* Create an empty standalone menu. `userdata` is caller data (e.g. a C++ Menu
- * object) copied verbatim into the MENU_SELECT events this menu produces; it is
- * how a selection is routed back to the menu, so no window is needed here.
- * Returns NULL on failure. */
+/* Create an empty standalone POPUP menu. `userdata` is caller data (e.g. a C++
+ * Menu object) copied verbatim into the MENU_SELECT events this menu produces;
+ * it is how a selection is routed back to the menu, so no window is needed here.
+ * A popup menu is shown with heliosview_menu_show, attached to a tray
+ * (heliosview_tray_set_menu), or added as a submenu
+ * (heliosview_menu_add_submenu). For the application menu bar use
+ * heliosview_menu_create_bar instead. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create(void* userdata);
+
+/* Create an empty window MENU BAR for the application menu bar. Unlike a popup
+ * menu it can be installed as the menu bar of every window
+ * (heliosview_menu_set_app_menu) — the Win32 factory is CreateMenu, while popup
+ * menus are CreatePopupMenu, and the two are NOT interchangeable (SetMenu
+ * rejects popup handles with ERROR_INVALID_PARAMETER). Its items are top-level
+ * entries, typically submenus; it is never shown with heliosview_menu_show.
+ * Returns NULL on failure. */
+HELIOSVIEW_API heliosview_menu_t* heliosview_menu_create_bar(void* userdata);
 
 /* Add an action to the menu (in order). The same action may be added to several
  * menus; the menu holds a reference (see heliosview_action_destroy) and borrows
@@ -1259,8 +1280,11 @@ HELIOSVIEW_API int heliosview_menu_set_open_callback(heliosview_menu_t* menu,
  *                has no global menu bar).
  *   Linux/GTK    each window's GtkMenuBar.
  *
- * The menu must outlive the windows showing it; destroying it detaches it from
- * every window first. 0 = success, negative = error code. */
+ * `menu` must be a MENU BAR (heliosview_menu_create_bar): the Win32 API only
+ * attaches CreateMenu handles to windows and rejects popup menus
+ * (CreatePopupMenu) with ERROR_INVALID_PARAMETER. The bar must outlive the
+ * windows showing it; destroying it detaches it from every window first.
+ * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_set_app_menu(heliosview_menu_t* menu);
 
 /* The current application menu bar (NULL when unset). */
@@ -1337,7 +1361,9 @@ HELIOSVIEW_API int heliosview_menu_is_item_default(heliosview_menu_t* menu, uint
 HELIOSVIEW_API int heliosview_menu_add_separator(heliosview_menu_t* menu);
 
 /* Add `submenu` as a submenu under `text`. The parent takes ownership of the
- * submenu. 0 = success, negative = error code. */
+ * submenu. `submenu` must be a POPUP menu (heliosview_menu_create) — a menu bar
+ * cannot be a submenu (Win32 MF_POPUP requires CreatePopupMenu handles).
+ * 0 = success, negative = error code. */
 HELIOSVIEW_API int heliosview_menu_add_submenu(heliosview_menu_t* menu, const char* text,
                                                heliosview_menu_t* submenu);
 

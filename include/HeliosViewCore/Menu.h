@@ -55,8 +55,25 @@ public:
     // Not copyable/movable.
     Menu()
         : m_menu(heliosview_menu_create(this))
+        , m_is_bar(false)
     {
     }
+
+    // Create a window MENU BAR for the application menu bar (popups are shown
+    // with show(), a bar is installed with setAppMenu()). On Windows a bar is a
+    // CreateMenu while popups are CreatePopupMenu, and the two are not
+    // interchangeable: only a bar can be attached to a window (SetMenu rejects
+    // popup handles), and only a popup can be a submenu. Use it with setAppMenu():
+    //   helios::Menu bar = helios::Menu::createBar();
+    //   bar.addSubmenu("File")->addRole(helios::MenuRole::Quit);
+    //   bar.setAppMenu();
+    static Menu createBar()
+    {
+        return Menu(BarTag{});
+    }
+
+    // True when this menu is a menu bar (createBar) rather than a popup.
+    bool isBar() const { return m_is_bar; }
 
     /**
      * @deprecated A menu no longer belongs to a window; the argument is ignored.
@@ -169,12 +186,12 @@ public:
     // then uses a hidden owner window.
     void show(heliosview_window_t* window) { heliosview_menu_show(m_menu, window); }
 
-    // Install this menu as the application menu bar: macOS puts it in the one
-    // global bar (its first submenu becomes the App menu); Windows/Linux show
-    // it as the menu bar of every HeliosView window, including future ones.
-    // The bar keeps a reference to the menu, so destroying the Menu object only
-    // drops the caller's reference — the bar keeps displaying it until
-    // clearAppMenu() / another setAppMenu().
+    // Install this menu as the application menu bar (menu bars only — created
+    // with createBar()): macOS puts it in the one global bar (its first submenu
+    // becomes the App menu); Windows/Linux show it as the menu bar of every
+    // HeliosView window, including future ones. The bar keeps a reference to the
+    // menu, so destroying the Menu object only drops the caller's reference —
+    // the bar keeps displaying it until clearAppMenu() / another setAppMenu().
     void setAppMenu()
     {
         if (heliosview_menu_set_app_menu(m_menu) != 0)
@@ -210,6 +227,15 @@ public:
     }
 
 private:
+    struct BarTag {};
+    explicit Menu(BarTag)
+        : m_menu(heliosview_menu_create_bar(this))
+        , m_is_bar(true)
+    {
+        if (!m_menu)
+            throwLastError("menu bar creation failed");
+    }
+
     static void openTrampoline(heliosview_menu_t* /*menu*/, void* userdata)
     {
         auto* self = static_cast<Menu*>(userdata);
@@ -219,6 +245,7 @@ private:
 
     heliosview_menu_t* m_menu = nullptr;
     bool m_owned = true; /* false = submenu (the parent menu's C layer owns the handle) */
+    bool m_is_bar = false;
     OpenCallback m_openCallback;                          /* lazy population */
     std::vector<std::unique_ptr<Action>> m_owned_actions; /* actions created by addItem */
     std::vector<std::unique_ptr<Menu>> m_submenus;        /* owned submenus */

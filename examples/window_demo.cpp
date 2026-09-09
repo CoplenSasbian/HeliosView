@@ -51,8 +51,10 @@ int main()
     // Application menu bar. macOS: the one global bar (the first submenu becomes
     // the App menu). Windows: the menu bar of every HeliosView window. Roles
     // supply the platform's labels/shortcuts and the actions the app cannot do
-    // itself (Ctrl+C/X/V go to the focused control).
-    helios::Menu bar;
+    // itself (Ctrl+C/X/V go to the focused control). A bar is created with
+    // createBar() — Win32 distinguishes menu bars (CreateMenu) from popup menus
+    // (CreatePopupMenu), and only a bar can be attached to a window (SetMenu).
+    helios::Menu bar = helios::Menu::createBar();
     bar.addSubmenu("File")->addRole(helios::MenuRole::Quit);
     helios::Menu* editMenu = bar.addSubmenu("Edit");
     editMenu->addRole(helios::MenuRole::Undo);
