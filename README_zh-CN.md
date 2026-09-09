@@ -467,8 +467,11 @@ open.triggered.connect(&onOpen, this);
 fileMenu->addAction(open);
 
 // 应用菜单栏：macOS 装进唯一那条全局菜单栏（第一个子菜单 = App 菜单）；
-// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）
-helios::Menu bar;
+// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）。菜单栏是独立的菜单
+// 类别（Win32 是 CreateMenu；macOS 是装成 NSApp.mainMenu 的那个 NSMenu；
+// Linux 是 GtkMenuBar）——只有菜单栏能挂到窗口，弹出/子菜单只能用默认的
+// popup（Menu()）。
+helios::Menu bar = helios::Menu::createBar();
 bar.addSubmenu("File")->addAction(open);
 bar.addSubmenu("Edit")->addRole(helios::MenuRole::Copy);
 bar.setAppMenu();

@@ -72,6 +72,15 @@
  * - Menus are reference-counted: a menu displayed by a parent menu, the
  *   application menu bar or a tray is kept alive by that holder. A backend must
  *   implement the same retain/release discipline (see the win32 menu backend).
+ * - Menu kinds: heliosview_menu_create makes a POPUP (Win32: CreatePopupMenu,
+ *   GTK: GtkMenu, macOS: any NSMenu) — shown with heliosview_menu_show,
+ *   attached to a tray, added as a submenu; heliosview_menu_create_bar makes
+ *   the MENU BAR (Win32: CreateMenu, GTK: GtkMenuBar, macOS: the NSMenu
+ *   installed as NSApp.mainMenu). The kind is a real per-platform difference,
+ *   and a backend must REJECT the cross-kind uses its platform cannot honor (a
+ *   popup as the application menu bar; a bar as a submenu or a shown popup),
+ *   mirroring the win32 validations in heliosview_menu_set_app_menu /
+ *   heliosview_menu_add_submenu.
  * - Coordinates: the portable contract is top-left origin, y down, virtual
  *   desktop units. Convert to the native origin inside the backend.
  * - Notifications: heliosview_notification_request_permission must be honored

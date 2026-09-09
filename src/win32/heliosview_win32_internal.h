@@ -184,6 +184,11 @@ bool hv_menu_translate_accelerator(MSG* msg);    /* true = consumed as an accele
 void hv_menu_retain(heliosview_menu_t* menu);
 void hv_menu_release(heliosview_menu_t* menu);
 
+/* True when `menu` is a menu BAR (heliosview_menu_create_bar). Other backends
+ * (tray) use this to reject bars where only popup menus fit.
+ * Defined in heliosview_menu_win32.cpp. */
+bool hv_menu_is_bar(heliosview_menu_t* menu);
+
 /* ================= Keyboard shortcuts =================
  *
  * A portable shortcut string ("Primary+S", "Ctrl+Shift+Z", "F11", "Cmd+O") is

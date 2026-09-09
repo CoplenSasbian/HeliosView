@@ -698,6 +698,11 @@ void hv_menu_release(heliosview_menu_t* menu)
     menu_release(menu);
 }
 
+bool hv_menu_is_bar(heliosview_menu_t* menu)
+{
+    return menu && menu->is_bar;
+}
+
 /* Called by the message loop (and by heliosview_translate_accelerator for apps
  * that run their own loop). True = the message was consumed as an accelerator. */
 bool hv_menu_translate_accelerator(MSG* msg)
@@ -977,6 +982,11 @@ int heliosview_menu_show(heliosview_menu_t* menu, heliosview_window_t* window)
 {
     if (!menu || !menu->hmenu)
         return hv_fail(-1, "invalid menu (hmenu is NULL)");
+    /* Only POPUP menus are shown: a menu bar is a window's menu, never a
+     * popup (matches the other backends' contract — see heliosview.h). */
+    if (menu->is_bar)
+        return hv_fail(-1, "a menu bar cannot be shown as a popup; show() takes a "
+                           "popup menu (heliosview_menu_create)");
     /* Owner: the caller's window, or the hidden host when there is none (tray-only
      * apps). TrackPopupMenu needs a foreground owner to dismiss on outside clicks
      * and to deliver WM_MENUCOMMAND, so the routing callout goes on whichever

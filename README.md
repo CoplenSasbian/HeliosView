@@ -640,8 +640,12 @@ open.triggered.connect(&onOpen, this);
 fileMenu->addAction(open);
 
 // Application menu bar: macOS installs the one global bar (first submenu = App
-// menu); Windows shows it as the bar of every window, including future ones.
-helios::Menu bar;
+// menu); Windows shows it as the bar of every window, including future ones. A
+// bar is a distinct menu kind (Win32 CreateMenu; the NSMenu installed as
+// NSApp.mainMenu on macOS, GtkMenuBar on Linux) — only a bar can be attached to
+// a window, and only popups (the default Menu()) can be shown or used as
+// submenus.
+helios::Menu bar = helios::Menu::createBar();
 bar.addSubmenu("File")->addAction(open);
 bar.addSubmenu("Edit")->addRole(helios::MenuRole::Copy);
 bar.setAppMenu();

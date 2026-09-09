@@ -31,6 +31,12 @@
  *
  * Items are owned by the menu; the returned pointers stay valid until the menu
  * is destroyed. Submenus are owned by their parent.
+ *
+ * The application menu bar is a special Menu kind: create it with createBar()
+ * (Win32 CreateMenu; popups are CreatePopupMenu and are not interchangeable)
+ * and install it with setAppMenu(); only a bar can be a window's menu bar, and
+ * only a popup (the default Menu()) can be shown, attached to a tray or added
+ * as a submenu.
  */
 
 #include <HeliosViewCore/Action.h>
@@ -60,13 +66,17 @@ public:
     }
 
     // Create a window MENU BAR for the application menu bar (popups are shown
-    // with show(), a bar is installed with setAppMenu()). On Windows a bar is a
-    // CreateMenu while popups are CreatePopupMenu, and the two are not
-    // interchangeable: only a bar can be attached to a window (SetMenu rejects
-    // popup handles), and only a popup can be a submenu. Use it with setAppMenu():
+    // with show(), a bar is installed with setAppMenu()). A menu bar is a real
+    // kind on every platform — Win32: CreateMenu vs CreatePopupMenu (not
+    // interchangeable: SetMenu rejects popup handles); GTK: GtkMenuBar vs
+    // GtkMenu; macOS: the NSMenu installed as NSApp.mainMenu vs any other menu.
+    // Only a bar can be the application menu bar; only a popup can be shown,
+    // attached to a tray, or added as a submenu. Use it with setAppMenu():
     //   helios::Menu bar = helios::Menu::createBar();
     //   bar.addSubmenu("File")->addRole(helios::MenuRole::Quit);
     //   bar.setAppMenu();
+    // Like Menu(), an invalid underlying menu leaves valid() == false (no
+    // exception) — e.g. on a platform with no backend.
     static Menu createBar()
     {
         return Menu(BarTag{});
@@ -182,8 +192,9 @@ public:
     }
 
     // Show the popup at the current cursor position, owned by `window`
-    // (dispatches the MenuSelect event). `window` may be nullptr: the library
-    // then uses a hidden owner window.
+    // (dispatches the MenuSelect event). Popup menus only — a menu bar is never
+    // shown this way. `window` may be nullptr: the library then uses a hidden
+    // owner window.
     void show(heliosview_window_t* window) { heliosview_menu_show(m_menu, window); }
 
     // Install this menu as the application menu bar (menu bars only — created
@@ -232,8 +243,6 @@ private:
         : m_menu(heliosview_menu_create_bar(this))
         , m_is_bar(true)
     {
-        if (!m_menu)
-            throwLastError("menu bar creation failed");
     }
 
     static void openTrampoline(heliosview_menu_t* /*menu*/, void* userdata)

@@ -231,6 +231,11 @@ int heliosview_tray_set_menu(heliosview_tray_t* tray, heliosview_menu_t* menu)
 {
     if (!tray)
         return hv_fail(-1, "tray is NULL");
+    /* A tray context menu is a POPUP menu on every platform (macOS NSStatusItem,
+     * Linux StatusNotifierItem/DBus); a menu bar cannot serve as one. */
+    if (menu && hv_menu_is_bar(menu))
+        return hv_fail(-1, "a tray menu must be a popup menu (heliosview_menu_create), "
+                           "not a menu bar (heliosview_menu_create_bar)");
     if (tray->menu == menu)
         return 0;
     heliosview_menu_t* previous = tray->menu;
