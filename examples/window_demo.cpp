@@ -1,57 +1,264 @@
-// HeliosView.Core window-feature example (signal/slot usage).
-// Interact: move the mouse / press keys (Esc closes the window) / click the X (connected to close())
+// HeliosView.Core example: Window - styles, state, signals, menus and the tray.
+//
+// This is the "no WebView" window demo: everything a Window (and the app around it)
+// offers, driven from the keyboard and the mouse. The WebView demos show the JS
+// bridge; this one shows the native windowing layer on its own.
+//
+// It also shows the two ways to react to events, side by side:
+//   - member slots:  subclass Window and connect(&MyWindow::onKeyPressed, this)
+//   - lambdas:       window.resized.connect([](int32_t w, int32_t h) { ... })
+// Both run on the message-loop thread.
+//
+// Controls (the window with focus receives the keys):
+//   Esc   close the focused window (the demo exits with the last one)
+//   F1    maximize                  F2    minimize
+//   F3    restore / show normal     F4    toggle resizable
+//   F5    toggle fullscreen         F6    toggle topmost
+//   F7    opacity 100% <-> 60%      F8    flash the taskbar
+//   F9    taskbar progress step     F10   clear taskbar progress
+//   F11   Mica backdrop + dark mode (Win11)
+//   F12   rename the window
+//   right-click inside the main window   popup menu (also attached to the tray)
+//   tray left click / double click / right click -> balloon, restore, menu (Quit)
+//
+// The extra windows demonstrate the built-in styles and the WindowFlag combinations;
+// see HeliosViewCore/Window.h for the full list (WindowStyle::Borderless, the other
+// flags, addDragRegion for a custom drag strip, and so on).
 #include <HeliosViewCore/HeliosView.h>
 
 #include <cstdio>
+#include <memory>
+
+namespace {
+
+/* ---------- a Window subclass with member-function slots ---------- */
+
+class DemoWindow : public helios::Window {
+public:
+    DemoWindow(int width, int height, const char* title,
+               helios::WindowStyle style = helios::WindowStyle::Normal)
+        : Window(width, height, title, style)
+    {
+        /* Member slots: the signal calls this object's method on the UI thread.
+         * (Signal::connect(&Class::method, object) - the object must outlive the
+         * connection, which it does here: the window owns the slots.) */
+        keyPressed.connect(&DemoWindow::onKeyPressed, this);
+        mouseButtonPressed.connect(&DemoWindow::onMousePressed, this);
+        resized.connect(&DemoWindow::onResized, this);
+        closeRequested.connect(&DemoWindow::onCloseRequested, this);
+    }
+
+    /* The popup menu is shown by onMousePressed; it is owned by main() (the tray
+     * keeps a reference to it too, so it must outlive both). */
+    helios::Menu* popup = nullptr;
+
+private:
+    void onKeyPressed(helios::KeyCode key)
+    {
+        switch (key) {
+        case helios::KeyCode::Escape:
+            close(); /* the close button does NOT auto-close: the app decides */
+            break;
+        case helios::KeyCode::F1:
+            maximize();
+            break;
+        case helios::KeyCode::F2:
+            minimize();
+            break;
+        case helios::KeyCode::F3:
+            showNormal(); /* restore from minimized/maximized */
+            break;
+        case helios::KeyCode::F4:
+            m_resizable = !m_resizable;
+            setResizable(m_resizable);
+            std::printf("[win] resizable = %d\n", m_resizable);
+            break;
+        case helios::KeyCode::F5:
+            setFullscreen(!isFullscreen());
+            break;
+        case helios::KeyCode::F6:
+            m_topmost = !m_topmost;
+            setTopmost(m_topmost);
+            std::printf("[win] topmost = %d\n", m_topmost);
+            break;
+        case helios::KeyCode::F7:
+            m_opaque = !m_opaque;
+            setOpacity(m_opaque ? 1.0f : 0.6f);
+            break;
+        case helios::KeyCode::F8:
+            flash(); /* hint that a background task finished (taskbar / dock) */
+            break;
+        case helios::KeyCode::F9:
+            /* Taskbar progress: an indeterminate state, then 0..100% in 20% steps. */
+            if (m_progress == 0) {
+                setProgressState(helios::ProgressState::Indeterminate);
+                m_progress = 20;
+            } else if (m_progress >= 100) {
+                clearProgress();
+                m_progress = 0;
+            } else {
+                setProgress(static_cast<uint32_t>(m_progress), 100);
+                m_progress += 20;
+            }
+            std::printf("[win] taskbar progress step -> %d%%\n", m_progress);
+            break;
+        case helios::KeyCode::F10:
+            clearProgress();
+            m_progress = 0;
+            break;
+        case helios::KeyCode::F11:
+            /* Mica + dark mode: Windows 11 backdrop; on other platforms/versions
+             * setBackdrop returns an error code and the window keeps its look. */
+            if (setBackdrop(helios::Backdrop::Mica) == 0)
+                setDarkMode(true);
+            std::printf("[win] backdrop=Mica dark=1\n");
+            break;
+        case helios::KeyCode::F12:
+            m_titles = (m_titles + 1) % 3;
+            setTitle(m_titles == 0   ? "HeliosView Window Demo"
+                     : m_titles == 1 ? "Renamed Window"
+                                     : "HeliosView - hello");
+            break;
+        default:
+            break;
+        }
+    }
+
+    void onMousePressed(int32_t x, int32_t y, helios::MouseButton button)
+    {
+        std::printf("[win] mouse button %d at %d, %d\n", static_cast<int>(button), x, y);
+        if (popup && button == helios::MouseButton::Right)
+            popup->show(nativeHandle()); /* popup at the cursor, owned by this window */
+    }
+
+    void onResized(int32_t w, int32_t h)
+    {
+        std::printf("[win] resized to %d x %d\n", w, h);
+    }
+
+    void onCloseRequested()
+    {
+        std::printf("[win] close requested\n");
+        close();
+    }
+
+    int m_progress = 0;
+    int m_titles = 0;
+    bool m_opaque = true;
+    bool m_topmost = false;
+    bool m_resizable = true;
+};
+
+/* ---------- the standalone popup menu (shared with the tray) ---------- */
+
+std::unique_ptr<helios::Menu> makePopupMenu(helios::Window& window, bool& topmost)
+{
+    auto menu = std::make_unique<helios::Menu>();
+
+    /* Convenience items: the menu creates and owns the action behind each one. */
+    helios::Menu::Item* showItem = menu->addItem("Show / Restore");
+    helios::Menu::Item* minimizeItem = menu->addItem("Minimize");
+    helios::Menu::Item* maximizeItem = menu->addItem("Maximize");
+    menu->addSeparator();
+
+    /* A checkable item: the app owns the state (the menu only draws the checkmark). */
+    helios::Menu::Item* topmostItem = menu->addCheckItem("Always on top", topmost);
+    topmostItem->triggered.connect([&window, topmostItem, &topmost] {
+        topmost = !topmost;
+        window.setTopmost(topmost);
+        topmostItem->setChecked(topmost);
+    });
+
+    menu->addSeparator();
+    menu->addItem("Disabled (greyed out)")->setEnabled(false);
+    menu->addSeparator();
+
+    /* Platform roles: the OS supplies the label, the shortcut and the action. */
+    menu->addRole(helios::MenuRole::Quit)->triggered.connect([] {
+        std::printf("[menu] quit\n");
+        if (auto* a = helios::App::instance())
+            a->quit();
+    });
+
+    showItem->triggered.connect([&window] { window.showNormal(); });
+    minimizeItem->triggered.connect([&window] { window.minimize(); });
+    maximizeItem->triggered.connect([&window] { window.toggleMaximize(); });
+
+    menu->setDefaultAction(*showItem); /* bold: Enter / double-click activates it */
+    return menu;
+}
+
+} // namespace
 
 int main()
 {
-    std::printf("HeliosView %s\n", helios::version().c_str());
+    std::printf("HeliosView %s - window / menu / tray demo\n", helios::version().c_str());
 
-    helios::enableDpiAwareness(); // before any window: crisp, per-monitor DPI
+    /* DPI awareness is initialized automatically when the first window is created;
+     * calling it explicitly is still supported for early initialization. */
+    helios::enableDpiAwareness();
 
-    helios::App app;
-    // Process identity + how the OS presents the process. A tray-only / menu-bar
-    // -only app should use ActivationPolicy::Accessory: on macOS that is what
-    // keeps the (otherwise useless) Dock icon away.
-    helios::App::setAppId("com.example.heliosview.demo");
+    /* Process identity + how the OS presents the process. A tray-only / menu-bar-only
+     * app should use ActivationPolicy::Accessory: on macOS that is what keeps the
+     * (otherwise useless) Dock icon away. */
+    helios::App::setAppId("com.example.heliosview.windowdemo");
     helios::App::setActivationPolicy(helios::ActivationPolicy::Regular);
     std::printf("[app] id=%s policy=%d\n", helios::App::appId(),
                 static_cast<int>(helios::App::activationPolicy()));
 
-    helios::Window window(800, 600, "HeliosView Demo");
+    /* Order matters: the App first (windows register their events through it), and
+     * the windows/tray/menu destroyed before it - they are locals here, so they die
+     * before `app` does. */
+    helios::App app;
+
+    /* ---------- the main window (subclassed: member-function slots) ---------- */
+
+    DemoWindow window(880, 560, "HeliosView Window Demo");
+    window.setMinimumSize(480, 320); /* client-area size constraints */
+    window.setMaximumSize(1600, 1200);
     window.show();
 
-    // Size constraints: keep the window between 400x300 and 1200x900 (client).
-    window.setMinimumSize(400, 300);
-    window.setMaximumSize(1200, 900);
+    /* Lambda slots: connect without subclassing. All of these are optional - the
+     * demo logs them so the event stream is visible on the console. */
+    window.firstShown.connect([] { std::printf("[win] first shown\n"); });
+    window.moved.connect([](int32_t x, int32_t y) { std::printf("[win] moved to %d, %d\n", x, y); });
+    window.sizing.connect([](int32_t w, int32_t h) { std::printf("[win] sizing %d x %d\n", w, h); });
+    window.focused.connect([] { std::printf("[win] focus gained\n"); });
+    window.blurred.connect([] { std::printf("[win] focus lost\n"); });
+    window.minimized.connect([] { std::printf("[win] minimized\n"); });
+    window.maximized.connect([] { std::printf("[win] maximized\n"); });
+    window.restored.connect([] { std::printf("[win] restored\n"); });
+    window.enabledChanged.connect([](bool on) { std::printf("[win] enabled = %d\n", on); });
+    std::printf("[win] dpi = %u, title bar height = %d px, scale = %.2f\n", window.dpi(),
+                window.titleBarHeight(), window.scaleFactor());
 
-    // Frameless: a fully frameless window (no system title bar); the app draws
-    // all chrome (title bar + buttons), and the top strip drags the window.
-    helios::Window frameless(480, 320, "Frameless",
-                             helios::WindowStyle::Frameless);
-    frameless.resized.connect([](int32_t w, int32_t) {
-        // keep the drag strip spanning the (new) window width
-        std::printf("[frameless] resize %d\n", w);
-    });
+    /* ---------- styles and flags on the extra windows ---------- */
+
+    /* WindowStyle::Frameless: no system title bar at all - the app draws the whole
+     * chrome and calls startDrag() (or registers a drag region) to move it. The
+     * WebView demos do exactly that with the injected <helios-window-title-bar>. */
+    helios::Window frameless(420, 260, "Frameless", helios::WindowStyle::Frameless);
+    /* The close button only *asks* (closeRequested); the app decides. Without this,
+     * clicking X would do nothing - and the demo would be stuck with the window. */
+    frameless.closeRequested.connect([&frameless] { frameless.close(); });
     frameless.show();
 
-    // Style flags: the idiomatic macOS look — a real title bar with its title
-    // hidden and the content underneath, traffic lights floating over the page.
-    // On Windows the same flags mean "no native caption" (the frameless layout).
-    helios::Window native(520, 360, "Native chrome", helios::WindowStyle::Normal,
+    /* WindowFlag::*: the macOS "title bar hidden + content underneath" look; on
+     * Windows the same flags mean "no native caption". Styles and flags combine. */
+    helios::Window native(420, 260, "Native chrome", helios::WindowStyle::Normal,
                           helios::WindowFlag::TitleBarHidden
                               | helios::WindowFlag::TitleBarTransparent
                               | helios::WindowFlag::FullSizeContent
                               | helios::WindowFlag::Resizable);
+    native.closeRequested.connect([&native] { native.close(); });
     native.show();
-    std::printf("[native] flags=0x%X scale=%.2f\n", helios::toUint(native.flags()),
-                native.scaleFactor());
+    std::printf("[native] flags = 0x%X\n", helios::toUint(native.flags()));
 
-    // Application menu bar. macOS: the one global bar (the first menu becomes
-    // the App menu). Windows: the menu bar of every HeliosView window. Roles
-    // supply the platform's labels/shortcuts and the actions the app cannot do
-    // itself (Ctrl+C/X/V go to the focused control).
+    /* A third built-in style, WindowStyle::Borderless (no border, no title bar),
+     * is available too - see HeliosViewCore/Window.h. */
+
+    /* ---------- menu bar (macOS: the one global bar; Windows: this window's bar) */
+
     helios::MenuBar bar;
     bar.addMenu("File")->addRole(helios::MenuRole::Quit);
     helios::Menu* editMenu = bar.addMenu("Edit");
@@ -60,127 +267,48 @@ int main()
     editMenu->addRole(helios::MenuRole::Copy);
     editMenu->addRole(helios::MenuRole::Paste);
     helios::Menu* windowMenu = bar.addMenu("Window");
-    windowMenu->setKind(helios::MenuKind::Window);   // macOS wires NSApp.windowsMenu
+    windowMenu->setKind(helios::MenuKind::Window); /* macOS wires NSApp.windowsMenu */
     windowMenu->addRole(helios::MenuRole::Minimize);
     windowMenu->addRole(helios::MenuRole::Zoom);
-    helios::Action toggleFull("Toggle Fullscreen", "Primary+F");   // custom accelerator
-    toggleFull.triggered.connect([&window] { window.setFullscreen(!window.isFullscreen()); });
-    bar.addMenu("View")->addAction(toggleFull);
+
+    /* A custom action with a custom accelerator ("Primary" = Ctrl / Cmd). */
+    helios::Action toggleFullscreen("Toggle Fullscreen", "Primary+F");
+    toggleFullscreen.triggered.connect([&window] { window.setFullscreen(!window.isFullscreen()); });
+    bar.addMenu("View")->addAction(toggleFullscreen);
     bar.setAppMenu();
 
-    helios::Menu menu;   // standalone popup: no window needed until show()
-    helios::Menu::Item* showItem = menu.addItem("Show / Restore");
-    helios::Menu::Item* minimizeItem = menu.addItem("Minimize");
-    helios::Menu::Item* maximizeItem = menu.addItem("Maximize");
-    helios::Menu::Item* resizableItem = menu.addItem("Toggle Resizable");
-    menu.addSeparator();
-    helios::Menu::Item* quitItem = menu.addRole(helios::MenuRole::Quit);  // platform label + shortcut
-    menu.addSeparator();
-    helios::Menu::Item* disabledItem = menu.addItem("Disabled (grey)");
-    disabledItem->setEnabled(false); // grayed out, not selectable
-    showItem->triggered.connect([&window] {
-        std::printf("[win] menu: show/restore\n");
-        window.showNormal();
-    });
-    minimizeItem->triggered.connect([&window] {
-        std::printf("[win] menu: minimize\n");
-        window.minimize();
-    });
-    maximizeItem->triggered.connect([&window] {
-        std::printf("[win] menu: toggle maximize\n");
-        window.toggleMaximize();
-    });
-    resizableItem->triggered.connect([&window] {
-        const bool on = window.state() != helios::ShowState::Maximized; // demo: arbitrary
-        std::printf("[win] menu: resizable = %d\n", on);
-        window.setResizable(on);
-    });
-    quitItem->triggered.connect([&app] {
-        std::printf("[win] menu: quit\n");
-        app.quit();
-    });
-    menu.setDefaultAction(*showItem); // bold default item (Enter / double-click)
+    /* ---------- popup menu + tray ---------- */
 
-    // Tray icon (notification area). Standalone: no window required, so it can be
-    // created before (or without) show(). Connect signals to respond to clicks.
-    helios::Tray tray("HeliosView Demo");
-    // Attach the context menu instead of popping it up from rightClicked: that is
-    // the only portable way (Linux exports the menu over DBus; macOS opens an
-    // NSStatusItem menu) — with a menu attached the right-click event may not be
-    // delivered at all. The tray keeps a reference to the menu.
-    tray.setMenu(menu);
-    tray.leftClicked.connect([] { std::printf("[win] tray left-click\n"); });
-    tray.leftDoubleClicked.connect([&app] {
-        std::printf("[win] tray double-click -> quit\n");
-        app.quit();
-    });
+    /* Declaration order = lifetime: the tray holds a reference to the menu, so the
+     * menu must outlive it (locals are destroyed in reverse order). */
+    bool topmost = false;
+    std::unique_ptr<helios::Menu> menu = makePopupMenu(window, topmost);
+    std::unique_ptr<helios::Tray> tray = std::make_unique<helios::Tray>("HeliosView Window Demo");
+    window.popup = menu.get();
 
-    // Signal/slot: connect lambdas directly, no Window subclassing
-    window.resized.connect([](int32_t w, int32_t h) {
-        std::printf("[win] resize %d x %d\n", w, h);
-    });
+    if (tray->valid()) {
+        /* Attach the menu to the tray instead of popping it up from rightClicked:
+         * that is the only portable way (on Linux the menu is exported over DBus,
+         * on macOS it becomes the NSStatusItem menu). */
+        tray->setMenu(*menu);
+        tray->leftClicked.connect([] { std::printf("[tray] left click\n"); });
+        tray->leftDoubleClicked.connect([&window] {
+            std::printf("[tray] double click -> show\n");
+            window.showNormal();
+            window.focus();
+        });
+        tray->rightClicked.connect([&window] {
+            std::printf("[tray] right click -> menu\n");
+            window.showNormal();
+        });
+        tray->notify("HeliosView", "Tray balloon: the demo is still running", helios::NotifyIcon::Info);
+    } else {
+        std::printf("[tray] no notification area available; running without a tray icon\n");
+    }
 
-    window.keyPressed.connect([&](helios::KeyCode key) {
-        std::printf("[win] key down: %d\n", static_cast<int>(key));
-        switch (key) {
-        case helios::KeyCode::Escape:
-            window.close();
-            break;
-        case helios::KeyCode::F1:
-            window.toggleMaximize();
-            break;
-        case helios::KeyCode::F2:
-            window.minimize();
-            break;
-        case helios::KeyCode::F3:
-            window.restore();
-            break;
-        case helios::KeyCode::F4:
-            window.setResizable(window.state() != helios::ShowState::Maximized);
-            break;
-        case helios::KeyCode::F5:
-            window.setFullscreen(!window.isFullscreen());
-            break;
-        case helios::KeyCode::F6:
-            window.flash(); /* background-task-finished hint */
-            break;
-        case helios::KeyCode::F7:
-            window.setEnabled(!window.isEnabled()); /* modal lock */
-            break;
-        default:
-            break;
-        }
-    });
-
-    window.focused.connect([] { std::printf("[win] focus gained\n"); });
-    window.blurred.connect([] { std::printf("[win] focus lost\n"); });
-    window.moved.connect([](int32_t x, int32_t y) {
-        std::printf("[win] moved to %d, %d\n", x, y);
-    });
-    window.sizing.connect([](int32_t w, int32_t h) {
-        std::printf("[win] sizing %d x %d\n", w, h);
-    });
-    window.enabledChanged.connect([](bool on) {
-        std::printf("[win] enabled = %d\n", on);
-    });
-    std::printf("[win] dpi = %u\n", window.dpi());
-
-    window.mouseMoved.connect([](int32_t x, int32_t y) {
-        std::printf("[win] mouse move: %d, %d\n", x, y);
-
-    });
-
-    window.mouseButtonPressed.connect([&](int32_t x, int32_t y, helios::MouseButton button) {
-        std::printf("[win] mouse button %d down at %d, %d\n",
-                    static_cast<int>(button), x, y);
-        menu.show(window.nativeHandle());
-
-    });
-
-    window.closeRequested.connect([&window] {
-        std::printf("[win] close requested -> closing\n");
-        window.close();  // close button does NOT auto-close; must call close() here
-    });
-
+    std::printf("[demo] Esc closes the focused window (the demo ends with the last one) | "
+                "F1 maximize | F2 minimize | F3 restore | F4 resizable | F5 fullscreen | "
+                "F6 topmost | F7 opacity | F8 flash | F9/F10 taskbar progress | F11 Mica | "
+                "F12 rename | right-click = popup menu | tray/tray-menu = quit\n");
     return app.exec();
 }

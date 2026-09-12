@@ -70,9 +70,11 @@ std::thread worker([app] {
 | session end | `heliosview_set_session_end_callback` / `System::setSessionEndCallback` (save-on-shutdown) |
 | backdrop & dark mode (Win11) | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS bridge | `heliosview_webview_*` / `WebViewWindow` + `bindJson` auto-binding |
+| WebView right-click | `heliosview_webview_set_context_menu` + `..._set_context_menu_callback` / `setContextMenuEnabled` + `contextMenuGate` (one switch for the engine's menu, plus page/native interception) |
 | tray icon + menu | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
 | dialogs | folder/file pickers, message box (`Dialogs.h`) |
-| system helpers | clipboard, open-URL, show-in-folder (`System.h`) |
+| system helpers | clipboard, open-URL, show-in-folder, run-program, standard folders, OS info (`System.h`) |
+| global hotkeys | `heliosview_hotkey_register` / `System::hotkeyRegister` (fire while unfocused) |
 | notifications (toasts) | `heliosview_notification_*` / `Notification.h` (any thread) |
 | message loop, `std::execution` scheduler | `heliosview_run` / `App` |
 | async + HTTP client | `Async` (asio thread pool: timers, sockets) / `http::Client` (keep-alive connection pool, TLS) |
@@ -145,13 +147,13 @@ DLLs and demos land in `build/bin/` together, so no `PATH` setup is needed.
 
 | demo | file | shows |
 | --- | --- | --- |
-| `HeliosViewDemo` | `examples/main.cpp` | **WebView master demo**: every feature driven by sliders + text inputs |
-| `HeliosViewWindowDemo` | `examples/window_demo.cpp` | basic window + signal/slot + tray + menu |
-| `HeliosViewAppDemo` | `examples/app_demo.cpp` | `Window` subclassing, window styles, member slots, window APIs |
-| `HeliosViewSystemDemo` | `examples/system_demo.cpp` | dialogs, clipboard, toasts, taskbar progress, tray balloon |
-| `HeliosViewWebViewDemo` | `examples/webview_demo.cpp` | **WebView + `bindJson` auto-binding** |
-| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | navigation events, local folder mapping, folder dialog |
-| `HeliosViewCDemo` | `examples/c_demo.c` | **pure C** consumer |
+| `HeliosViewDemo` | `examples/main.cpp` | **the master demo**: a WebView page drives every feature through `bindJson` + `broadcast` (read this one first) |
+| `HeliosViewWebViewDemo` | `examples/webview_demo.cpp` | the JS ↔ native bridge on its own: typed DTOs, member-function handlers, `subscribeJson`, Async pool + HTTP from a handler |
+| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | navigation events + the veto gate, `mapLocalFolder`/`localUrl`, a native dialog called from the page |
+| `HeliosViewWindowDemo` | `examples/window_demo.cpp` | windows: styles/flags, state APIs, signals (member slots *and* lambdas), menu bar + popup menu, tray |
+| `HeliosViewSystemDemo` | `examples/system_demo.cpp` | OS integration: file dialogs, clipboard, toasts, global hotkey, standard folders, session end |
+| `HeliosViewAsyncHttpDemo` | `examples/async_http_demo.cpp` | console (no window): the `Async` pool (schedulers, timers, sockets) + the pooled `http::Client` |
+| `HeliosViewCDemo` | `examples/c_demo.c` | **pure C**: the C API end to end (window, loop, tray, menu, dialog) |
 
 ---
 
@@ -383,10 +385,11 @@ the app can save state; returning non-zero vetoes the shutdown.
 **This is the core of the library.** `WebViewWindow` is a `Window` subclass
 that embeds a WebView2 browser; `createWebView()` attaches it (initialization
 is asynchronous, navigation requests made meanwhile are queued). On top of it,
-**`bindJson<Args...>`** is the star feature: each of the JS call's arguments is
-deserialized into the corresponding `Args` type (Boost.JSON), the handler runs as
-a detached `std::execution::task<Resp>` coroutine, and the result is serialized
-back to resolve the JS `Promise`:
+**`bindJson`** is the star feature: each of the JS call's arguments is
+deserialized into the corresponding parameter type (Boost.JSON), the handler runs
+as a detached `std::execution::task<Resp>` coroutine, and the result is serialized
+back to resolve the JS `Promise`. The parameter types are **deduced from the
+handler**, so the explicit `bindJson<Args...>` list is optional:
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
@@ -402,8 +405,20 @@ int main()
     window->show();
     window->createWebView();
 
-    window->bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<int> {
+    window->bindJson("add", [](AddReq req) -> std::execution::task<int> {
         co_return req.a + req.b;
+    });
+
+    window->bindJson<AddReq>("add2", [](AddReq req) -> std::execution::task<int> {  // explicit, same thing
+        co_return req.a + req.b;
+    });
+
+    window->bindJson("sum", [](int a, int b) -> std::execution::task<int> {  // several arguments
+        co_return a + b;
+    });
+
+    window->bindJson("ping", []() -> std::execution::task<bool> {  // no arguments
+        co_return true;
     });
 
     window->navigateHtml(
@@ -420,8 +435,29 @@ int main()
 }
 ```
 
+**How the deduction works.** `bindJson` reads the parameter types off the
+handler's own signature (`&Fn::operator()` for a lambda/functor, the function
+type for a free function, the member pointer for the member-function overload)
+and decays them to values (`const Req` → `Req`), so the JS argument is
+deserialized with `value_to<Req>`. It needs a **single non-template signature**:
+a generic lambda (`[](auto req) { ... }`), an overloaded/templated `operator()`,
+or a `std::function` has none, so those must spell the types out
+(`bindJson<AddReq>(name, handler)`), and a clear `static_assert` says so.
+`subscribeJson` deduces its single `Req` the same way from a
+`(Req) -> void` callback (the callback must take exactly one parameter).
+
+Handlers take their parameters **by value**: the handler is a *lazy*
+`std::execution::task` whose body only starts once the sender is started, so the
+argument deserialized from the JS call is already destroyed by then and a
+reference parameter would dangle. The deduced form therefore rejects a
+by-reference parameter with a `static_assert` (`write [](Req req) instead of
+[](const Req& req)`); the explicit `bindJson<Req>` form keeps its historical
+behavior. `subscribeJson` callbacks are plain synchronous calls, so they may
+take their value by value or by reference.
+
 `bindJson` / `subscribeJson` also accept a **member function** (pass the object
-pointer and the member pointer). The bridge shim exposes
+pointer and the member pointer; the parameter types come from the member's
+signature when omitted). The bridge shim exposes
 `window.helios.call(name, ...)` → `Promise` and a **bidirectional
 `BroadcastChannel`** (`broadcast` native→JS, `subscribe` JS→native). Every
 bridge name must be a C identifier `[A-Za-z_][A-Za-z0-9_]*`; the library's
@@ -449,10 +485,35 @@ native chrome, each available on `WebViewWindow` (C++: `setStatusBarEnabled`,
 
 - **Status bar** — the hovered-link URL hint at the bottom-left; **disabled by
   default**, re-enable with `setStatusBarEnabled(true)`.
-- **Right-click context menu** — the WebView2 default menu (copy / paste /
-  inspect); enabled by default, disable with `setContextMenuEnabled(false)`
-  (suppressed via the `ContextMenuRequested` event; requires WebView2 runtime
-  ≥ 100).
+- **Right-click** — one switch decides whether the engine's own menu (copy/paste,
+  save image, inspect) may open, and the application can intercept a click from two
+  independent sides — the page, or native code:
+
+  ```cpp
+  win.setContextMenuEnabled(false);   // never let the engine's menu open (true = default)
+
+  // Native interception: consulted for every right click; true keeps the engine's
+  // menu closed for that click, false falls through to the switch. What to show is
+  // the app's business - here a helios::Menu popped at the cursor.
+  win.contextMenuGate = [&win, &menu](const helios::ContextMenuInfo& info) {
+      if (info.has(helios::ContextMenuTarget::Editable))
+          return false;               // e.g. let the engine offer paste/spell check
+      // The gate runs inside the engine's event dispatch and a popup runs a modal
+      // loop: intercept now, show ours on the next UI turn.
+      helios::App::instance()->postTask([&] { menu.show(win.nativeHandle()); });
+      return true;
+  };
+  ```
+
+  The page is the other door: its DOM `contextmenu` event fires either way, so
+  `preventDefault()` plus an HTML menu is the fully portable answer (and the only
+  one where the engine has no native hook). `ContextMenuInfo` carries the target
+  flags (`Link`, `Image`, `Media`, `Selection`, `Editable`, `Page`), the link
+  URL/text, the selected text, the page URL and the position; which fields are
+  filled is up to the engine (empty = it cannot report it), so treat the struct as
+  best-effort. `setContextMenuEnabled(false)` returns a negative error
+  (`HELIOSVIEW_ERROR_UNSUPPORTED`) where the engine cannot suppress its menu — e.g.
+  a WebView2 runtime older than 100 — so the app can fall back to the page route.
 - **DevTools** — F12 / right-click Inspect; enabled by default, disable with
   `setDevToolsEnabled(false)` (disabling closes an already-open DevTools
   window).

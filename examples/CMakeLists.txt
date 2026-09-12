@@ -19,27 +19,26 @@ if(NOT TARGET HeliosView::Core)
     find_package(HeliosView REQUIRED)
 endif()
 
-add_executable(HeliosViewDemo main.cpp)
+# One executable per topic - see the demo table in README.md. Each file's header
+# comment states what it demonstrates and how to drive it.
+add_executable(HeliosViewDemo main.cpp)                         # WebView master demo: every feature via the JS bridge
 target_link_libraries(HeliosViewDemo PRIVATE HeliosView::Core )
 
-add_executable(HeliosViewWindowDemo window_demo.cpp)
-target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewAppDemo app_demo.cpp)
-target_link_libraries(HeliosViewAppDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewSystemDemo system_demo.cpp)
-target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
-
-# Console demo: Async pool (timers/sockets) + HttpClient (http/https GET, POST).
-add_executable(HeliosViewAsyncHttpDemo async_http_demo.cpp)
-target_link_libraries(HeliosViewAsyncHttpDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewWebViewDemo webview_demo.cpp)
+add_executable(HeliosViewWebViewDemo webview_demo.cpp)          # the JS <-> native bridge (bindJson / subscribeJson)
 target_link_libraries(HeliosViewWebViewDemo PRIVATE HeliosView::Core)
 
-add_executable(HeliosViewWebViewEventsDemo webview_events_demo.cpp)
+add_executable(HeliosViewWebViewEventsDemo webview_events_demo.cpp)  # navigation events, local assets, native dialogs
 target_link_libraries(HeliosViewWebViewEventsDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewWindowDemo window_demo.cpp)            # windows, styles, signals, menus, tray
+target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewSystemDemo system_demo.cpp)            # OS integration: dialogs, hotkeys, toasts, info
+target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
+
+# Console demo (no window): Async pool (timers/sockets) + HttpClient (http/https GET, POST).
+add_executable(HeliosViewAsyncHttpDemo async_http_demo.cpp)
+target_link_libraries(HeliosViewAsyncHttpDemo PRIVATE HeliosView::Core)
 
 # Pure-C consumer: proves the C API header compiles as C99 and links cleanly.
 # HeliosView::HeliosView is the namespaced target in both build modes (alias in

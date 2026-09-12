@@ -1,4 +1,4 @@
-﻿// HeliosView - portable stub backend.
+// HeliosView - portable stub backend.
 //
 // Built on platforms that have no real backend yet (see the else() branch in
 // src/CMakeLists.txt). Every feature reports HELIOSVIEW_ERROR_UNSUPPORTED (-4)
@@ -595,9 +595,19 @@ int heliosview_webview_set_status_bar(heliosview_webview_t*, int)
 {
     return HV_STUB_UNSUPPORTED;
 }
-int heliosview_webview_set_context_menu(heliosview_webview_t*, int)
+int heliosview_webview_set_context_menu(heliosview_webview_t*, int enabled)
 {
-    return HV_STUB_UNSUPPORTED;
+    /* The engine's own menu is what such a backend already shows; suppressing it
+     * needs an interception hook this engine does not offer, so the app learns it
+     * has to draw its menu in the page instead. */
+    return enabled ? 0 : HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_set_context_menu_callback(heliosview_webview_t*, heliosview_webview_context_menu_cb,
+                                                 void*, heliosview_webview_userdata_dtor)
+{
+    /* Accepted and never invoked: the switch call above is where a port reports
+     * whether it can deliver right-click requests. */
+    return 0;
 }
 int heliosview_webview_set_devtools(heliosview_webview_t*, int)
 {

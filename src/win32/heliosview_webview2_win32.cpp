@@ -103,9 +103,14 @@ struct heliosview_webview {
      * default, toggleable at runtime via heliosview_webview_set_status_bar. */
     bool status_bar_enabled = false;
 
-    /* WebView2 default right-click context menu; on by default, toggleable at
-     * runtime via heliosview_webview_set_context_menu. */
+    /* Right-click: whether the engine's own menu may open (on by default,
+     * toggleable via heliosview_webview_set_context_menu) plus the optional
+     * interception callback consulted for every right click - returning non-zero
+     * from it keeps the engine's menu closed for that click. */
     bool context_menu_enabled = true;
+    heliosview_webview_context_menu_cb context_menu_cb = nullptr;
+    void* context_menu_userdata = nullptr;
+    heliosview_webview_userdata_dtor context_menu_dtor = nullptr;
     EventRegistrationToken context_menu_token{}; /* ContextMenuRequested handler (ICoreWebView2_11) */
 
     /* WebView2 DevTools access (F12 / right-click Inspect); on by default,
@@ -431,6 +436,104 @@ using try_suspend_completed_handler =
     hv_callback<ICoreWebView2TrySuspendCompletedHandler, HRESULT, BOOL>;
 using window_close_requested_handler =
     hv_callback<ICoreWebView2WindowCloseRequestedEventHandler, ICoreWebView2*, IUnknown*>;
+
+/* Backing storage for heliosview_context_menu_info_t's strings: the C struct
+ * points into it, so it must outlive the callback that receives the struct. */
+struct hv_context_menu_strings {
+    std::string link_url;
+    std::string link_text;
+    std::string selection_text;
+    std::string page_url;
+};
+
+/* Copy one WebView2 wide string into `dst` and free the COM allocation. Empty on
+ * failure (the C API reports "" rather than NULL). */
+static void hv_take_wide(LPWSTR raw, std::string& dst)
+{
+    if (!raw)
+        return;
+    dst = wide_to_utf8(raw);
+    CoTaskMemFree(raw);
+}
+
+/* Translate a ContextMenuRequested into the C-facing info (target bits + the
+ * strings in `strings`). A missing/unknown target yields an all-zero info, which
+ * the callback reads as "nothing specific was hit". */
+static void hv_fill_context_menu_info(ICoreWebView2ContextMenuRequestedEventArgs* args,
+                                      heliosview_context_menu_info_t* out,
+                                      hv_context_menu_strings& strings)
+{
+    if (!args || !out)
+        return;
+
+    POINT location{};
+    if (SUCCEEDED(args->get_Location(&location))) {
+        out->x = location.x;
+        out->y = location.y;
+    }
+
+    Microsoft::WRL::ComPtr<ICoreWebView2ContextMenuTarget> target;
+    if (FAILED(args->get_ContextMenuTarget(&target)) || !target)
+        return;
+
+    COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND kind = COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_PAGE;
+    target->get_Kind(&kind);
+    BOOL editable = FALSE, has_link = FALSE, has_selection = FALSE;
+    target->get_IsEditable(&editable);
+    target->get_HasLinkUri(&has_link);
+    target->get_HasSelection(&has_selection);
+
+    uint32_t bits = 0;
+    switch (kind) {
+    case COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_PAGE:
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_PAGE;
+        break;
+    case COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_IMAGE:
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_IMAGE;
+        break;
+    case COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_AUDIO:
+    case COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_VIDEO:
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_MEDIA;
+        break;
+    case COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_SELECTED_TEXT:
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_SELECTION;
+        break;
+    default:
+        break;
+    }
+    if (has_link)
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_LINK;
+    if (has_selection)
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_SELECTION;
+    if (editable)
+        bits |= HELIOSVIEW_CONTEXT_MENU_TARGET_EDITABLE;
+    out->target = bits;
+
+    if (has_link) {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(target->get_LinkUri(&raw)))
+            hv_take_wide(raw, strings.link_url);
+        BOOL has_text = FALSE;
+        target->get_HasLinkText(&has_text);
+        if (has_text && SUCCEEDED(target->get_LinkText(&raw)))
+            hv_take_wide(raw, strings.link_text);
+    }
+    if (has_selection) {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(target->get_SelectionText(&raw)))
+            hv_take_wide(raw, strings.selection_text);
+    }
+    {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(target->get_PageUri(&raw)))
+            hv_take_wide(raw, strings.page_url);
+    }
+
+    out->link_url = strings.link_url.c_str();
+    out->link_text = strings.link_text.c_str();
+    out->selection_text = strings.selection_text.c_str();
+    out->page_url = strings.page_url.c_str();
+}
 
 /* Apply a low-footprint suspend (TrySuspend) on the UI thread; the core must
  * be initialized. callback/userdata deliver the async completion (may be NULL). */
@@ -1147,16 +1250,27 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
     if (SUCCEEDED(webview->controller.As(&controller2)))
         controller2->put_DefaultBackgroundColor(webview->background_color);
 
-    /* Default right-click context menu: an always-registered handler suppresses
-     * it (put_Handled) while the app turned it off via
-     * heliosview_webview_set_context_menu. Requires ICoreWebView2_11 (SDK
-     * 1.0.1418.22+, runtime 100+); on older runtimes the toggle has no effect
-     * and the menu always shows. */
+    /* Right-click: one always-registered handler answers two independent questions
+     * - does the application intercept this click (context_menu_cb), and may the
+     * engine's own menu open (context_menu_enabled)? Requires ICoreWebView2_11
+     * (SDK 1.0.1418.22+, runtime 100+); on older runtimes neither the switch nor
+     * the callback has any effect and the engine's menu always shows. */
     Microsoft::WRL::ComPtr<ICoreWebView2_11> webview11;
     if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview11)))) {
         auto* ctx_handler = hv::hv_alloc<context_menu_requested_handler>(
             [webview](ICoreWebView2*, ICoreWebView2ContextMenuRequestedEventArgs* args) -> HRESULT {
-                if (!webview->context_menu_enabled)
+                bool intercepted = false;
+                if (webview->context_menu_cb) {
+                    /* The info strings must outlive the callback, so the struct
+                     * points into this frame's storage. */
+                    hv_context_menu_strings strings;
+                    heliosview_context_menu_info_t info{};
+                    hv_fill_context_menu_info(args, &info, strings);
+                    intercepted = webview->context_menu_cb(webview, &info,
+                                                           webview->context_menu_userdata) != 0;
+                }
+                /* Intercepted, or nothing may open: the engine's menu stays closed. */
+                if (intercepted || !webview->context_menu_enabled)
                     args->put_Handled(TRUE);
                 return S_OK;
             });
@@ -1387,6 +1501,9 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
         if (SUCCEEDED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview11))))
             webview11->remove_ContextMenuRequested(webview->context_menu_token);
     }
+    if (webview->context_menu_dtor)
+        webview->context_menu_dtor(webview->context_menu_userdata);
+    webview->context_menu_dtor = nullptr;
     for (const auto& [name, binding] : webview->bindings)
         if (binding.dtor)
             binding.dtor(binding.userdata);
@@ -1776,8 +1893,36 @@ int heliosview_webview_set_context_menu(heliosview_webview_t* webview, int enabl
     if (GetCurrentThreadId() != webview->ui_thread)
         return hv_fail(-1, "webview API called from a non-UI thread");
     webview->context_menu_enabled = enabled != 0;
-    /* No WebView2 call needed: the always-registered ContextMenuRequested
-     * handler consults the flag whenever the menu is about to open. */
+    /* No WebView2 call needed: the always-registered ContextMenuRequested handler
+     * consults the flag whenever the menu is about to open. Suppressing needs
+     * ICoreWebView2_11 (runtime 100+): report that once the core is up so the app
+     * can fall back to a menu drawn in the page (before init the check is
+     * deferred; the handler then finds no interface and the engine menu shows). */
+    if (webview->context_menu_enabled)
+        return 0;
+    if (webview->webview) {
+        Microsoft::WRL::ComPtr<ICoreWebView2_11> webview11;
+        if (FAILED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview11))))
+            return hv_fail(-4, "this WebView2 runtime cannot suppress the context menu (needs 100+)");
+    }
+    return 0;
+}
+
+int heliosview_webview_set_context_menu_callback(heliosview_webview_t* webview,
+                                                 heliosview_webview_context_menu_cb callback,
+                                                 void* userdata,
+                                                 heliosview_webview_userdata_dtor dtor)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    /* the callback table is owned by the UI thread */
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (webview->context_menu_dtor)
+        webview->context_menu_dtor(webview->context_menu_userdata); /* replacing an existing callback */
+    webview->context_menu_cb = callback;
+    webview->context_menu_userdata = userdata;
+    webview->context_menu_dtor = dtor;
     return 0;
 }
 

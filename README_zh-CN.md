@@ -55,9 +55,11 @@ std::thread worker([app] {
 | 会话结束 | `heliosview_set_session_end_callback` / `System::setSessionEndCallback`（关机保存） |
 | 背景材质与深色模式（Win11） | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
 | WebView + JS 桥 | `heliosview_webview_*` / `WebViewWindow` + `bindJson` 自动绑定 |
+| WebView 右键 | `heliosview_webview_set_context_menu` + `..._set_context_menu_callback` / `setContextMenuEnabled` + `contextMenuGate`（一个开关控制引擎菜单，页面与原生两个拦截点） |
 | 托盘 + 菜单 | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
 | 对话框 | 文件夹/文件选择、消息框（`Dialogs.h`） |
-| 系统辅助 | 剪贴板、打开 URL、资源管理器定位（`System.h`） |
+| 系统辅助 | 剪贴板、打开 URL、资源管理器定位、启动进程、标准目录、系统信息（`System.h`） |
+| 全局热键 | `heliosview_hotkey_register` / `System::hotkeyRegister`（应用失焦也会触发） |
 | 通知（toast） | `heliosview_notification_*` / `Notification.h`（任意线程） |
 | 消息循环、`std::execution` scheduler | `heliosview_run` / `App` |
 | 异步 + HTTP 客户端 | `Async`（asio 线程池：定时器、socket）/ `http::Client`（keep-alive 连接池、TLS） |
@@ -110,13 +112,13 @@ DLL 和 demo 一起落在 `build/bin/`，无需配置 `PATH`。
 
 | demo | 文件 | 演示内容 |
 | --- | --- | --- |
-| `HeliosViewDemo` | `examples/main.cpp` | **WebView 总演示**：滑块 + 输入框驱动全部功能 |
-| `HeliosViewWindowDemo` | `examples/window_demo.cpp` | 基础窗口 + 信号/槽 + 托盘 + 菜单 |
-| `HeliosViewAppDemo` | `examples/app_demo.cpp` | `Window` 子类化、窗口样式、成员函数槽、窗口 API |
-| `HeliosViewSystemDemo` | `examples/system_demo.cpp` | 对话框、剪贴板、toast、任务栏进度、托盘气泡 |
-| `HeliosViewWebViewDemo` | `examples/webview_demo.cpp` | **WebView + `bindJson` 自动绑定** |
-| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | 导航事件、本地文件夹映射、文件夹对话框 |
-| `HeliosViewCDemo` | `examples/c_demo.c` | **纯 C** 消费者 |
+| `HeliosViewDemo` | `examples/main.cpp` | **总演示**：一个 WebView 页面通过 `bindJson` + `broadcast` 驱动全部功能（先看这个） |
+| `HeliosViewWebViewDemo` | `examples/webview_demo.cpp` | 专注 JS ↔ 原生桥：类型化 DTO、成员函数处理器、`subscribeJson`、在处理器里用 Async 池 + HTTP |
+| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | 导航事件与否决门、`mapLocalFolder`/`localUrl`、页面调用原生对话框 |
+| `HeliosViewWindowDemo` | `examples/window_demo.cpp` | 窗口：样式/标志、状态 API、信号（成员函数槽 + lambda 两种写法）、菜单栏 + 弹出菜单、托盘 |
+| `HeliosViewSystemDemo` | `examples/system_demo.cpp` | 系统集成：文件对话框、剪贴板、toast、全局热键、标准目录、会话结束 |
+| `HeliosViewAsyncHttpDemo` | `examples/async_http_demo.cpp` | 控制台（无窗口）：`Async` 线程池（调度器、定时器、socket）+ 连接池 `http::Client` |
+| `HeliosViewCDemo` | `examples/c_demo.c` | **纯 C**：C API 全流程（窗口、事件循环、托盘、菜单、对话框） |
 
 ---
 
@@ -270,7 +272,7 @@ win->createWebView();
 
 ### 4. WebView —— 核心：JS ↔ 原生桥接
 
-**这是库的核心。** `WebViewWindow` 是嵌入了 WebView2 浏览器的 `Window` 子类；`createWebView()` 负责挂载（初始化是异步的，期间的导航请求会被排队）。在它之上，**`bindJson<Args...>`** 是主打特性：JS 调用的每个参数都被反序列化为对应的 `Args` 类型（Boost.JSON），处理器以分离的 `std::execution::task<Resp>` 协程运行，结果再序列化回去 resolve 对应的 JS `Promise`：
+**这是库的核心。** `WebViewWindow` 是嵌入了 WebView2 浏览器的 `Window` 子类；`createWebView()` 负责挂载（初始化是异步的，期间的导航请求会被排队）。在它之上，**`bindJson`** 是主打特性：JS 调用的每个参数都被反序列化为对应的参数类型（Boost.JSON），处理器以分离的 `std::execution::task<Resp>` 协程运行，结果再序列化回去 resolve 对应的 JS `Promise`。参数类型**从处理器自身推导**，显式的 `bindJson<Args...>` 列表可以省略：
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
@@ -286,8 +288,20 @@ int main()
     window->show();
     window->createWebView();
 
-    window->bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<int> {
+    window->bindJson("add", [](AddReq req) -> std::execution::task<int> {
         co_return req.a + req.b;
+    });
+
+    window->bindJson<AddReq>("add2", [](AddReq req) -> std::execution::task<int> {  // 显式写法，等价
+        co_return req.a + req.b;
+    });
+
+    window->bindJson("sum", [](int a, int b) -> std::execution::task<int> {  // 多个参数
+        co_return a + b;
+    });
+
+    window->bindJson("ping", []() -> std::execution::task<bool> {  // 无参数
+        co_return true;
     });
 
     window->navigateHtml(
@@ -304,7 +318,11 @@ int main()
 }
 ```
 
-`bindJson` / `subscribeJson` 也接受**成员函数**（传入对象指针和成员指针）。桥接 shim 暴露 `window.helios.call(name, ...)` → `Promise` 和**双向 `BroadcastChannel`**（`broadcast` 原生→JS，`subscribe` JS→原生）。所有桥接名字必须是 C 标识符 `[A-Za-z_][A-Za-z0-9_]*`；库的内置桥使用 **`__hv.` 前缀名**（`__hv.control` / `__hv.state` / `__hv.drag`，供注入的组件调用）——它们含有点号、**不是合法标识符**，应用无法绑定或订阅，永远遮蔽不了内置组件。
+**推导规则。** `bindJson` 直接读取处理器自身的签名（lambda / 仿函数取 `&Fn::operator()`，自由函数取函数类型，成员函数重载取成员指针），并把参数类型退化（decay）为值类型（`const Req` → `Req`），JS 参数按 `value_to<Req>` 反序列化。推导要求处理器有**唯一的非模板签名**：泛型 lambda（`[](auto req) { ... }`）、重载 / 模板化的 `operator()`、`std::function` 都没有唯一签名，这类情况必须显式写出 `bindJson<AddReq>(name, handler)`，否则会触发一条明确的 `static_assert` 报错。`subscribeJson` 同样能从 `(Req) -> void` 回调推导唯一的 `Req`（回调必须恰好有一个参数）。
+
+处理器参数请**按值接收**：处理器是**惰性**的 `std::execution::task`，协程体要等 sender 被 start 之后才运行，那时从 JS 参数反序列化出来的对象早已析构，引用参数会悬空。因此推导路径会用 `static_assert` 拒绝引用参数（提示改写为 `[](Req req)` 而不是 `[](const Req& req)`）；显式 `bindJson<Req>` 写法保留原有行为。而 `subscribeJson` 回调是同步调用，按值或按引用接收都可以。
+
+`bindJson` / `subscribeJson` 也接受**成员函数**（传入对象指针和成员指针；省略类型时从成员函数签名推导）。桥接 shim 暴露 `window.helios.call(name, ...)` → `Promise` 和**双向 `BroadcastChannel`**（`broadcast` 原生→JS，`subscribe` JS→原生）。所有桥接名字必须是 C 标识符 `[A-Za-z_][A-Za-z0-9_]*`；库的内置桥使用 **`__hv.` 前缀名**（`__hv.control` / `__hv.state` / `__hv.drag`，供注入的组件调用）——它们含有点号、**不是合法标识符**，应用无法绑定或订阅，永远遮蔽不了内置组件。
 
 **事件、本地资源与原生对话框**：
 
@@ -315,7 +333,24 @@ int main()
 **WebView2 窗口 chrome 开关** — 调整 WebView 原生外观的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setStatusBarEnabled`、`setContextMenuEnabled`、`setDevToolsEnabled`；C：`heliosview_webview_set_status_bar` / `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`）：
 
 - **状态栏** — 悬停链接时左下角显示的 URL 提示；**默认关闭**，用 `setStatusBarEnabled(true)` 重新开启。
-- **右键菜单** — WebView2 默认右键菜单（复制 / 粘贴 / 检查）；默认开启，用 `setContextMenuEnabled(false)` 关闭（通过 `ContextMenuRequested` 事件抑制；需要 WebView2 运行时 ≥ 100）。
+- **右键** — **一个开关**决定引擎自带的菜单（复制/粘贴/图片另存/检查）弹不弹；拦截则有**两个互相独立的入口**：页面，或原生回调：
+
+  ```cpp
+  win.setContextMenuEnabled(false);   // 引擎菜单永不弹出（默认 true = 允许弹）
+
+  // 原生拦截：每次右键都会被询问；返回 true = 这一次拦截掉（引擎菜单不弹），
+  // false = 落到上面的开关。弹什么完全由应用决定，这里弹一个 helios::Menu（光标处）。
+  win.contextMenuGate = [&win, &menu](const helios::ContextMenuInfo& info) {
+      if (info.has(helios::ContextMenuTarget::Editable))
+          return false;               // 输入框里就让引擎给粘贴/拼写检查
+      // 回调运行在引擎的事件派发里，而弹出菜单会跑模态消息循环：
+      // 先拦截，下一个 UI 空闲轮再弹自己的。
+      helios::App::instance()->postTask([&] { menu.show(win.nativeHandle()); });
+      return true;
+  };
+  ```
+
+  另一个入口是页面：DOM 的 `contextmenu` 事件在任何模式下都会触发，`preventDefault()` + HTML 菜单是**最可移植**的做法（也是引擎没有原生钩子时唯一可行的做法）。`ContextMenuInfo` 带目标标志（`Link` / `Image` / `Media` / `Selection` / `Editable` / `Page`）以及链接 URL/文本、选中文本、页面 URL 和请求坐标；哪些字段有值取决于引擎（空串 = 引擎报不出来），按“尽力而为”使用。引擎无法抑制自己的菜单时（例如 WebView2 运行时低于 100），`setContextMenuEnabled(false)` 返回负数错误（`HELIOSVIEW_ERROR_UNSUPPORTED`），应用据此回退到页面自绘。
 - **DevTools** — F12 / 右键“检查”；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。
 
 每个开关在 WebView 初始化完成后立即生效；初始化期间调用则在其就绪时应用。

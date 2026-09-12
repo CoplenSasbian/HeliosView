@@ -1836,14 +1836,100 @@ HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
 HELIOSVIEW_API int heliosview_webview_set_status_bar(heliosview_webview_t* webview,
                                                      int enabled);
 
-/* Enable (enabled != 0) or disable the WebView2 default right-click context
- * menu (copy/paste/inspect etc.). Enabled by default. Applies immediately
- * when the WebView is initialized; when called during initialization the
- * setting is applied when it becomes ready. On WebView2 runtimes older than
- * 100 the toggle has no effect and the menu always shows. Message-loop
- * thread. 0 = success, negative = error. */
+/* Show (enabled != 0, the default) or suppress the WebView2 default right-click
+ * context menu (copy/paste/inspect etc.). This is the one switch that decides
+ * whether the engine's own menu may open; who else reacts to the right click is
+ * independent of it (see the interception section below).
+ *
+ * Suppressing needs the engine's context-menu hook: turning it off reports
+ * HELIOSVIEW_ERROR_UNSUPPORTED (-4) when the engine has none - [Windows] a WebView2
+ * runtime older than 100 (ICoreWebView2_11), or a backend whose engine exposes no
+ * interception - so the app can fall back to a menu drawn in the page. Turning it
+ * back on always succeeds (it asks for nothing).
+ *
+ * Applies immediately when the WebView is initialized; when called during
+ * initialization the check (and the setting) is applied when it becomes ready.
+ * Message-loop thread. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_webview_set_context_menu(heliosview_webview_t* webview,
                                                        int enabled);
+
+/* ================= Right-click interception =================
+ *
+ * A right click reaches the application through two independent doors - take
+ * either, both, or neither:
+ *
+ *   1. The page: its DOM 'contextmenu' event fires as usual. preventDefault() plus
+ *      a menu drawn in HTML is the fully portable answer, and the only one that
+ *      works on an engine without a native hook.
+ *   2. The native side: the callback below. It is consulted for every right click
+ *      before the engine opens its own menu and reports what the click hit (link,
+ *      selection, image, media, editable field, page, position).
+ *
+ * What happens to the engine's menu is the single switch above:
+ *   - the callback returns non-zero  -> that click is intercepted (the engine's
+ *     menu stays closed, even when it is enabled);
+ *   - the callback returns 0 (or no callback is registered) -> the switch decides:
+ *     enabled opens the engine's menu, suppressed opens nothing.
+ * So one callback can serve some targets itself and leave the rest to the engine.
+ *
+ * The library does not choose what to show: build a heliosview_menu_t, draw the
+ * menu in the page, or show nothing at all. Note that a native menu runs a modal
+ * message loop - open it after returning (e.g. on the next loop turn via
+ * heliosview_post_event / App::postTask), not inside the callback.
+ *
+ * Portable contract: the vocabulary here is engine-neutral (the switch plus a
+ * target bitmask and UTF-8 strings), so another backend maps it onto whatever its
+ * engine offers - WebView2's ContextMenuRequested event, WebKitGTK's
+ * WebView::context-menu signal (a WebKitContextMenu + WebKitHitTestResult), CEF's
+ * CefContextMenuHandler::OnBeforeContextMenu + CefContextMenuParams, or the AppKit
+ * menu overrides on WKWebView - and fills only the fields its engine can report
+ * (the rest stay ""). Engines without a hook report that from the switch call and
+ * never invoke the callback, so the page-drawn route keeps working everywhere.
+ * Message-loop thread. */
+
+/* What the right-click hit. Bit flags, so a click can combine several (e.g. a
+ * link inside an editable field, or an image with a selection). */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_PAGE      0x01u /* plain page content */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_SELECTION 0x02u /* text is selected (see selection_text) */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_LINK      0x04u /* over a link (see link_url) */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_IMAGE     0x08u /* over an image */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_MEDIA     0x10u /* over audio/video content */
+#define HELIOSVIEW_CONTEXT_MENU_TARGET_EDITABLE  0x20u /* inside an editable field */
+
+/* The right-click request handed to the callback.
+ *
+ * Every string is UTF-8, never NULL ("" when the field does not apply) and valid
+ * only for the duration of the callback — copy what you keep. */
+typedef struct heliosview_context_menu_info {
+    uint32_t target;            /* HELIOSVIEW_CONTEXT_MENU_TARGET_* bits */
+    int32_t x;                  /* request position relative to the WebView's
+                                 * top-left corner (the same space the WebView
+                                 * bounds use); a native menu opened afterwards pops
+                                 * at the current cursor anyway */
+    int32_t y;
+    const char* link_url;       /* the link under the cursor ("" when none) */
+    const char* link_text;      /* that link's text ("" when none) */
+    const char* selection_text; /* the selected text ("" when none) */
+    const char* page_url;       /* the document's URL ("" when unknown) */
+} heliosview_context_menu_info_t;
+
+/* The right-click callback. Runs on the message-loop thread, just before the
+ * engine would open its own menu. Return non-zero to intercept this click (the
+ * engine's menu stays closed); return 0 to fall through to
+ * heliosview_webview_set_context_menu. */
+typedef int (*heliosview_webview_context_menu_cb)(heliosview_webview_t* webview,
+                                                  const heliosview_context_menu_info_t* info,
+                                                  void* userdata);
+
+/* Register the interception callback (replacing any previous one and running its
+ * dtor). Pass NULL to clear it. Registering always succeeds: on an engine without a
+ * context-menu hook the callback is simply never invoked (the switch call is where
+ * such a port reports that). UI-thread call. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_context_menu_callback(
+    heliosview_webview_t* webview,
+    heliosview_webview_context_menu_cb callback,
+    void* userdata,
+    heliosview_webview_userdata_dtor dtor);
 
 /* Enable (enabled != 0) or disable WebView2 DevTools (F12, right-click
  * Inspect). When disabled, DevTools cannot be opened and an already-open

@@ -37,6 +37,43 @@ inline std::string webViewEngineVersion()
     return buf;
 }
 
+/* ---------- right-click interception (see WebViewWindow::contextMenuGate) ---------- */
+
+// What a right-click hit (bit flags: a link inside an editable field combines two).
+enum class ContextMenuTarget : uint32_t {
+    Page = HELIOSVIEW_CONTEXT_MENU_TARGET_PAGE,
+    Selection = HELIOSVIEW_CONTEXT_MENU_TARGET_SELECTION,
+    Link = HELIOSVIEW_CONTEXT_MENU_TARGET_LINK,
+    Image = HELIOSVIEW_CONTEXT_MENU_TARGET_IMAGE,
+    Media = HELIOSVIEW_CONTEXT_MENU_TARGET_MEDIA,
+    Editable = HELIOSVIEW_CONTEXT_MENU_TARGET_EDITABLE,
+};
+
+inline constexpr ContextMenuTarget operator|(ContextMenuTarget a, ContextMenuTarget b)
+{
+    return static_cast<ContextMenuTarget>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline constexpr uint32_t toUint(ContextMenuTarget flags)
+{
+    return static_cast<uint32_t>(flags);
+}
+
+// The right-click request handed to WebViewWindow::contextMenuGate. Strings are
+// UTF-8 and empty when the field does not apply.
+struct ContextMenuInfo {
+    ContextMenuTarget target{};  // what was hit
+    int32_t x = 0;               // request position relative to the WebView's top-left
+    int32_t y = 0;               // (a native menu pops at the cursor anyway)
+    std::string linkUrl;         // the link under the cursor
+    std::string linkText;        // that link's text
+    std::string selectionText;   // the selected text
+    std::string pageUrl;         // the document's URL
+
+    // Did the click hit `flag`? e.g. info.has(ContextMenuTarget::Link)
+    bool has(ContextMenuTarget flag) const { return (toUint(target) & toUint(flag)) != 0; }
+};
+
 class WebViewWindow : public Window {
 public:
     // Construct a window (see Window's constructor); the WebView is created
@@ -244,14 +281,38 @@ public:
         return heliosview_webview_set_status_bar(m_webview, enabled ? 1 : 0);
     }
 
-    // Enable (enabled) or disable the WebView2 default right-click context
-    // menu (copy/paste/inspect etc.). Enabled by default. On WebView2 runtimes
-    // older than 100 the toggle has no effect. Returns 0 = success,
-    // negative = error.
+    // Show (enabled, the default) or suppress the WebView2 default right-click
+    // context menu (copy/paste/inspect etc.). This is the one switch that decides
+    // whether the engine's own menu may open; who else reacts to the right click is
+    // independent of it (contextMenuGate below, or the page's own 'contextmenu'
+    // event). Suppressing needs the engine's context-menu hook: turning it off
+    // returns a negative error (HELIOSVIEW_ERROR_UNSUPPORTED) when the engine has
+    // none (e.g. a WebView2 runtime older than 100), so the app can fall back to a
+    // menu drawn in the page; turning it back on always succeeds.
+    // Returns 0 = success, negative = error.
     int setContextMenuEnabled(bool enabled)
     {
         return heliosview_webview_set_context_menu(m_webview, enabled ? 1 : 0);
     }
+
+    // The native interception point: consulted for every right click before the
+    // engine opens its own menu, with what the click hit (ContextMenuInfo: target
+    // flags, link/selection/page URLs, position). Return true to intercept that
+    // click - the engine's menu stays closed, whatever setContextMenuEnabled() says
+    // - or false to fall through to the switch, so one gate can serve some targets
+    // itself and leave the rest to the engine.
+    //
+    // The library does not choose what to show: build a helios::Menu (menu.show()
+    // pops at the cursor, i.e. where the click happened), let the page draw one, or
+    // show nothing. Runs on the UI thread. A popup menu runs a modal message loop,
+    // and this callback runs inside the engine's own event dispatch, so suppress
+    // now and open yours on the next UI turn instead of re-entering the engine:
+    //     win.contextMenuGate = [&](const ContextMenuInfo& info) {
+    //         if (info.has(ContextMenuTarget::Editable)) return false;
+    //         App::instance()->postTask([&] { menu.show(win.nativeHandle()); });
+    //         return true;
+    //     };
+    std::function<bool(const ContextMenuInfo&)> contextMenuGate;
 
     // Enable (enabled) or disable WebView2 DevTools (F12, right-click Inspect).
     // When disabled, DevTools cannot be opened and an already-open DevTools
@@ -340,18 +401,24 @@ public:
     // parses the JS call's argument array into the Args... types, runs handler(Args...)
     // as a detached std::execution::task, and resolves the Promise with the serialized
     // Resp (or rejects it with the error). Requires Boost.JSON; include WebViewJson.h
-    // before calling. Example:
-    //   win.bindJson<int, int>("add", [](int a, int b) -> std::execution::task<int> {
-    //       co_return a + b;
-    //   });
+    // before calling.
+    //
+    // Args... may be omitted: it is then deduced from the handler's own parameter types
+    // (decayed to values), which requires a single non-template signature — a lambda, a
+    // functor with one operator(), or a free function. A generic lambda / std::function
+    // has to spell the types out. Examples:
+    //   win.bindJson("add", [](int a, int b) -> std::execution::task<int> { co_return a + b; });
+    //   win.bindJson<AddReq>("add", [](AddReq req) -> std::execution::task<int> { ... }); // explicit
+    //   win.bindJson("tick", []() -> std::execution::task<bool> { co_return true; });     // no args
     template <class... Args, class Fn>
     void bindJson(const char* name, Fn&& handler);
 
     // Member-function overload of bindJson: bind a member function of `obj` (usually
     // `this`) whose signature is `Sender (Obj::*)(Args...)` and returns a sender (e.g.
     // std::execution::task<Resp>). `obj` is captured by pointer and must outlive the
-    // binding. Example:
-    //   win.bindJson<int, int>("add", this, &MyClass::add);
+    // binding. Args... is deduced from the member pointer when omitted. Examples:
+    //   win.bindJson("repeat", this, &MyClass::repeat);          // deduced from the signature
+    //   win.bindJson<RepeatReq>("repeat", this, &MyClass::repeat); // explicit
     template <class... Args, class Obj, class MFPtr>
     void bindJson(const char* name, Obj* obj, MFPtr method);
 
@@ -410,16 +477,22 @@ public:
     // Boost.JSON auto-subscription (declared here, defined in <HeliosViewCore/WebViewJson.h>):
     // the page's BroadcastChannel(name).postMessage(data) is deserialized into a Req DTO and
     // passed to callback(Req) on the UI thread; the callback returns void. Requires
-    // Boost.JSON; include WebViewJson.h before calling. Example:
-    //   win.subscribeJson<StatusReq>("status", [](StatusReq req) { ... });
-    template <class Req, class Fn>
+    // Boost.JSON; include WebViewJson.h before calling.
+    //
+    // Req defaults to void = "deduce it from the callback", which then must take exactly
+    // one parameter (a generic lambda / std::function has to spell it out). Examples:
+    //   win.subscribeJson("status", [](StatusReq req) { ... });          // deduced
+    //   win.subscribeJson<StatusReq>("status", [](StatusReq req) { ... }); // explicit
+    template <class Req = void, class Fn>
     void subscribeJson(const char* name, Fn&& callback);
 
     // Member-function overload of subscribeJson: subscribe a member function of `obj`
     // (usually `this`) with signature `void (Obj::*)(Req)`. `obj` is captured by pointer
-    // and must outlive the subscription. Example:
-    //   win.subscribeJson<StatusReq>("status", this, &MyClass::onStatus);
-    template <class Req, class Obj, class MFPtr>
+    // and must outlive the subscription. Req is deduced from the member pointer when
+    // omitted. Examples:
+    //   win.subscribeJson("status", this, &MyClass::onStatus);           // deduced
+    //   win.subscribeJson<StatusReq>("status", this, &MyClass::onStatus); // explicit
+    template <class Req = void, class Obj, class MFPtr>
     void subscribeJson(const char* name, Obj* obj, MFPtr method);
 
     // Remove the BroadcastChannel(name) subscription (running its dtor). UI-thread call.
@@ -488,6 +561,32 @@ private:
             m_webview,
             [](heliosview_webview_t* wv, const char* title, void* userdata) {
                 static_cast<WebViewWindow*>(userdata)->titleChanged(title ? title : "");
+            },
+            this, nullptr);
+
+        /* right-click: the C layer calls this trampoline for every click. An empty
+         * gate means "not intercepted" (return 0 = the engine's own menu may open,
+         * subject to setContextMenuEnabled). */
+        heliosview_webview_set_context_menu_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const heliosview_context_menu_info_t* info,
+               void* userdata) -> int {
+                auto* self = static_cast<WebViewWindow*>(userdata);
+                if (!self->contextMenuGate || !info)
+                    return 0;
+                ContextMenuInfo ci;
+                ci.target = static_cast<ContextMenuTarget>(info->target);
+                ci.x = info->x;
+                ci.y = info->y;
+                ci.linkUrl = info->link_url ? info->link_url : "";
+                ci.linkText = info->link_text ? info->link_text : "";
+                ci.selectionText = info->selection_text ? info->selection_text : "";
+                ci.pageUrl = info->page_url ? info->page_url : "";
+                try {
+                    return self->contextMenuGate(ci) ? 1 : 0;
+                } catch (...) {
+                    return 0; /* never let a gate's exception cross the C boundary */
+                }
             },
             this, nullptr);
     }

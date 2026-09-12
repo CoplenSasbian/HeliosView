@@ -34,13 +34,13 @@ Extract the zip and launch any executable in `bin\` — the DLLs sit next to the
 exes, so no `PATH` setup is needed:
 
 ```
-bin\HeliosViewDemo.exe          # WebView master demo (every feature)
-bin\HeliosViewWindowDemo.exe    # basic window + signals + tray + menu
-bin\HeliosViewAppDemo.exe       # Window subclassing / styles
-bin\HeliosViewSystemDemo.exe    # dialogs, clipboard, toasts, taskbar
-bin\HeliosViewWebViewDemo.exe   # WebView + bindJson auto-binding
-bin\HeliosViewWebViewEventsDemo.exe
-bin\HeliosViewCDemo.exe         # pure C consumer
+bin\HeliosViewDemo.exe           # master demo: a WebView page drives every feature
+bin\HeliosViewWebViewDemo.exe    # the JS <-> native bridge (bindJson / subscribeJson)
+bin\HeliosViewWebViewEventsDemo.exe  # navigation events, local assets, native dialogs
+bin\HeliosViewWindowDemo.exe     # windows, styles, signals, menus, tray
+bin\HeliosViewSystemDemo.exe     # dialogs, clipboard, toasts, global hotkey, info
+bin\HeliosViewAsyncHttpDemo.exe  # console: Async pool + pooled HttpClient
+bin\HeliosViewCDemo.exe          # pure C consumer
 ```
 
 ## Use from C
@@ -159,13 +159,13 @@ CMake 包配置和示例源码。
 解压后直接运行 `bin\` 里的 exe 即可——DLL 与 exe 同目录，无需配置 PATH：
 
 ```
-bin\HeliosViewDemo.exe          # WebView 综合演示（全部功能）
-bin\HeliosViewWindowDemo.exe    # 基础窗口 + 信号槽 + 托盘 + 菜单
-bin\HeliosViewAppDemo.exe       # Window 子类化 / 窗口样式
-bin\HeliosViewSystemDemo.exe    # 对话框、剪贴板、通知、任务栏
-bin\HeliosViewWebViewDemo.exe   # WebView + bindJson 自动绑定
-bin\HeliosViewWebViewEventsDemo.exe
-bin\HeliosViewCDemo.exe         # 纯 C 消费者
+bin\HeliosViewDemo.exe           # 总演示：WebView 页面驱动全部功能
+bin\HeliosViewWebViewDemo.exe    # JS <-> 原生桥（bindJson / subscribeJson）
+bin\HeliosViewWebViewEventsDemo.exe  # 导航事件、本地资源、原生对话框
+bin\HeliosViewWindowDemo.exe     # 窗口、样式、信号、菜单、托盘
+bin\HeliosViewSystemDemo.exe     # 对话框、剪贴板、toast、全局热键、系统信息
+bin\HeliosViewAsyncHttpDemo.exe  # 控制台：Async 线程池 + 连接池 HttpClient
+bin\HeliosViewCDemo.exe          # 纯 C 消费者
 ```
 
 ## C 用法
