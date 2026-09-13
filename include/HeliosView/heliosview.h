@@ -1433,10 +1433,11 @@ HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_wind
  * before initialization completes (usually a few milliseconds).
  *
  * Portability: the API is engine-neutral (Windows: WebView2; macOS: WKWebView;
- * Linux: WebKitGTK). Navigation, HTML loading, script evaluation, the JS bridge
- * (bind/resolve/reject/subscribe/broadcast), navigation callbacks, opaque
- * background colors, local-folder mapping and insets map to every engine. Where
- * the engines disagree, the library flattens instead of leaking: debugging is
+ * Linux: WebKitGTK). Navigation, HTML loading, script evaluation, injected
+ * document-start scripts, the JS bridge (bind/resolve/reject/subscribe/broadcast),
+ * navigation callbacks, opaque background colors, page zoom, the cookie store,
+ * local-folder mapping, insets and the native-handle accessor map to every engine.
+ * Where the engines disagree, the library flattens instead of leaking: debugging is
  * one switch on every platform (see heliosview_webview_set_devtools), an engine's
  * own browser shortcuts are forced off wherever the engine has them, and
  * capabilities only one engine offers are not exposed at all. A function an
@@ -1539,6 +1540,32 @@ HELIOSVIEW_API heliosview_webview_t* heliosview_webview_create(heliosview_window
 
 /* Destroy the WebView (must be called before destroying the parent window) */
 HELIOSVIEW_API void heliosview_webview_destroy(heliosview_webview_t* webview);
+
+/* The engine object behind the WebView - a native escape hatch, so an app that
+ * needs something the C API does not cover is not blocked by the library. The
+ * pointer types are the platform's own:
+ *
+ *   kind         Windows                 macOS          Linux
+ *   WINDOW       HWND (the parent)       NSWindow*      GtkWindow*
+ *   WIDGET       HWND (the parent)       NSView*        GtkWidget*
+ *   CONTROLLER   ICoreWebView2Controller* WKWebView*    WebKitWebView*
+ *
+ * (On Windows the WebView2 lives inside the parent HWND, so WINDOW and WIDGET
+ * are the same handle and the engine object is the controller - ask it for
+ * get_CoreWebView2. On WebKitGTK the widget and the engine are the same object.)
+ *
+ * The handle is borrowed: the library keeps owning it, and it stays valid only
+ * while the WebView exists, on the message-loop/UI thread. NULL is returned for
+ * an unknown kind, an uninitialized WebView (CONTROLLER), or a destroyed one.
+ * No error code - a NULL handle is the answer. Message-loop thread. */
+typedef enum heliosview_webview_handle_kind {
+    HELIOSVIEW_WEBVIEW_HANDLE_WINDOW = 0,     /* the window hosting the WebView */
+    HELIOSVIEW_WEBVIEW_HANDLE_WIDGET = 1,     /* the WebView as a native view */
+    HELIOSVIEW_WEBVIEW_HANDLE_CONTROLLER = 2  /* the engine's own browser object */
+} heliosview_webview_handle_kind_t;
+
+HELIOSVIEW_API void* heliosview_webview_native_handle(heliosview_webview_t* webview,
+                                                      heliosview_webview_handle_kind_t kind);
 
 /* Navigate to a URL (queued if initialization is not complete) */
 HELIOSVIEW_API int heliosview_webview_navigate(heliosview_webview_t* webview, const char* url);
@@ -1724,6 +1751,29 @@ HELIOSVIEW_API int heliosview_webview_eval(heliosview_webview_t* webview, const 
 HELIOSVIEW_API int heliosview_webview_eval_async(heliosview_webview_t* webview, const char* script,
                                                  heliosview_webview_eval_cb callback, void* userdata);
 
+/* ================= Injected scripts (document start) =================
+ *
+ * Scripts that run in every document before the page's own scripts do - the
+ * place for a bridge shim, a polyfill, or an app-wide `window.__CONFIG`. They
+ * are stored on the WebView, so they also apply to pages loaded later and
+ * survive a queue-until-ready creation (they are registered as soon as the core
+ * is up, before any queued navigation).
+ *
+ * One world on every platform: WebView2 has no isolated world, so an injected
+ * script shares the page's global scope - do not rely on hiding anything from
+ * the page (WKWebView's WKContentWorld and WebKitGTK's script worlds exist, but
+ * offering them only there would make the same call behave differently per
+ * platform - exactly what the library avoids).
+ *
+ * Message-loop thread. 0 = success, negative = error. */
+HELIOSVIEW_API int heliosview_webview_add_init_script(heliosview_webview_t* webview,
+                                                      const char* script);
+
+/* Remove every injected script (registered by add_init_script); scripts already
+ * run in the current document are unaffected. Message-loop thread. 0 = success,
+ * negative = error. */
+HELIOSVIEW_API int heliosview_webview_clear_init_scripts(heliosview_webview_t* webview);
+
 /* Broadcast a JSON value to the JS page's BroadcastChannel(name) instances; the
  * page receives it as a standard 'message' event. UI-thread call. Same
  * stale-instance guard as resolve: returns -3 when the WebView was already
@@ -1849,6 +1899,25 @@ HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
                                                  int32_t top, int32_t right,
                                                  int32_t bottom, int32_t left);
 
+/* ================= Page zoom =================
+ *
+ * The page's zoom factor: 1.0 = 100% (the default), 1.5 = 150%, 0.5 = 50%.
+ * It scales the page content, not the window, and the engine keeps it across
+ * navigations. Per platform: WebView2 ICoreWebView2Controller::put_ZoomFactor,
+ * WebKitGTK webkit_web_view_set_zoom_level, macOS WKWebView.pageZoom
+ * (macOS 11+; older macOS returns HELIOSVIEW_ERROR_UNSUPPORTED).
+ *
+ * The value is stored on the WebView, so a call made during initialization is
+ * applied when the core becomes ready (a queued navigation keeps it too).
+ * Message-loop thread. 0 = success, negative = error. A factor <= 0 is
+ * rejected with HELIOSVIEW_ERROR_INVALID_ARGUMENT (-2). */
+HELIOSVIEW_API int heliosview_webview_set_zoom(heliosview_webview_t* webview, double factor);
+
+/* Read the current zoom factor (1.0 = 100%) into out_factor; before the core is
+ * ready this reports the value that will be applied. 0 = success,
+ * negative = error. */
+HELIOSVIEW_API int heliosview_webview_zoom(heliosview_webview_t* webview, double* out_factor);
+
 /* Show (enabled != 0, the default) or suppress the WebView2 default right-click
  * context menu (copy/paste/inspect etc.). This is the one switch that decides
  * whether the engine's own menu may open; who else reacts to the right click is
@@ -1972,6 +2041,66 @@ HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview
  * or the WebView is not initialized yet. Message-loop thread. 0 = success,
  * negative = error. */
 HELIOSVIEW_API int heliosview_webview_open_devtools(heliosview_webview_t* webview);
+
+/* ================= Cookie store =================
+ *
+ * The WebView's own cookie jar (the WebView2 user-data folder / WebKit data
+ * store), not the HTTP client's: logins the page performs land here, and these
+ * calls are how an app reads them, seeds them, or clears them. Every call is
+ * asynchronous; the callback runs on the message-loop thread. Per platform:
+ * WebView2 ICoreWebView2CookieManager, macOS WKHTTPCookieStore, WebKitGTK
+ * WebKitCookieManager (all public, all three platforms).
+ *
+ * The `url` scopes the operation: "" or NULL means "every cookie in the store"
+ * for get_cookies, and the library-wide default for delete_cookie. */
+typedef struct heliosview_webview_cookie {
+    const char* name;         /* never NULL */
+    const char* value;        /* never NULL ("" for a valueless cookie) */
+    const char* domain;       /* never NULL ("" when the engine reports none) */
+    const char* path;         /* never NULL ("" when the engine reports none) */
+    int is_secure;
+    int is_http_only;
+    int is_session;           /* 1 = session cookie (expires_unix is then 0) */
+    double expires_unix;      /* seconds since the Unix epoch; 0 = session */
+} heliosview_webview_cookie_t;
+
+/* Completion of get_cookies: the array and every string in it are owned by the
+ * library and valid only for the duration of the call - copy what you keep.
+ * error != 0 means the array is empty. */
+typedef void (*heliosview_webview_cookies_cb)(int error,
+                                              const heliosview_webview_cookie_t* cookies,
+                                              size_t count, void* userdata);
+
+/* Completion of a set / delete / clear: error is 0 when the store accepted it. */
+typedef void (*heliosview_webview_cookie_op_cb)(int error, void* userdata);
+
+/* Read the cookies matching url ("" / NULL = all of them).
+ * 0 = success (the request was accepted), negative = error. */
+HELIOSVIEW_API int heliosview_webview_get_cookies(heliosview_webview_t* webview, const char* url,
+                                                  heliosview_webview_cookies_cb callback,
+                                                  void* userdata);
+
+/* Add or update one cookie. `url` is the document URL the cookie belongs to
+ * (its host is the default when cookie->domain is ""); name and value come from
+ * cookie. expires_unix == 0 && is_session == 0 means "keep it for the session".
+ * 0 = success (request accepted), negative = error. */
+HELIOSVIEW_API int heliosview_webview_set_cookie(heliosview_webview_t* webview, const char* url,
+                                                 const heliosview_webview_cookie_t* cookie,
+                                                 heliosview_webview_cookie_op_cb callback,
+                                                 void* userdata);
+
+/* Delete every cookie with this name in url's scope ("" / NULL url = the whole
+ * store). 0 = success (request accepted), negative = error. */
+HELIOSVIEW_API int heliosview_webview_delete_cookie(heliosview_webview_t* webview, const char* name,
+                                                    const char* url,
+                                                    heliosview_webview_cookie_op_cb callback,
+                                                    void* userdata);
+
+/* Delete every cookie in the store (a logout that must not leave a session
+ * behind). 0 = success (request accepted), negative = error. */
+HELIOSVIEW_API int heliosview_webview_clear_cookies(heliosview_webview_t* webview,
+                                                    heliosview_webview_cookie_op_cb callback,
+                                                    void* userdata);
 
 /* ================= Native dialogs =================
  *

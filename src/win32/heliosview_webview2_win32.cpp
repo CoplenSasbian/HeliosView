@@ -121,6 +121,16 @@ struct heliosview_webview {
     heliosview_webview_low_footprint_cb low_footprint_cb = nullptr;
     void* low_footprint_userdata = nullptr;
 
+    /* Injected scripts (document start): the JS text, plus the WebView2 id that
+     * AddScriptToExecuteOnDocumentCreated hands back asynchronously (used to
+     * unregister). Both vectors are append-only, so an index stays valid. */
+    std::vector<std::wstring> init_scripts;
+    std::vector<std::wstring> init_script_ids;
+
+    /* Page zoom (1.0 = 100%), applied when the core becomes ready. */
+    double zoom_factor = 1.0;
+    bool has_zoom = false;
+
     /* WebView2 default background color (COREWEBVIEW2_COLOR: alpha, red,
      * green, blue); applied when the core becomes ready. Default: opaque white. */
     COREWEBVIEW2_COLOR background_color{.A = 255, .R = 255, .G = 255, .B = 255};
@@ -418,6 +428,8 @@ using execute_script_completed_handler =
     hv_callback<ICoreWebView2ExecuteScriptCompletedHandler, HRESULT, LPCWSTR>;
 using try_suspend_completed_handler =
     hv_callback<ICoreWebView2TrySuspendCompletedHandler, HRESULT, BOOL>;
+using get_cookies_completed_handler =
+    hv_callback<ICoreWebView2GetCookiesCompletedHandler, HRESULT, ICoreWebView2CookieList*>;
 using window_close_requested_handler =
     hv_callback<ICoreWebView2WindowCloseRequestedEventHandler, ICoreWebView2*, IUnknown*>;
 
@@ -550,6 +562,82 @@ int hv_webview_apply_low_footprint(heliosview_webview_t* webview, bool enabled,
     handler->Release();
     return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "TrySuspend failed");
 }
+
+/* Register one stored init script with the ready core. The id arrives in the
+ * async completion and is written back so clear_init_scripts can unregister it.
+ * UI thread; the index must be < init_scripts.size(). */
+void hv_webview_register_init_script(heliosview_webview_t* webview, size_t index)
+{
+    auto* handler = hv::hv_alloc<add_script_completed_handler>(
+        [webview, index](HRESULT result, LPCWSTR id) -> HRESULT {
+            if (SUCCEEDED(result) && id && index < webview->init_script_ids.size())
+                webview->init_script_ids[index] = id;
+            return S_OK;
+        });
+    if (!handler)
+        return; /* out of memory: the script stays unregistered */
+    webview->webview->AddScriptToExecuteOnDocumentCreated(webview->init_scripts[index].c_str(),
+                                                          handler);
+    handler->Release();
+}
+
+/* The core's cookie manager (needs ICoreWebView2_2, runtime 88+). */
+HRESULT hv_webview_get_cookie_manager(heliosview_webview_t* webview,
+                                      Microsoft::WRL::ComPtr<ICoreWebView2CookieManager>& out)
+{
+    Microsoft::WRL::ComPtr<ICoreWebView2_2> webview2;
+    const HRESULT hr = webview->webview->QueryInterface(IID_PPV_ARGS(&webview2));
+    if (FAILED(hr))
+        return hr;
+    return webview2->get_CookieManager(&out);
+}
+
+/* Copy one cookie into UTF-8 storage + a heliosview_webview_cookie_t that
+ * points into it. The storage must outlive the caller's callback. */
+void hv_fill_cookie(ICoreWebView2Cookie* cookie,
+                    std::vector<std::string>& storage,
+                    heliosview_webview_cookie_t& out)
+{
+    auto text = [&storage](LPCWSTR value) -> const char* {
+        storage.push_back(wide_to_utf8(value ? value : L""));
+        return storage.back().c_str();
+    };
+    LPWSTR raw = nullptr;
+    if (SUCCEEDED(cookie->get_Name(&raw)) && raw) {
+        out.name = text(raw);
+        CoTaskMemFree(raw);
+    } else {
+        out.name = text(L"");
+    }
+    if (SUCCEEDED(cookie->get_Value(&raw)) && raw) {
+        out.value = text(raw);
+        CoTaskMemFree(raw);
+    } else {
+        out.value = text(L"");
+    }
+    if (SUCCEEDED(cookie->get_Domain(&raw)) && raw) {
+        out.domain = text(raw);
+        CoTaskMemFree(raw);
+    } else {
+        out.domain = text(L"");
+    }
+    if (SUCCEEDED(cookie->get_Path(&raw)) && raw) {
+        out.path = text(raw);
+        CoTaskMemFree(raw);
+    } else {
+        out.path = text(L"");
+    }
+    BOOL flag = FALSE;
+    out.is_secure = SUCCEEDED(cookie->get_IsSecure(&flag)) && flag ? 1 : 0;
+    out.is_http_only = SUCCEEDED(cookie->get_IsHttpOnly(&flag)) && flag ? 1 : 0;
+    out.is_session = SUCCEEDED(cookie->get_IsSession(&flag)) && flag ? 1 : 0;
+    double expires = 0.0;
+    if (!out.is_session && SUCCEEDED(cookie->get_Expires(&expires)))
+        out.expires_unix = expires;
+    else
+        out.expires_unix = 0.0;
+}
+
 
 /* Register the window-close path: a page-initiated close (window.close()) and
  * WebView2's own close request raise the WindowCloseRequested event instead of
@@ -1002,6 +1090,9 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
 {
     webview->controller->put_IsVisible(TRUE);
     webview->controller->put_Bounds(hv_webview_rect(webview));
+    /* page zoom requested before the core was ready */
+    if (webview->has_zoom)
+        webview->controller->put_ZoomFactor(webview->zoom_factor);
 
     /* JS -> native messaging */
     auto* msg_handler = hv::hv_alloc<web_message_received_handler>(
@@ -1082,6 +1173,11 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
     webview->webview->AddScriptToExecuteOnDocumentCreated(
         utf8_to_wide(kWebView2BridgeScript).c_str(), script_handler);
     script_handler->Release();
+
+    /* application init scripts, after the shim (so window.helios is there) and
+     * before the queued navigation loads its first document */
+    for (size_t i = 0; i < webview->init_scripts.size(); ++i)
+        hv_webview_register_init_script(webview, i);
 
     /* navigation completed: report load results to the registered callback */
     auto* nav_handler = hv::hv_alloc<navigation_completed_handler>(
@@ -1490,6 +1586,23 @@ void heliosview_webview_destroy(heliosview_webview_t* webview)
     hv::hv_dealloc(webview);
 }
 
+void* heliosview_webview_native_handle(heliosview_webview_t* webview,
+                                       heliosview_webview_handle_kind_t kind)
+{
+    if (!webview)
+        return nullptr;
+    switch (kind) {
+    case HELIOSVIEW_WEBVIEW_HANDLE_WINDOW:
+    case HELIOSVIEW_WEBVIEW_HANDLE_WIDGET:
+        /* WebView2 renders inside the parent HWND: both kinds are that handle. */
+        return webview->parent;
+    case HELIOSVIEW_WEBVIEW_HANDLE_CONTROLLER:
+        return webview->controller.Get(); /* ICoreWebView2Controller* (get_CoreWebView2 for the view) */
+    default:
+        return nullptr;
+    }
+}
+
 int heliosview_webview_navigate(heliosview_webview_t* webview, const char* url)
 {
     if (!webview || !url)
@@ -1633,6 +1746,38 @@ int heliosview_webview_eval_async(heliosview_webview_t* webview, const char* scr
     const HRESULT hr = webview->webview->ExecuteScript(wscript.c_str(), handler);
     handler->Release();
     return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "ExecuteScript failed");
+}
+
+int heliosview_webview_add_init_script(heliosview_webview_t* webview, const char* script)
+{
+    if (!webview || !script)
+        return hv_fail(-1, "webview or script is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    webview->init_scripts.push_back(utf8_to_wide(script));
+    webview->init_script_ids.emplace_back(); /* filled in by the async completion */
+    if (webview->webview)
+        hv_webview_register_init_script(webview, webview->init_scripts.size() - 1);
+    /* before the core exists the create path registers the stored scripts (in
+     * order, after the shim) as soon as it becomes ready */
+    return 0;
+}
+
+int heliosview_webview_clear_init_scripts(heliosview_webview_t* webview)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (webview->webview) {
+        for (const auto& id : webview->init_script_ids) {
+            if (!id.empty())
+                webview->webview->RemoveScriptToExecuteOnDocumentCreated(id.c_str());
+        }
+    }
+    webview->init_scripts.clear();
+    webview->init_script_ids.clear();
+    return 0;
 }
 
 int heliosview_webview_broadcast(heliosview_webview_t* webview, const char* name, const char* data_json)
@@ -1839,6 +1984,34 @@ int heliosview_webview_set_insets(heliosview_webview_t* webview,
     return 0;
 }
 
+int heliosview_webview_set_zoom(heliosview_webview_t* webview, double factor)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    /* the controller is UI-thread bound */
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (!(factor > 0.0))
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "zoom factor must be > 0");
+    webview->zoom_factor = factor;
+    webview->has_zoom = true;
+    if (auto* controller = webview->controller.Get()) {
+        const HRESULT hr = controller->put_ZoomFactor(factor);
+        if (FAILED(hr))
+            return hv_fail_hresult(hr, "put_ZoomFactor failed");
+    }
+    /* before the core exists the create path applies the stored factor */
+    return 0;
+}
+
+int heliosview_webview_zoom(heliosview_webview_t* webview, double* out_factor)
+{
+    if (!webview || !out_factor)
+        return hv_fail(-1, "webview or out_factor is NULL");
+    *out_factor = webview->zoom_factor;
+    return 0;
+}
+
 int heliosview_webview_set_context_menu(heliosview_webview_t* webview, int enabled)
 {
     if (!webview)
@@ -1913,6 +2086,148 @@ int heliosview_webview_open_devtools(heliosview_webview_t* webview)
     if (FAILED(hr))
         return hv_fail_hresult(hr, "OpenDevToolsWindow failed");
     return 0;
+}
+
+/* "https://host/path" -> "host" ("" when url has no host). Used as the default
+ * cookie domain when the caller did not give one. */
+std::wstring hv_url_host(const char* url)
+{
+    if (!url || !*url)
+        return std::wstring();
+    std::string_view view(url);
+    const size_t scheme = view.find("://");
+    if (scheme == std::string_view::npos)
+        return std::wstring();
+    view.remove_prefix(scheme + 3);
+    const size_t end = view.find_first_of("/?#");
+    if (end != std::string_view::npos)
+        view = view.substr(0, end);
+    /* strip a userinfo@ and a :port */
+    const size_t at = view.rfind('@');
+    if (at != std::string_view::npos)
+        view.remove_prefix(at + 1);
+    if (const size_t colon = view.rfind(':'); colon != std::string_view::npos && view.find(':') == colon)
+        view = view.substr(0, colon);
+    return utf8_to_wide(std::string(view).c_str());
+}
+
+int heliosview_webview_get_cookies(heliosview_webview_t* webview, const char* url,
+                                   heliosview_webview_cookies_cb callback, void* userdata)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (!webview->webview)
+        return hv_fail(-1, "webview not initialized"); /* the callback never fires */
+    Microsoft::WRL::ComPtr<ICoreWebView2CookieManager> manager;
+    const HRESULT hr_manager = hv_webview_get_cookie_manager(webview, manager);
+    if (FAILED(hr_manager))
+        return hv_fail_hresult(hr_manager, "ICoreWebView2CookieManager lookup failed (needs runtime 88+)");
+    const std::wstring uri = url && *url ? utf8_to_wide(url) : std::wstring();
+    auto* handler = hv::hv_alloc<get_cookies_completed_handler>(
+        [callback, userdata](HRESULT result, ICoreWebView2CookieList* list) -> HRESULT {
+            /* The structs point into this frame's storage: valid only for the
+             * duration of the callback (the context-menu contract). */
+            std::vector<std::string> storage;
+            std::vector<heliosview_webview_cookie_t> cookies;
+            if (SUCCEEDED(result) && list) {
+                UINT count = 0;
+                if (SUCCEEDED(list->get_Count(&count))) {
+                    cookies.reserve(count);
+                    for (UINT i = 0; i < count; ++i) {
+                        Microsoft::WRL::ComPtr<ICoreWebView2Cookie> cookie;
+                        if (FAILED(list->GetValueAtIndex(i, &cookie)) || !cookie)
+                            continue;
+                        heliosview_webview_cookie_t entry{};
+                        hv_fill_cookie(cookie.Get(), storage, entry);
+                        cookies.push_back(entry);
+                    }
+                }
+            }
+            if (callback)
+                callback(SUCCEEDED(result) ? 0 : -static_cast<int>(result),
+                         cookies.data(), cookies.size(), userdata);
+            return S_OK;
+        });
+    if (!handler)
+        return hv_fail(-1, "out of memory (callback handler alloc failed)");
+    const HRESULT hr = manager->GetCookies(uri.c_str(), handler);
+    handler->Release();
+    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "GetCookies failed");
+}
+
+int heliosview_webview_set_cookie(heliosview_webview_t* webview, const char* url,
+                                  const heliosview_webview_cookie_t* cookie,
+                                  heliosview_webview_cookie_op_cb callback, void* userdata)
+{
+    if (!webview || !cookie || !cookie->name)
+        return hv_fail(-1, "webview, cookie or cookie->name is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (!webview->webview)
+        return hv_fail(-1, "webview not initialized");
+    Microsoft::WRL::ComPtr<ICoreWebView2CookieManager> manager;
+    const HRESULT hr_manager = hv_webview_get_cookie_manager(webview, manager);
+    if (FAILED(hr_manager))
+        return hv_fail_hresult(hr_manager, "ICoreWebView2CookieManager lookup failed (needs runtime 88+)");
+    std::wstring domain = cookie->domain && *cookie->domain ? utf8_to_wide(cookie->domain) : hv_url_host(url);
+    const std::wstring path = cookie->path && *cookie->path ? utf8_to_wide(cookie->path) : L"/";
+    Microsoft::WRL::ComPtr<ICoreWebView2Cookie> created;
+    HRESULT hr = manager->CreateCookie(utf8_to_wide(cookie->name).c_str(),
+                                       utf8_to_wide(cookie->value ? cookie->value : "").c_str(),
+                                       domain.c_str(), path.c_str(), &created);
+    if (SUCCEEDED(hr) && created) {
+        created->put_IsSecure(cookie->is_secure ? TRUE : FALSE);
+        created->put_IsHttpOnly(cookie->is_http_only ? TRUE : FALSE);
+        /* a cookie without Expires is a session cookie, which is what
+         * is_session / expires_unix <= 0 asks for */
+        if (!cookie->is_session && cookie->expires_unix > 0.0)
+            created->put_Expires(cookie->expires_unix);
+        hr = manager->AddOrUpdateCookie(created.Get());
+    }
+    if (callback)
+        callback(SUCCEEDED(hr) ? 0 : -static_cast<int>(hr), userdata);
+    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "AddOrUpdateCookie failed");
+}
+
+int heliosview_webview_delete_cookie(heliosview_webview_t* webview, const char* name, const char* url,
+                                     heliosview_webview_cookie_op_cb callback, void* userdata)
+{
+    if (!webview || !name)
+        return hv_fail(-1, "webview or name is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (!webview->webview)
+        return hv_fail(-1, "webview not initialized");
+    Microsoft::WRL::ComPtr<ICoreWebView2CookieManager> manager;
+    const HRESULT hr_manager = hv_webview_get_cookie_manager(webview, manager);
+    if (FAILED(hr_manager))
+        return hv_fail_hresult(hr_manager, "ICoreWebView2CookieManager lookup failed (needs runtime 88+)");
+    const std::wstring uri = url && *url ? utf8_to_wide(url) : std::wstring();
+    const HRESULT hr = manager->DeleteCookies(utf8_to_wide(name).c_str(), uri.c_str());
+    if (callback)
+        callback(SUCCEEDED(hr) ? 0 : -static_cast<int>(hr), userdata);
+    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "DeleteCookies failed");
+}
+
+int heliosview_webview_clear_cookies(heliosview_webview_t* webview,
+                                     heliosview_webview_cookie_op_cb callback, void* userdata)
+{
+    if (!webview)
+        return hv_fail(-1, "webview is NULL");
+    if (GetCurrentThreadId() != webview->ui_thread)
+        return hv_fail(-1, "webview API called from a non-UI thread");
+    if (!webview->webview)
+        return hv_fail(-1, "webview not initialized");
+    Microsoft::WRL::ComPtr<ICoreWebView2CookieManager> manager;
+    const HRESULT hr_manager = hv_webview_get_cookie_manager(webview, manager);
+    if (FAILED(hr_manager))
+        return hv_fail_hresult(hr_manager, "ICoreWebView2CookieManager lookup failed (needs runtime 88+)");
+    const HRESULT hr = manager->DeleteAllCookies();
+    if (callback)
+        callback(SUCCEEDED(hr) ? 0 : -static_cast<int>(hr), userdata);
+    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "DeleteAllCookies failed");
 }
 
 int heliosview_webview_set_low_footprint(heliosview_webview_t* webview, int enabled,

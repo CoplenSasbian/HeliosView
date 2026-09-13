@@ -524,6 +524,18 @@ available on `WebViewWindow` (C++: `setContextMenuEnabled`, `setDevToolsEnabled`
   `setLowFootprint(false)` brings it back, and `isLowFootprint()` reports the mode
   the app asked for. What the engine actually does is platform-specific — which is
   exactly why the name is vague (see the table below).
+- **Injected scripts** — `addInitScript(js)` runs JS in every document *before*
+  the page's own scripts do (bridge shims, polyfills, an app-wide
+  `window.__CONFIG`); it lives on the WebView, so later pages get it too, and
+  `clearInitScripts()` removes them. One world on every engine — WebView2 has no
+  isolated world — so do not use it to hide anything from the page.
+- **Page zoom** — `setZoom(1.25)` / `zoom()`; 1.0 = 100%.
+- **Cookies** — `getCookies(url, cb)` / `setCookie(url, cookie, cb)` /
+  `deleteCookie(name, url, cb)` / `clearCookies(cb)`: the WebView's own cookie jar
+  (what a page login leaves behind), all asynchronous on the UI thread. The array
+  handed to the read callback is valid only during that call.
+- **Native escape hatch** — `nativeHandle(kind)` returns the platform object
+  behind the WebView (see the table) for whatever the API does not cover.
 
 Each applies immediately once the WebView is initialized; calls made during
 initialization take effect when it becomes ready.
@@ -545,6 +557,10 @@ browser shortcuts) or not exposed at all. What each platform gives an app:
 | Engine's own status bar (hovered link) | exists in WebView2, kept **off**, no API | none | none |
 | Engine-drawn caption buttons (WebView2 WCO) | exists in WebView2, kept **off**, no API | none | none |
 | `engine_version` | WebView2 Runtime version | the system WebKit version | the WebKitGTK version |
+| Injected scripts (`addInitScript`) | `AddScriptToExecuteOnDocumentCreated` (one world only) | `WKUserScript` (has `WKContentWorld`, not exposed) | `WebKitUserContentManager` script |
+| Page zoom (`setZoom` / `zoom`) | `ICoreWebView2Controller.ZoomFactor` | `pageZoom` (macOS 11+); older → -4 | `webkit_web_view_set_zoom_level` |
+| Cookie store | `ICoreWebView2CookieManager` | `WKHTTPCookieStore`; clear needs `WKWebsiteDataStore` | `WebKitCookieManager`; clear needs `website_data_manager_clear` |
+| Native handle (`nativeHandle`) | `HWND` / `ICoreWebView2Controller*` | `NSWindow*` / `NSView*` / `WKWebView*` | `GtkWindow*` / `GtkWidget*` / `WebKitWebView*` |
 
 Consequences worth knowing:
 

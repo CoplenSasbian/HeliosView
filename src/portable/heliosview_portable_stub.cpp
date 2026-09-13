@@ -499,6 +499,11 @@ void heliosview_webview_destroy(heliosview_webview_t*)
 {
     /* no state to release */
 }
+void* heliosview_webview_native_handle(heliosview_webview_t*, heliosview_webview_handle_kind_t)
+{
+    HV_STUB_UNSUPPORTED;
+    return nullptr;
+}
 int heliosview_webview_navigate(heliosview_webview_t*, const char*)
 {
     return HV_STUB_UNSUPPORTED;
@@ -547,6 +552,14 @@ int heliosview_webview_eval_async(heliosview_webview_t*, const char*, heliosview
 {
     return HV_STUB_UNSUPPORTED;
 }
+int heliosview_webview_add_init_script(heliosview_webview_t*, const char*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_clear_init_scripts(heliosview_webview_t*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
 int heliosview_webview_broadcast(heliosview_webview_t*, const char*, const char*)
 {
     return HV_STUB_UNSUPPORTED;
@@ -587,6 +600,14 @@ int heliosview_webview_set_insets(heliosview_webview_t*, int32_t, int32_t, int32
 {
     return HV_STUB_UNSUPPORTED;
 }
+int heliosview_webview_set_zoom(heliosview_webview_t*, double)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_zoom(heliosview_webview_t*, double*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
 int heliosview_webview_set_context_menu(heliosview_webview_t*, int enabled)
 {
     /* The engine's own menu is what such a backend already shows; suppressing it
@@ -606,6 +627,22 @@ int heliosview_webview_set_devtools(heliosview_webview_t*, int)
     return HV_STUB_UNSUPPORTED;
 }
 int heliosview_webview_open_devtools(heliosview_webview_t*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_get_cookies(heliosview_webview_t*, const char*, heliosview_webview_cookies_cb, void*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_set_cookie(heliosview_webview_t*, const char*, const heliosview_webview_cookie_t*, heliosview_webview_cookie_op_cb, void*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_delete_cookie(heliosview_webview_t*, const char*, const char*, heliosview_webview_cookie_op_cb, void*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_clear_cookies(heliosview_webview_t*, heliosview_webview_cookie_op_cb, void*)
 {
     return HV_STUB_UNSUPPORTED;
 }

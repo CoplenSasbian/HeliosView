@@ -352,6 +352,10 @@ int main()
   另一个入口是页面：DOM 的 `contextmenu` 事件在任何模式下都会触发，`preventDefault()` + HTML 菜单是**最可移植**的做法 —— 而且在 macOS 上是**唯一**的做法，因为 WKWebView 只通过私有 SPI 暴露右键菜单。`ContextMenuInfo` 带目标标志（`Link` / `Image` / `Media` / `Selection` / `Editable` / `Page`）以及链接 URL/文本、选中文本、页面 URL 和请求坐标；哪些字段有值取决于引擎（空串 = 引擎报不出来），按“尽力而为”使用。引擎无法抑制自己的菜单时（WebView2 运行时低于 100，或 macOS），`setContextMenuEnabled(false)` 返回负数错误（`HELIOSVIEW_ERROR_UNSUPPORTED`），应用据此回退到页面自绘。
 - **DevTools** — 引擎自带的 DevTools；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。F12 等浏览器快捷键永远不可用（见下）。用 `openDevTools()`（C：`heliosview_webview_open_devtools`）从代码里打开 DevTools 窗口 —— 也就是“菜单项”那条路。
 - **低占用模式** — `setLowFootprint(true)` 让引擎在页面继续存活的前提下尽量把内存还回来（典型场景：窗口最小化一段时间），`setLowFootprint(false)` 恢复，`isLowFootprint()` 报告应用请求的模式。各平台内部实际做的事不同 —— 名字故意起得含糊，正是因为这个（见下表）。
+- **注入脚本** — `addInitScript(js)` 在每个文档里**先于页面自身的脚本**执行（桥接 shim、polyfill、全局的 `window.__CONFIG`）；它挂在 WebView 上，之后加载的页面同样生效，`clearInitScripts()` 全部移除。三平台**只有一个 world**（WebView2 没有隔离 world），别用它向页面隐藏任何东西。
+- **页面缩放** — `setZoom(1.25)` / `zoom()`，1.0 = 100%。
+- **Cookie** — `getCookies(url, cb)` / `setCookie(url, cookie, cb)` / `deleteCookie(name, url, cb)` / `clearCookies(cb)`：WebView 自己的 cookie 罐（页面登录留下的东西），全部异步、回调在 UI 线程。读回调里的数组**只在这次调用期间有效**。
+- **原生逃生舱** — `nativeHandle(kind)` 返回 WebView 背后的平台对象（见下表），用于覆盖 API 没提供的东西。
 
 每个开关在 WebView 初始化完成后立即生效；初始化期间调用则在其就绪时应用。
 
@@ -368,6 +372,10 @@ int main()
 | 引擎自带的状态栏（悬停链接） | WebView2 有，**固定关闭**且不提供 API | 无 | 无 |
 | 引擎自绘的标题栏按钮（WebView2 WCO） | WebView2 有，**固定关闭**且不提供 API | 无 | 无 |
 | `engine_version` | WebView2 Runtime 版本 | 系统 WebKit 版本 | WebKitGTK 版本 |
+| 注入脚本（`addInitScript`） | `AddScriptToExecuteOnDocumentCreated`（只有主 world） | `WKUserScript`（有 `WKContentWorld`，但库里不暴露） | `WebKitUserContentManager` 脚本 |
+| 页面缩放（`setZoom` / `zoom`） | `ICoreWebView2Controller.ZoomFactor` | `pageZoom`（macOS 11+）；更老 → -4 | `webkit_web_view_set_zoom_level` |
+| Cookie 罐 | `ICoreWebView2CookieManager` | `WKHTTPCookieStore`；清空要 `WKWebsiteDataStore` | `WebKitCookieManager`；清空要 `website_data_manager_clear` |
+| 原生句柄（`nativeHandle`） | `HWND` / `ICoreWebView2Controller*` | `NSWindow*` / `NSView*` / `WKWebView*` | `GtkWindow*` / `GtkWidget*` / `WebKitWebView*` |
 
 几个需要知道的后果：
 

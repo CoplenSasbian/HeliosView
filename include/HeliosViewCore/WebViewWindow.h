@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -163,6 +164,20 @@ public:
         }
     }
 
+    // The engine object behind the WebView — a native escape hatch for whatever the
+    // C++ API does not cover. Windows: WINDOW/WIDGET are the parent HWND, CONTROLLER
+    // is the ICoreWebView2Controller*; macOS: NSWindow* / NSView* / WKWebView*;
+    // Linux: GtkWindow* / GtkWidget* / WebKitWebView*. Borrowed pointer (the library
+    // keeps owning it), valid only while the WebView exists and on the UI thread;
+    // nullptr for an unknown kind or before the core is ready. UI-thread call.
+    // (Window::nativeHandle() — the C window handle — stays available: the using
+    // declaration below keeps the base overload from being hidden by this one.)
+    using Window::nativeHandle;
+    void* nativeHandle(heliosview_webview_handle_kind_t kind) const
+    {
+        return heliosview_webview_native_handle(m_webview, kind);
+    }
+
     // Navigate to a URL (queued automatically if the WebView is still initializing)
     void navigate(const char* url)
     {
@@ -271,6 +286,116 @@ public:
     int webviewSetTransparentBackground(bool transparent)
     {
         return heliosview_webview_set_transparent_background(m_webview, transparent ? 1 : 0);
+    }
+
+    // ---- injected scripts (document start) ----
+
+    // Run `script` in every document before the page's own scripts do — bridge shims,
+    // polyfills, an app-wide window.__CONFIG. It is stored on the WebView, so pages
+    // loaded later get it too, and a call made during initialization is registered
+    // when the core becomes ready (before any queued navigation). One world on every
+    // platform: WebView2 has no isolated world, so the script shares the page's global
+    // scope. Returns 0 = success, negative = error.
+    int addInitScript(const char* script)
+    {
+        return heliosview_webview_add_init_script(m_webview, script);
+    }
+
+    // Remove every injected script (scripts that already ran keep their effects).
+    // Returns 0 = success, negative = error.
+    int clearInitScripts()
+    {
+        return heliosview_webview_clear_init_scripts(m_webview);
+    }
+
+    // ---- page zoom ----
+
+    // Zoom the page content: 1.0 = 100% (the default), 1.5 = 150%. The engine keeps
+    // it across navigations, and a call made during initialization is applied when
+    // the core becomes ready. Returns 0 = success, negative = error.
+    int setZoom(double factor)
+    {
+        return heliosview_webview_set_zoom(m_webview, factor);
+    }
+
+    // Current zoom factor (1.0 = 100%): the applied one once the core is ready, the
+    // one waiting to be applied before that.
+    double zoom() const
+    {
+        double factor = 1.0;
+        heliosview_webview_zoom(m_webview, &factor);
+        return factor;
+    }
+
+    // ---- cookies (the WebView's own jar, not the HTTP client's) ----
+
+    // Completion of a cookie read; the array is valid only during the call.
+    using CookiesFn = std::function<void(int error, const heliosview_webview_cookie_t* cookies,
+                                        size_t count)>;
+    // Completion of a cookie write/delete/clear.
+    using CookieOpFn = std::function<void(int error)>;
+
+    // Read the cookies matching url ("" / nullptr = the whole store). Returns 0 when
+    // the request was accepted, in which case the callback fires exactly once on the
+    // UI thread; negative = the request was rejected and the callback never fires.
+    int getCookies(const char* url, CookiesFn callback)
+    {
+        auto* fn = new CookiesFn(std::move(callback));
+        const int rc = heliosview_webview_get_cookies(m_webview, url, &cookiesTrampoline, fn);
+        if (rc != 0)
+            delete fn;
+        return rc;
+    }
+
+    // Add or update one cookie (cookie->domain "" = the URL's host). Same return and
+    // callback contract as getCookies.
+    int setCookie(const char* url, const heliosview_webview_cookie_t* cookie,
+                  CookieOpFn callback = {})
+    {
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_set_cookie(m_webview, url, cookie, &cookieOpTrampoline, fn);
+        if (rc != 0)
+            delete fn;
+        return rc;
+    }
+
+    // Delete every cookie with this name in url's scope ("" / nullptr = the store).
+    // Same return and callback contract as getCookies.
+    int deleteCookie(const char* name, const char* url, CookieOpFn callback = {})
+    {
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_delete_cookie(m_webview, name, url, &cookieOpTrampoline, fn);
+        if (rc != 0)
+            delete fn;
+        return rc;
+    }
+
+    // Delete every cookie in the store (a logout that must not leave a session
+    // behind). Same return and callback contract as getCookies.
+    int clearCookies(CookieOpFn callback = {})
+    {
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_clear_cookies(m_webview, &cookieOpTrampoline, fn);
+        if (rc != 0)
+            delete fn;
+        return rc;
+    }
+
+    // Plumbing for the std::function overloads above: the C API invokes the trampoline
+    // exactly once per accepted request, and it releases the heap-allocated callback
+    // (the overloads release it themselves when the request was rejected).
+    static void cookiesTrampoline(int error, const heliosview_webview_cookie_t* cookies,
+                                  size_t count, void* userdata)
+    {
+        std::unique_ptr<CookiesFn> fn(static_cast<CookiesFn*>(userdata));
+        if (*fn)
+            (*fn)(error, cookies, count);
+    }
+    static void cookieOpTrampoline(int error, void* userdata)
+    {
+        std::unique_ptr<CookieOpFn> fn(static_cast<CookieOpFn*>(userdata));
+        if (*fn)
+            (*fn)(error);
     }
 
     // Show (enabled, the default) or suppress the engine's default right-click
