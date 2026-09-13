@@ -613,6 +613,14 @@ int heliosview_webview_set_devtools(heliosview_webview_t*, int)
 {
     return HV_STUB_UNSUPPORTED;
 }
+int heliosview_webview_open_devtools(heliosview_webview_t*)
+{
+    return HV_STUB_UNSUPPORTED;
+}
+int heliosview_webview_set_browser_accelerators(heliosview_webview_t*, int)
+{
+    return HV_STUB_UNSUPPORTED;
+}
 int heliosview_webview_set_window_controls_overlay(heliosview_webview_t*, int)
 {
     return HV_STUB_UNSUPPORTED;
