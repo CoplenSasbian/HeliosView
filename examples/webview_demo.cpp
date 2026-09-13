@@ -91,20 +91,14 @@ int main()
     // <helios-window-controls> for the caption buttons (built-in __hv.control /
     // __hv.state — the page draws them, so the state glyph stays in sync).
     //
-    // Alternative: let WebView2 draw the caption buttons instead (Window
-    // Controls Overlay). Opt in with setWindowControlsOverlay(true) + a
-    // matching setWindowControlsBackgroundColor, and REMOVE
-    // <helios-window-controls> from the page. Note: WebView2's overlay only
-    // updates its maximize/restore glyph for state changes it initiates itself
-    // (experimental API limitation) — externally-driven maximizes (Win+Up,
-    // taskbar, snap) leave the glyph stale, which is why the page-drawn
-    // buttons are the demo default.
+    // The caption buttons are always page-drawn: the library does not expose an
+    // engine-side overlay, because only WebView2 has one (and even there its
+    // maximize/restore glyph goes stale for state changes it did not initiate
+    // itself). This is the portable shape across the three target platforms.
     auto window = std::make_shared<helios::WebViewWindow>(
         900, 640, "HeliosView WebView Demo", helios::WindowStyle::Frameless);
     window->show();
     window->createWebView();
-    // window->setWindowControlsOverlay(true); /* WebView2 draws the caption buttons (see comment above) */
-    // window->setWindowControlsBackgroundColor(0x24, 0x24, 0x3A, 255);
 
     /* ---- auto-bound native functions (Boost.JSON deserializes arguments, serializes return values) ---- */
 

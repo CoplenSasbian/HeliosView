@@ -69,7 +69,6 @@ struct heliosview_webview {
     HWND parent = nullptr;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller;
     Microsoft::WRL::ComPtr<ICoreWebView2> webview;
-    Microsoft::WRL::ComPtr<ICoreWebView2ExperimentalWindowControlsOverlay> window_controls_overlay;
     bool creating = false;
     bool ready = false;
     bool has_pending = false;   /* navigation queued before init completes (only the last one runs) */
@@ -99,10 +98,6 @@ struct heliosview_webview {
     std::flat_map<uint64_t, std::pair<heliosview_webview_eval_cb, void*>> pending_evals;
     int32_t inset_top = 0, inset_right = 0, inset_bottom = 0, inset_left = 0;
 
-    /* WebView2 status bar (hovered-link target URL, bottom-left); off by
-     * default, toggleable at runtime via heliosview_webview_set_status_bar. */
-    bool status_bar_enabled = false;
-
     /* Right-click: whether the engine's own menu may open (on by default,
      * toggleable via heliosview_webview_set_context_menu) plus the optional
      * interception callback consulted for every right click - returning non-zero
@@ -113,29 +108,18 @@ struct heliosview_webview {
     heliosview_webview_userdata_dtor context_menu_dtor = nullptr;
     EventRegistrationToken context_menu_token{}; /* ContextMenuRequested handler (ICoreWebView2_11) */
 
-    /* WebView2 DevTools access (F12 / right-click Inspect); on by default,
-     * toggleable at runtime via heliosview_webview_set_devtools. */
+    /* WebView2 DevTools access (right-click Inspect); on by default, toggleable
+     * at runtime via heliosview_webview_set_devtools. F12 and the other browser
+     * shortcuts stay off always (see the create path), and
+     * heliosview_webview_open_devtools is the way in. */
     bool devtools_enabled = true;
 
-    /* WebView2 built-in window controls overlay (min/max/restore/close buttons
-     * drawn over the page's top-right). Off by default: apps that draw their
-     * own title-bar buttons (e.g. the injected <helios-window-controls>
-     * component) leave it off. Toggleable at runtime via
-     * heliosview_webview_set_window_controls_overlay. */
-    bool window_controls_enabled = false;
-
-    /* Window controls overlay background color (alpha, red, green, blue).
-     * Default: fully transparent — the page's own title bar shows through and
-     * the buttons float over it. Set via
-     * heliosview_webview_set_window_controls_background_color. */
-    COREWEBVIEW2_COLOR window_controls_background_color{.A = 0, .R = 0, .G = 0, .B = 0};
-
-    /* low-footprint mode (WebView2 TrySuspend / Resume): requested/applied
-     * state, plus the completion callback of a suspend requested before the
-     * core was ready (applied at ready, after queued navigation/scripts). */
-    bool suspended = false;
-    heliosview_webview_suspend_cb suspend_cb = nullptr;
-    void* suspend_userdata = nullptr;
+    /* low-footprint mode (WebView2 TrySuspend / Resume): the mode the app asked
+     * for, plus the completion callback of a request made before the core was
+     * ready (applied at ready, after queued navigation/scripts). */
+    bool low_footprint = false;
+    heliosview_webview_low_footprint_cb low_footprint_cb = nullptr;
+    void* low_footprint_userdata = nullptr;
 
     /* WebView2 default background color (COREWEBVIEW2_COLOR: alpha, red,
      * green, blue); applied when the core becomes ready. Default: opaque white. */
@@ -535,19 +519,26 @@ static void hv_fill_context_menu_info(ICoreWebView2ContextMenuRequestedEventArgs
     out->page_url = strings.page_url.c_str();
 }
 
-/* Apply a low-footprint suspend (TrySuspend) on the UI thread; the core must
- * be initialized. callback/userdata deliver the async completion (may be NULL). */
-int hv_webview_try_suspend(heliosview_webview_t* webview,
-                           heliosview_webview_suspend_cb callback, void* userdata)
+/* Apply a low-footprint change on the UI thread; the core must be initialized.
+ * Enabling is the async TrySuspend (the engine may decline - callback/userdata
+ * deliver the result, may be NULL); disabling is the synchronous Resume. */
+int hv_webview_apply_low_footprint(heliosview_webview_t* webview, bool enabled,
+                                   heliosview_webview_low_footprint_cb callback, void* userdata)
 {
     Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
     const HRESULT hr_qi = webview->webview->QueryInterface(IID_PPV_ARGS(&webview3));
     if (FAILED(hr_qi))
         return hv_fail_hresult(hr_qi, "QueryInterface(ICoreWebView2_3) failed");
+    if (!enabled) {
+        const HRESULT hr = webview3->Resume();
+        if (FAILED(hr))
+            return hv_fail_hresult(hr, "Resume failed");
+        if (callback)
+            callback(0, 0, userdata); /* not in low-footprint mode any more */
+        return 0;
+    }
     auto* handler = hv::hv_alloc<try_suspend_completed_handler>(
-        [webview, callback, userdata](HRESULT result, BOOL is_suspended) -> HRESULT {
-            /* the tracked state follows the completed attempt */
-            webview->suspended = is_suspended ? true : webview->suspended;
+        [callback, userdata](HRESULT result, BOOL is_suspended) -> HRESULT {
             if (callback)
                 callback(SUCCEEDED(result) ? 0 : -static_cast<int>(result),
                          is_suspended ? 1 : 0, userdata);
@@ -560,44 +551,16 @@ int hv_webview_try_suspend(heliosview_webview_t* webview,
     return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "TrySuspend failed");
 }
 
-/* Enable/disable WebView2's built-in window controls overlay (the min/max/
- * restore/close buttons drawn over the page's top-right). Off by default so
- * apps can draw their own title-bar buttons (e.g. the injected
- * <helios-window-controls> component). Requires the experimental
- * ICoreWebView2Experimental31 interface; returns -1 if the runtime does not
- * support it. UI thread. */
-int hv_webview_apply_window_controls(heliosview_webview_t* webview)
-{
-    if (!webview->window_controls_enabled) {
-        if (webview->window_controls_overlay)
-            webview->window_controls_overlay->put_IsEnabled(FALSE);
-        return 0;
-    }
-    if (!webview->window_controls_overlay) {
-        Microsoft::WRL::ComPtr<ICoreWebView2Experimental31> webview2_31;
-        const HRESULT hr_qi = webview->webview->QueryInterface(IID_PPV_ARGS(&webview2_31));
-        if (FAILED(hr_qi))
-            return hv_fail_hresult(hr_qi, "QueryInterface(ICoreWebView2Experimental31) failed (WCO not supported)"); /* experimental interface unavailable */
-        const HRESULT hr_wco = webview2_31->get_WindowControlsOverlay(&webview->window_controls_overlay);
-        if (FAILED(hr_wco))
-            return hv_fail_hresult(hr_wco, "get_WindowControlsOverlay failed");
-    }
-    webview->window_controls_overlay->put_BackgroundColor(webview->window_controls_background_color);
-    const HRESULT hr_enable = webview->window_controls_overlay->put_IsEnabled(TRUE);
-    return SUCCEEDED(hr_enable) ? 0 : hv_fail_hresult(hr_enable, "put_IsEnabled (window controls overlay) failed");
-}
-
-/* Register the WCO close-button path: WebView2's built-in caption buttons do
- * NOT send WM_CLOSE to the host window — the close button raises the
- * WindowCloseRequested event instead (see the official sample, which closes
- * the app window in this handler). Route it into the standard close pipeline
- * (WM_CLOSE -> WINDOW_CLOSE event) so the app's closeRequested handling stays
- * the single close path. */
+/* Register the window-close path: a page-initiated close (window.close()) and
+ * WebView2's own close request raise the WindowCloseRequested event instead of
+ * sending WM_CLOSE to the host window. Route it into the standard close pipeline
+ * (WM_CLOSE -> WINDOW_CLOSE event) so the app's closeRequested handling stays the
+ * single close path. */
 void hv_bind_window_close_requested(heliosview_webview_t* webview)
 {
     Microsoft::WRL::ComPtr<ICoreWebView2_17> webview17;
     if (FAILED(webview->webview->QueryInterface(IID_PPV_ARGS(&webview17))))
-        return; /* older runtime: no WindowCloseRequested (no WCO close either) */
+        return; /* older runtime: no WindowCloseRequested */
     auto* handler = hv::hv_alloc<window_close_requested_handler>(
         [webview](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
             (void)sender;
@@ -1032,14 +995,13 @@ constexpr int kWebviewDestroyedError = -3;
  * WebView in the parent client area, wires up every handler (bridge,
  * navigation / source / title events, settings, built-in window-control
  * bridge) and applies state that was set before init completed (virtual-host
- * mappings, queued navigation, background color, suspend). Extracted from the
+ * mappings, queued navigation, background color, low-footprint mode). Extracted from the
  * create_ex completion lambdas to keep them flat. */
 
 HRESULT hv_webview_init_core(heliosview_webview_t* webview)
 {
     webview->controller->put_IsVisible(TRUE);
     webview->controller->put_Bounds(hv_webview_rect(webview));
-    hv_webview_apply_window_controls(webview); /* opt-in: draws the built-in caption buttons when enabled */
 
     /* JS -> native messaging */
     auto* msg_handler = hv::hv_alloc<web_message_received_handler>(
@@ -1107,13 +1069,13 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
                 }
             }
             webview->pending_ops.clear();
-            /* a low-footprint suspend requested before init applies as soon as
-             * the core is ready (after the queued navigation/scripts have run) */
-            if (webview->suspended) {
-                hv_webview_try_suspend(webview, webview->suspend_cb,
-                                       webview->suspend_userdata);
-                webview->suspend_cb = nullptr;
-                webview->suspend_userdata = nullptr;
+            /* low-footprint mode requested before init applies as soon as the
+             * core is ready (after the queued navigation/scripts have run) */
+            if (webview->low_footprint) {
+                hv_webview_apply_low_footprint(webview, true, webview->low_footprint_cb,
+                                               webview->low_footprint_userdata);
+                webview->low_footprint_cb = nullptr;
+                webview->low_footprint_userdata = nullptr;
             }
             return S_OK;
         });
@@ -1228,10 +1190,11 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
      * app-region:no-drag. */
     Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(webview->webview->get_Settings(&settings))) {
-        /* The WebView2 status bar shows the hovered link's target URL
-         * bottom-left; off by default, toggleable at runtime via
-         * heliosview_webview_set_status_bar. */
-        settings->put_IsStatusBarEnabled(webview->status_bar_enabled ? TRUE : FALSE);
+        /* The status bar (hovered link's target URL, bottom-left) is never
+         * exposed: it is a WebView2-only affordance, so the library keeps it off
+         * on every platform instead of offering a switch that only works here.
+         * An app that wants one draws it in the page. */
+        settings->put_IsStatusBarEnabled(FALSE);
 
         /* DevTools (F12 / right-click Inspect): off while the app disabled it
          * via heliosview_webview_set_devtools (an open DevTools window closes
@@ -1876,26 +1839,6 @@ int heliosview_webview_set_insets(heliosview_webview_t* webview,
     return 0;
 }
 
-int heliosview_webview_set_status_bar(heliosview_webview_t* webview, int enabled)
-{
-    if (!webview)
-        return hv_fail(-1, "webview is NULL");
-    /* ICoreWebView2Settings is UI-thread bound */
-    if (GetCurrentThreadId() != webview->ui_thread)
-        return hv_fail(-1, "webview API called from a non-UI thread");
-    webview->status_bar_enabled = enabled != 0;
-    /* Settings are only reachable once the core is initialized; the create
-     * path applies the stored value when it becomes ready. */
-    if (webview->webview) {
-        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
-        const HRESULT hr_settings = webview->webview->get_Settings(&settings);
-        if (FAILED(hr_settings))
-            return hv_fail_hresult(hr_settings, "ICoreWebView2Settings lookup failed");
-        settings->put_IsStatusBarEnabled(webview->status_bar_enabled ? TRUE : FALSE);
-    }
-    return 0;
-}
-
 int heliosview_webview_set_context_menu(heliosview_webview_t* webview, int enabled)
 {
     if (!webview)
@@ -1972,82 +1915,34 @@ int heliosview_webview_open_devtools(heliosview_webview_t* webview)
     return 0;
 }
 
-int heliosview_webview_set_window_controls_overlay(heliosview_webview_t* webview, int enabled)
-{
-    if (!webview)
-        return hv_fail(-1, "webview is NULL");
-    if (GetCurrentThreadId() != webview->ui_thread)
-        return hv_fail(-1, "webview API called from a non-UI thread");
-    webview->window_controls_enabled = enabled != 0;
-    if (!webview->controller.Get())
-        return 0; /* applied when the core becomes ready */
-    return hv_webview_apply_window_controls(webview);
-}
-
-int heliosview_webview_set_window_controls_background_color(heliosview_webview_t* webview,
-                                                            uint8_t red, uint8_t green,
-                                                            uint8_t blue, uint8_t alpha)
-{
-    if (!webview)
-        return hv_fail(-1, "webview is NULL");
-    if (GetCurrentThreadId() != webview->ui_thread)
-        return hv_fail(-1, "webview API called from a non-UI thread");
-    /* COREWEBVIEW2_COLOR stores channels as (alpha, red, green, blue) */
-    webview->window_controls_background_color = COREWEBVIEW2_COLOR{alpha, red, green, blue};
-    if (!webview->window_controls_overlay)
-        return 0; /* applied when the overlay is created/enabled */
-    const HRESULT hr = webview->window_controls_overlay->put_BackgroundColor(webview->window_controls_background_color);
-    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "put_BackgroundColor (window controls overlay) failed");
-}
-
-int heliosview_webview_suspend(heliosview_webview_t* webview,
-                               heliosview_webview_suspend_cb callback, void* userdata)
+int heliosview_webview_set_low_footprint(heliosview_webview_t* webview, int enabled,
+                                         heliosview_webview_low_footprint_cb callback, void* userdata)
 {
     if (!webview)
         return hv_fail(-1, "webview is NULL");
     /* the controller is UI-thread bound */
     if (GetCurrentThreadId() != webview->ui_thread)
         return hv_fail(-1, "webview API called from a non-UI thread");
-    webview->suspended = true;
+    webview->low_footprint = enabled != 0;
     if (!webview->webview) {
         /* not initialized yet: record the request (and the completion
          * callback, last one wins); applied when the core becomes ready */
         if (callback) {
-            webview->suspend_cb = callback;
-            webview->suspend_userdata = userdata;
+            webview->low_footprint_cb = callback;
+            webview->low_footprint_userdata = userdata;
         }
         return 0;
     }
-    return hv_webview_try_suspend(webview, callback, userdata);
+    return hv_webview_apply_low_footprint(webview, webview->low_footprint, callback, userdata);
 }
 
-int heliosview_webview_resume(heliosview_webview_t* webview)
+int heliosview_webview_is_low_footprint(heliosview_webview_t* webview, int* out_enabled)
 {
-    if (!webview)
-        return hv_fail(-1, "webview is NULL");
-    if (GetCurrentThreadId() != webview->ui_thread)
-        return hv_fail(-1, "webview API called from a non-UI thread");
-    webview->suspended = false;
-    /* drop a pending pre-init suspend request (and its completion callback) */
-    webview->suspend_cb = nullptr;
-    webview->suspend_userdata = nullptr;
-    if (!webview->webview)
-        return 0; /* nothing initialized yet: nothing to resume */
-    Microsoft::WRL::ComPtr<ICoreWebView2_3> webview3;
-    const HRESULT hr_qi = webview->webview->QueryInterface(IID_PPV_ARGS(&webview3));
-    if (FAILED(hr_qi))
-        return hv_fail_hresult(hr_qi, "QueryInterface(ICoreWebView2_3) failed");
-    const HRESULT hr = webview3->Resume();
-    return SUCCEEDED(hr) ? 0 : hv_fail_hresult(hr, "Resume failed");
-}
-
-int heliosview_webview_is_suspended(heliosview_webview_t* webview, int* out_suspended)
-{
-    if (!webview || !out_suspended)
-        return hv_fail(-1, "webview or out_suspended is NULL");
-    /* tracked state: true from the moment a suspend is requested, confirmed
-     * when the TrySuspend attempt completes; false again after resume() */
-    *out_suspended = webview->suspended ? 1 : 0;
+    if (!webview || !out_enabled)
+        return hv_fail(-1, "webview or out_enabled is NULL");
+    /* the mode the app asked for: whether WebView2 is suspended at this instant
+     * is not observable through its API */
+    *out_enabled = webview->low_footprint ? 1 : 0;
     return 0;
 }
 

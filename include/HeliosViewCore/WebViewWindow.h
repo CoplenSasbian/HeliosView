@@ -223,32 +223,30 @@ public:
 
     // ---- low-footprint mode (webview suspend / resume) ----
 
-    // Suspend the WebView (WebView2 TrySuspend): rendering stops and most of
-    // the browser process's resources are released while the page stays alive —
-    // the low-footprint mode for a hidden/background window. webviewResume()
-    // restores it where it left off. Typical use: webviewSuspend() when the
-    // window is hidden, webviewResume() when it is shown again.
-    // Completion is asynchronous: callback(error, suspended, userdata) fires on
-    // the UI thread (nullptr = fire-and-forget). suspended is 1 if the WebView
-    // actually suspended (TrySuspend can decline, e.g. while audio is playing).
-    // A suspend requested before initialization is recorded and applied when
-    // the core becomes ready.
-    void webviewSuspend(heliosview_webview_suspend_cb callback = nullptr, void* userdata = nullptr)
+    // Low-footprint mode: ask the engine to give back as much as it can while the
+    // page stays alive. Windows applies it immediately (WebView2 TrySuspend /
+    // Resume, and the engine may decline while the WebView is visible or busy);
+    // macOS 14+ makes the engine suspend the WebView on its own once it is
+    // off-window and idle. macOS older than 14 and other engines return a negative
+    // error (HELIOSVIEW_ERROR_UNSUPPORTED). Typical use: on when the window is
+    // hidden/minimized, off when it comes back.
+    // Completion is asynchronous: callback(error, active, userdata) fires on the
+    // UI thread (nullptr = fire-and-forget); active is 1 when the mode is really
+    // in effect. A request made before initialization is recorded and applied
+    // when the core becomes ready. Returns 0 when the request was accepted.
+    int setLowFootprint(bool enabled, heliosview_webview_low_footprint_cb callback = nullptr,
+                        void* userdata = nullptr)
     {
-        heliosview_webview_suspend(m_webview, callback, userdata);
+        return heliosview_webview_set_low_footprint(m_webview, enabled ? 1 : 0, callback, userdata);
     }
 
-    // Resume a suspended WebView (synchronous; no-op if not suspended).
-    // Returns 0 = success.
-    int webviewResume() { return heliosview_webview_resume(m_webview); }
-
-    // Whether the WebView is currently suspended (true once a suspend request
-    // is made/completed; false after webviewResume()).
-    bool webviewIsSuspended() const
+    // Whether low-footprint mode is on: the mode the app asked for, not "is the
+    // engine suspended right now" (no engine can answer that portably).
+    bool isLowFootprint() const
     {
-        int s = 0;
-        heliosview_webview_is_suspended(m_webview, &s);
-        return s != 0;
+        int on = 0;
+        heliosview_webview_is_low_footprint(m_webview, &on);
+        return on != 0;
     }
 
     // ---- webview background color ----
@@ -259,36 +257,31 @@ public:
     // the parent window's own content shows through the WebView (for the
     // desktop to show through, the parent window must itself be transparent,
     // e.g. a layered window). Applies immediately when initialized, otherwise
-    // when it becomes ready. Returns 0 = success.
+    // when it becomes ready. Returns 0 = success; macOS accepts opaque colors
+    // only (alpha < 255 returns HELIOSVIEW_ERROR_UNSUPPORTED).
     int webviewSetBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         return heliosview_webview_set_background_color(m_webview, r, g, b, a);
     }
 
     // Convenience: make the WebView background transparent (true) or restore
-    // the default opaque white (false). Returns 0 = success.
+    // the default opaque white (false). Returns 0 = success;
+    // HELIOSVIEW_ERROR_UNSUPPORTED where the engine cannot do transparency
+    // (macOS).
     int webviewSetTransparentBackground(bool transparent)
     {
         return heliosview_webview_set_transparent_background(m_webview, transparent ? 1 : 0);
     }
 
-    // Show (enabled) or hide the WebView2 status bar, which displays the target
-    // URL of a hovered link at the bottom-left corner of the WebView. Disabled
-    // by default. Applies immediately when initialized; otherwise when it
-    // becomes ready. Returns 0 = success, negative = error.
-    int setStatusBarEnabled(bool enabled)
-    {
-        return heliosview_webview_set_status_bar(m_webview, enabled ? 1 : 0);
-    }
-
-    // Show (enabled, the default) or suppress the WebView2 default right-click
+    // Show (enabled, the default) or suppress the engine's default right-click
     // context menu (copy/paste/inspect etc.). This is the one switch that decides
     // whether the engine's own menu may open; who else reacts to the right click is
     // independent of it (contextMenuGate below, or the page's own 'contextmenu'
     // event). Suppressing needs the engine's context-menu hook: turning it off
     // returns a negative error (HELIOSVIEW_ERROR_UNSUPPORTED) when the engine has
-    // none (e.g. a WebView2 runtime older than 100), so the app can fall back to a
-    // menu drawn in the page; turning it back on always succeeds.
+    // none - a WebView2 runtime older than 100, or macOS (WKWebView exposes no
+    // public context-menu API) - so the app can fall back to a menu drawn in the
+    // page; turning it back on always succeeds.
     // Returns 0 = success, negative = error.
     int setContextMenuEnabled(bool enabled)
     {
@@ -314,7 +307,10 @@ public:
     //     };
     std::function<bool(const ContextMenuInfo&)> contextMenuGate;
 
-    // Enable (enabled) or disable WebView2 DevTools (F12, right-click Inspect).
+    // Enable (enabled) or disable the engine's debugging tools - one switch for
+    // "debugging is allowed" (Windows: WebView2 AreDevToolsEnabled; Linux:
+    // WebKitGTK enable-developer-extras; macOS: WKWebView.isInspectable, 13.3+,
+    // i.e. whether Safari's Develop menu may attach).
     // When disabled, DevTools cannot be opened and an already-open DevTools
     // window is closed. Enabled by default. Returns 0 = success, negative = error.
     int setDevToolsEnabled(bool enabled)
@@ -324,36 +320,14 @@ public:
 
     // Open the DevTools window explicitly (menu / JS bridge). This is the only
     // way in: the library keeps the engine's own browser shortcuts (F12,
-    // Ctrl+Shift+I, ...) unavailable - see the README's platform notes. Fails
-    // (negative) when DevTools are disabled or the WebView is not ready yet, and
-    // on an engine with no public way to open its DevTools window.
+    // Ctrl+Shift+I, ...) unavailable - see the README's platform notes. Windows
+    // and Linux implement it; macOS has no public API for it and returns a
+    // negative error (the inspector is reached from Safari's Develop menu).
+    // Fails (negative) when DevTools are disabled or the WebView is not ready.
     // Returns 0 = success.
     int openDevTools()
     {
         return heliosview_webview_open_devtools(m_webview);
-    }
-
-    // Enable (enabled) or disable WebView2's built-in window controls overlay
-    // (the min/max/restore/close buttons WebView2 draws over the page's
-    // top-right corner). Disabled by default — apps that render their own
-    // title-bar buttons (e.g. the injected <helios-window-controls> component)
-    // leave it off. Applies immediately when initialized; when called during
-    // initialization it is applied when the WebView becomes ready. Requires the
-    // experimental WebView2 interface; on runtimes without it the call returns
-    // negative and has no effect. Returns 0 = success, negative = error.
-    int setWindowControlsOverlay(bool enabled)
-    {
-        return heliosview_webview_set_window_controls_overlay(m_webview, enabled ? 1 : 0);
-    }
-
-    // Set the window controls overlay's background color (r, g, b, a, 0-255).
-    // Default: fully transparent (a = 0) — the page's own title bar shows
-    // through and the buttons float over it. Applies immediately when the
-    // overlay exists; when called before it is enabled the color is applied
-    // when the overlay is created. Returns 0 = success, negative = error.
-    int setWindowControlsBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
-    {
-        return heliosview_webview_set_window_controls_background_color(m_webview, r, g, b, a);
     }
 
     // ---- local resources ----

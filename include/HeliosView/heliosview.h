@@ -1434,11 +1434,14 @@ HELIOSVIEW_API int heliosview_menu_show(heliosview_menu_t* menu, heliosview_wind
  *
  * Portability: the API is engine-neutral (Windows: WebView2; macOS: WKWebView;
  * Linux: WebKitGTK). Navigation, HTML loading, script evaluation, the JS bridge
- * (bind/resolve/reject/subscribe/broadcast), navigation callbacks, background
- * color and transparency, local-folder mapping, insets and the context-menu /
- * DevTools toggles all map to every engine. The few functions that depend on a
- * WebView2-only capability return HELIOSVIEW_ERROR_UNSUPPORTED (-4) elsewhere,
- * with the reason in heliosview_last_error_string; they are marked below.
+ * (bind/resolve/reject/subscribe/broadcast), navigation callbacks, opaque
+ * background colors, local-folder mapping and insets map to every engine. Where
+ * the engines disagree, the library flattens instead of leaking: debugging is
+ * one switch on every platform (see heliosview_webview_set_devtools), an engine's
+ * own browser shortcuts are forced off wherever the engine has them, and
+ * capabilities only one engine offers are not exposed at all. A function an
+ * engine cannot serve returns HELIOSVIEW_ERROR_UNSUPPORTED (-4) with the reason
+ * in heliosview_last_error_string; the README carries the per-platform table.
  * Creation-time options that do not apply to an engine are ignored.
  */
 
@@ -1509,7 +1512,9 @@ typedef struct heliosview_webview_env_opts {
  *             Runtime is not installed; heliosview_webview_create/_ex then fail
  *             with HELIOSVIEW_ERROR_UNSUPPORTED (-4) and the window is left
  *             untouched, so an app can fall back to a non-WebView UI.
- *   macOS     The system WebKit version (part of the OS, always available).
+ *   macOS     The system WebKit version (part of the OS, always available; read
+ *             from the WebKit framework's bundle - WebKit exposes no version
+ *             API of its own).
  *   Linux     The WebKitGTK version, e.g. "2.44.3"; empty = the backend's web
  *             engine library is not present at runtime.
  *   other     Empty (no WebView backend on this platform yet).
@@ -1540,39 +1545,48 @@ HELIOSVIEW_API int heliosview_webview_navigate(heliosview_webview_t* webview, co
 
 HELIOSVIEW_API int heliosview_webview_navigate_html(heliosview_webview_t* webview, const char* html);
 
-/* ================= WebView low-footprint mode (suspend / resume) =================
+/* ================= WebView low-footprint mode =================
  *
- * WebView2 TrySuspend / Resume: suspending stops rendering and releases most of
- * the browser process's resources while the page stays alive; resume() restores
- * it where it left off. The typical use: suspend when the window is hidden (or
- * the app goes to the background), resume when it is shown again.
+ * One switch that asks the engine to give back as much as it can while the page
+ * stays alive (no navigation is lost, no state is reset). "Low footprint" means
+ * something different inside each engine, so the name stays deliberately vague
+ * and the call means the same thing everywhere:
  *
- * [Windows only] — the other engines have no equivalent; these functions return
- * HELIOSVIEW_ERROR_UNSUPPORTED (-4) there (an app that needs the memory back can
- * hide the webview, or destroy and recreate it).
+ *   Windows   WebView2 TrySuspend / Resume: applied immediately, but the engine
+ *             may decline (it does not suspend while the WebView is visible or
+ *             busy, e.g. audio playing) - the callback reports what happened.
+ *   macOS 14+ WKPreferences.inactiveSchedulingPolicy: turning the mode on makes
+ *             the engine suspend the WebView by itself once it is detached from
+ *             the view hierarchy and idle (not loading, no media); turning it off
+ *             restores normal scheduling. Nothing suspends at the moment of the
+ *             call.
+ *   macOS <14, other platforms: no equivalent - returns
+ *             HELIOSVIEW_ERROR_UNSUPPORTED (-4). An app that needs the memory
+ *             back can hide the webview, or destroy and recreate it.
+ *
+ * Typical use: on when the window is hidden or minimized, off when it returns.
  */
 
-/* Completion callback for heliosview_webview_suspend: error is 0 on success,
- * suspended is 1 if the WebView actually suspended (TrySuspend can decline,
- * e.g. while audio is playing). Runs on the UI thread. */
-typedef void (*heliosview_webview_suspend_cb)(int error, int suspended, void* userdata);
+/* Completion callback for heliosview_webview_set_low_footprint: error is 0 on
+ * success; active is 1 when low-footprint mode is actually in effect (Windows:
+ * TrySuspend really suspended the WebView; macOS: the policy is now enabled).
+ * Runs on the UI thread. */
+typedef void (*heliosview_webview_low_footprint_cb)(int error, int active, void* userdata);
 
-/* Suspend the WebView (async; completion via callback, may be NULL for
- * fire-and-forget). A request made before initialization is recorded and
- * applied when the core becomes ready (after any queued navigation/scripts).
- * 0 = success (request accepted), negative = error code. */
-HELIOSVIEW_API int heliosview_webview_suspend(heliosview_webview_t* webview,
-                                              heliosview_webview_suspend_cb callback,
-                                              void* userdata);
+/* Turn low-footprint mode on (enabled != 0) or off (async; completion via
+ * callback, may be NULL for fire-and-forget). A request made before
+ * initialization is recorded and applied when the core becomes ready (after any
+ * queued navigation/scripts). 0 = success (request accepted), negative = error
+ * code. */
+HELIOSVIEW_API int heliosview_webview_set_low_footprint(
+    heliosview_webview_t* webview, int enabled,
+    heliosview_webview_low_footprint_cb callback, void* userdata);
 
-/* Resume a suspended WebView (synchronous; no-op if not suspended).
- * 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_webview_resume(heliosview_webview_t* webview);
-
-/* Read whether the WebView is currently suspended; 1/0 is written to
- * out_suspended. 0 = success, negative = error code. */
-HELIOSVIEW_API int heliosview_webview_is_suspended(heliosview_webview_t* webview,
-                                                   int* out_suspended);
+/* Read whether low-footprint mode is on (1) or off (0) - the mode the app asked
+ * for, not "is the engine suspended at this instant" (no engine can answer that
+ * portably). 1/0 is written to out_enabled. 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_webview_is_low_footprint(heliosview_webview_t* webview,
+                                                       int* out_enabled);
 
 /* ================= WebView background color =================
  *
@@ -1582,6 +1596,12 @@ HELIOSVIEW_API int heliosview_webview_is_suspended(heliosview_webview_t* webview
  * through the WebView (to see the desktop through it, the parent window must
  * itself be transparent, e.g. a layered window). Channels are (red, green,
  * blue, alpha), each 0-255.
+ *
+ *   macOS    Only opaque colors. WKWebView's public API cannot make a WebView
+ *            truly transparent (that needs private API), so an alpha below 255 —
+ *            and heliosview_webview_set_transparent_background(1) — returns
+ *            HELIOSVIEW_ERROR_UNSUPPORTED (-4) there; the RGB color itself is
+ *            accepted (WKWebView.underPageBackgroundColor, macOS 12+).
  */
 
 /* Set the WebView's default background color. Applies immediately when the
@@ -1592,7 +1612,9 @@ HELIOSVIEW_API int heliosview_webview_set_background_color(heliosview_webview_t*
                                                            uint8_t blue, uint8_t alpha);
 
 /* Convenience: make the WebView background transparent (transparent != 0) or
- * restore the default opaque white. 0 = success, negative = error code. */
+ * restore the default opaque white. Returns HELIOSVIEW_ERROR_UNSUPPORTED (-4)
+ * where the engine cannot do transparency (macOS — see above). 0 = success,
+ * negative = error code. */
 HELIOSVIEW_API int heliosview_webview_set_transparent_background(heliosview_webview_t* webview,
                                                                  int transparent);
 
@@ -1827,15 +1849,6 @@ HELIOSVIEW_API int heliosview_webview_set_insets(heliosview_webview_t* webview,
                                                  int32_t top, int32_t right,
                                                  int32_t bottom, int32_t left);
 
-/* Show (enabled != 0) or hide the WebView2 status bar, which displays the
- * target URL of a hovered link at the bottom-left corner of the WebView.
- * Disabled by default. Applies immediately when the WebView is initialized;
- * when called during initialization the setting is applied when it becomes
- * ready. [Windows only] — other engines return -4 (draw one in the page if
- * needed). Message-loop thread. 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_webview_set_status_bar(heliosview_webview_t* webview,
-                                                     int enabled);
-
 /* Show (enabled != 0, the default) or suppress the WebView2 default right-click
  * context menu (copy/paste/inspect etc.). This is the one switch that decides
  * whether the engine's own menu may open; who else reacts to the right click is
@@ -1843,9 +1856,9 @@ HELIOSVIEW_API int heliosview_webview_set_status_bar(heliosview_webview_t* webvi
  *
  * Suppressing needs the engine's context-menu hook: turning it off reports
  * HELIOSVIEW_ERROR_UNSUPPORTED (-4) when the engine has none - [Windows] a WebView2
- * runtime older than 100 (ICoreWebView2_11), or a backend whose engine exposes no
- * interception - so the app can fall back to a menu drawn in the page. Turning it
- * back on always succeeds (it asks for nothing).
+ * runtime older than 100 (ICoreWebView2_11); [macOS] always, because WKWebView
+ * exposes no public context-menu API - so the app can fall back to a menu drawn
+ * in the page. Turning it back on always succeeds (it asks for nothing).
  *
  * Applies immediately when the WebView is initialized; when called during
  * initialization the check (and the setting) is applied when it becomes ready.
@@ -1881,10 +1894,12 @@ HELIOSVIEW_API int heliosview_webview_set_context_menu(heliosview_webview_t* web
  * target bitmask and UTF-8 strings), so another backend maps it onto whatever its
  * engine offers - WebView2's ContextMenuRequested event, WebKitGTK's
  * WebView::context-menu signal (a WebKitContextMenu + WebKitHitTestResult), CEF's
- * CefContextMenuHandler::OnBeforeContextMenu + CefContextMenuParams, or the AppKit
- * menu overrides on WKWebView - and fills only the fields its engine can report
- * (the rest stay ""). Engines without a hook report that from the switch call and
- * never invoke the callback, so the page-drawn route keeps working everywhere.
+ * CefContextMenuHandler::OnBeforeContextMenu + CefContextMenuParams - and fills
+ * only the fields its engine can report (the rest stay ""). Engines without a
+ * public hook report that from the switch call and never invoke the callback;
+ * macOS is the standing example (WKWebView exposes its context menu only through
+ * private SPI), so there the page-drawn route - a DOM contextmenu listener that
+ * calls preventDefault() - is the portable answer.
  * Message-loop thread. */
 
 /* What the right-click hit. Bit flags, so a click can combine several (e.g. a
@@ -1931,44 +1946,32 @@ HELIOSVIEW_API int heliosview_webview_set_context_menu_callback(
     void* userdata,
     heliosview_webview_userdata_dtor dtor);
 
-/* Enable (enabled != 0) or disable WebView2 DevTools (F12, right-click
- * Inspect). When disabled, DevTools cannot be opened and an already-open
- * DevTools window is closed. Enabled by default. Applies immediately when
- * the WebView is initialized; when called during initialization the setting
- * is applied when it becomes ready. Message-loop thread. 0 = success,
- * negative = error. */
+/* Enable (enabled != 0) or disable the engine's debugging tools - one switch
+ * that says "debugging is allowed", deliberately not "open" or "attach":
+ *
+ *   Windows   WebView2 AreDevToolsEnabled (right-click -> Inspect; F12 is off
+ *             either way, see open_devtools).
+ *   Linux     WebKitGTK enable-developer-extras.
+ *   macOS     WKWebView.isInspectable (macOS 13.3+): whether Safari's Develop
+ *             menu may attach to this WebView. Older macOS returns -4.
+ *
+ * Enabled by default. When disabled, DevTools cannot be opened and an
+ * already-open DevTools window is closed. Applies immediately when the WebView
+ * is initialized; when called during initialization the setting is applied when
+ * it becomes ready. Message-loop thread. 0 = success, negative = error. */
 HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview,
                                                    int enabled);
 
 /* Open the engine's DevTools window programmatically (like a menu item in
  * VS Code). This is the only way in: the library never leaves the engine's own
  * browser shortcuts (F12, Ctrl+Shift+I, Ctrl+P, F5, ...) available - see the
- * platform notes in the README. Fails (negative) when DevTools are disabled or
- * the WebView is not initialized yet, and on an engine that has no public way
- * to open its DevTools window. Message-loop thread. 0 = success, negative =
- * error. */
-HELIOSVIEW_API int heliosview_webview_open_devtools(heliosview_webview_t* webview);
-
-/* Enable (enabled != 0) or disable WebView2's built-in window controls overlay
- * (the min/max/restore/close buttons WebView2 draws over the page's top-right
- * corner). Disabled by default — apps that render their own title-bar buttons
- * (e.g. the injected <helios-window-controls> component) leave it off. Applies
- * immediately when the WebView is initialized; when called during
- * initialization the setting is applied when it becomes ready. Requires the
- * experimental WebView2 interface; on runtimes without it the call returns
- * negative and has no effect. [Windows only] — other engines return -4 (they
- * use the native title bar). Message-loop thread. 0 = success,
+ * platform notes in the README. Windows (OpenDevToolsWindow) and Linux
+ * (WebKitWebInspector) implement it; macOS has no public API to open the
+ * inspector and returns -4 - there it is reached from Safari's Develop menu (see
+ * heliosview_webview_set_devtools). Fails (negative) when DevTools are disabled
+ * or the WebView is not initialized yet. Message-loop thread. 0 = success,
  * negative = error. */
-HELIOSVIEW_API int heliosview_webview_set_window_controls_overlay(
-    heliosview_webview_t* webview, int enabled);
-
-/* Set the window controls overlay's background color (red/green/blue/alpha).
- * Default: fully transparent (alpha 0) — the page's own title bar shows
- * through and the buttons float over it. Applies immediately when the overlay
- * exists; when called before it is enabled the color is applied when the
- * overlay is created. Message-loop thread. 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_webview_set_window_controls_background_color(
-    heliosview_webview_t* webview, uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha);
+HELIOSVIEW_API int heliosview_webview_open_devtools(heliosview_webview_t* webview);
 
 /* ================= Native dialogs =================
  *

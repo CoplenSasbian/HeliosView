@@ -507,15 +507,11 @@ int heliosview_webview_navigate_html(heliosview_webview_t*, const char*)
 {
     return HV_STUB_UNSUPPORTED;
 }
-int heliosview_webview_suspend(heliosview_webview_t*, heliosview_webview_suspend_cb, void*)
+int heliosview_webview_set_low_footprint(heliosview_webview_t*, int, heliosview_webview_low_footprint_cb, void*)
 {
     return HV_STUB_UNSUPPORTED;
 }
-int heliosview_webview_resume(heliosview_webview_t*)
-{
-    return HV_STUB_UNSUPPORTED;
-}
-int heliosview_webview_is_suspended(heliosview_webview_t*, int*)
+int heliosview_webview_is_low_footprint(heliosview_webview_t*, int*)
 {
     return HV_STUB_UNSUPPORTED;
 }
@@ -591,10 +587,6 @@ int heliosview_webview_set_insets(heliosview_webview_t*, int32_t, int32_t, int32
 {
     return HV_STUB_UNSUPPORTED;
 }
-int heliosview_webview_set_status_bar(heliosview_webview_t*, int)
-{
-    return HV_STUB_UNSUPPORTED;
-}
 int heliosview_webview_set_context_menu(heliosview_webview_t*, int enabled)
 {
     /* The engine's own menu is what such a backend already shows; suppressing it
@@ -614,14 +606,6 @@ int heliosview_webview_set_devtools(heliosview_webview_t*, int)
     return HV_STUB_UNSUPPORTED;
 }
 int heliosview_webview_open_devtools(heliosview_webview_t*)
-{
-    return HV_STUB_UNSUPPORTED;
-}
-int heliosview_webview_set_window_controls_overlay(heliosview_webview_t*, int)
-{
-    return HV_STUB_UNSUPPORTED;
-}
-int heliosview_webview_set_window_controls_background_color(heliosview_webview_t*, uint8_t, uint8_t, uint8_t, uint8_t)
 {
     return HV_STUB_UNSUPPORTED;
 }
