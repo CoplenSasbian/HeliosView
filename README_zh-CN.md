@@ -330,7 +330,7 @@ int main()
 - **`mapLocalFolder(host, folder)`** + **`localUrl(host, path)`** — 服务前端之外的本地资源文件夹；URL 必须用 `localUrl()` 生成（Windows 是虚拟 `https://<host>/` 主机，其他引擎注册自定义 scheme，别把 URL 写死）。
 - **`helios::selectFolder`** 等 — 通过 `bindJson` 处理器暴露给页面的原生对话框。
 
-**WebView2 窗口 chrome 开关** — 调整 WebView 原生外观的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setStatusBarEnabled`、`setContextMenuEnabled`、`setDevToolsEnabled`；C：`heliosview_webview_set_status_bar` / `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`）：
+**WebView2 窗口 chrome 开关** — 调整 WebView 原生外观的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setStatusBarEnabled`、`setContextMenuEnabled`、`setDevToolsEnabled`、`openDevTools`；C：`heliosview_webview_set_status_bar` / `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools` / `heliosview_webview_open_devtools`）：
 
 - **状态栏** — 悬停链接时左下角显示的 URL 提示；**默认关闭**，用 `setStatusBarEnabled(true)` 重新开启。
 - **右键** — **一个开关**决定引擎自带的菜单（复制/粘贴/图片另存/检查）弹不弹；拦截则有**两个互相独立的入口**：页面，或原生回调：
@@ -351,9 +351,24 @@ int main()
   ```
 
   另一个入口是页面：DOM 的 `contextmenu` 事件在任何模式下都会触发，`preventDefault()` + HTML 菜单是**最可移植**的做法（也是引擎没有原生钩子时唯一可行的做法）。`ContextMenuInfo` 带目标标志（`Link` / `Image` / `Media` / `Selection` / `Editable` / `Page`）以及链接 URL/文本、选中文本、页面 URL 和请求坐标；哪些字段有值取决于引擎（空串 = 引擎报不出来），按“尽力而为”使用。引擎无法抑制自己的菜单时（例如 WebView2 运行时低于 100），`setContextMenuEnabled(false)` 返回负数错误（`HELIOSVIEW_ERROR_UNSUPPORTED`），应用据此回退到页面自绘。
-- **DevTools** — F12 / 右键“检查”；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。
+- **DevTools** — 引擎自带的 DevTools（右键 → 检查）；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。F12 等浏览器快捷键永远不可用（见下）。用 `openDevTools()`（C：`heliosview_webview_open_devtools`）从代码里打开 DevTools 窗口 —— 也就是“菜单项”那条路。
 
 每个开关在 WebView 初始化完成后立即生效；初始化期间调用则在其就绪时应用。
+
+**三个目标平台上的 DevTools 契约。** 目前整库只有 Windows 后端（见文首），macOS / Linux 是移植契约。库不把各引擎的差异直接透出去，而是抹平成同一种形态：**没有任何快捷键能进 DevTools** —— F12、Ctrl+Shift+I 之类一律无效，进 DevTools 只能靠 `openDevTools()`（菜单项、JS 桥调用）。各平台的实际能力：
+
+| | Windows (WebView2) | macOS (WKWebView) | Linux (WebKitGTK) |
+| --- | --- | --- | --- |
+| 引擎自带的 DevTools 开关 | `AreDevToolsEnabled` | 公开 API 里没有 | `enable-developer-extras`（WebKitGTK 默认关闭） |
+| `setDevToolsEnabled` | 已实现；DevTools **默认开启** | 返回不支持 | 已实现（映射到上面那个开关；库的默认是开启） |
+| `openDevTools` | `OpenDevToolsWindow`，DevTools 启用时可打开 | 返回负数：只有 Safari 的“开发”菜单能附加（`isInspectable`，macOS 13.3+） | `WebKitWebInspector` 的 show |
+| 引擎自带的浏览器快捷键（F12、Ctrl+Shift+I、Ctrl+P、F5、缩放） | WebView2 自带 → **固定关闭** | 本来就不绑 | 本来就不绑 |
+| 进 DevTools 的途径 | 只能走菜单 / JS 桥 | Safari 的“开发”菜单 | 只能走菜单 / JS 桥 |
+
+两个需要知道的后果：
+
+- Windows 上关掉加速键会**连带**去掉 Ctrl+F、Ctrl+P、Ctrl+R/F5 和缩放 —— WebView2 那个开关是全有全无的。编辑类快捷键（Ctrl+C/V/X/A/Z、Home/End 等）不受影响。后端在核心就绪时就会关掉（需要 WebView2 运行时 89+），并且**没有 API 能再打开**。
+- macOS 上没有公开 API 能打开 Web Inspector 窗口，所以那边 `openDevTools()` 返回负数 —— 只能通过 Safari 的“开发”菜单进入检查器。
 
 原始 C 风格桥接（`bind` / `resolve` / `reject` / `eval` / `evalAsync` / `broadcast` / `subscribe`）也可用；`resolve`/`reject`/`broadcast` 线程安全。
 

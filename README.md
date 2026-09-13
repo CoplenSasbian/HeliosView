@@ -480,8 +480,9 @@ them and can never shadow the built-in components.
 
 **WebView2 window-chrome settings** — small toggles that shape the WebView's
 native chrome, each available on `WebViewWindow` (C++: `setStatusBarEnabled`,
-`setContextMenuEnabled`, `setDevToolsEnabled`; C: `heliosview_webview_set_status_bar`
-/ `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools`):
+`setContextMenuEnabled`, `setDevToolsEnabled`, `openDevTools`; C: `heliosview_webview_set_status_bar`
+/ `heliosview_webview_set_context_menu` / `heliosview_webview_set_devtools` /
+`heliosview_webview_open_devtools`):
 
 - **Status bar** — the hovered-link URL hint at the bottom-left; **disabled by
   default**, re-enable with `setStatusBarEnabled(true)`.
@@ -514,12 +515,41 @@ native chrome, each available on `WebViewWindow` (C++: `setStatusBarEnabled`,
   best-effort. `setContextMenuEnabled(false)` returns a negative error
   (`HELIOSVIEW_ERROR_UNSUPPORTED`) where the engine cannot suppress its menu — e.g.
   a WebView2 runtime older than 100 — so the app can fall back to the page route.
-- **DevTools** — F12 / right-click Inspect; enabled by default, disable with
-  `setDevToolsEnabled(false)` (disabling closes an already-open DevTools
-  window).
+- **DevTools** — the engine's own DevTools (right-click → Inspect); enabled by
+  default, disable with `setDevToolsEnabled(false)` (disabling closes an
+  already-open DevTools window). F12 and the other browser shortcuts are never
+  available (see below). Open the DevTools window from code with
+  `openDevTools()` (C: `heliosview_webview_open_devtools`) — the menu-entry
+  route.
 
 Each applies immediately once the WebView is initialized; calls made during
 initialization take effect when it becomes ready.
+
+**DevTools across the three target platforms.** Everything in the library is
+Windows today (see the top of this file); macOS and Linux are the porting
+contract. Rather than leaking whatever each engine happens to offer, the
+library flattens it to one shape: **there is no shortcut into DevTools** — F12,
+Ctrl+Shift+I and friends do nothing — and `openDevTools()` (a menu item, a JS
+bridge call) is the way in. What each platform gives an app:
+
+| | Windows (WebView2) | macOS (WKWebView) | Linux (WebKitGTK) |
+| --- | --- | --- | --- |
+| Engine's own DevTools switch | `AreDevToolsEnabled` | none in the public API | `enable-developer-extras` (off by default in WebKitGTK) |
+| `setDevToolsEnabled` | implemented; DevTools **on** by default | returns unsupported | implemented (maps to that switch; library default is on) |
+| `openDevTools` | `OpenDevToolsWindow` — succeeds while DevTools are enabled | returns negative: only Safari's Develop menu can attach (`isInspectable`, macOS 13.3+) | `WebKitWebInspector` show |
+| Engine's own browser shortcuts (F12, Ctrl+Shift+I, Ctrl+P, F5, zoom) | WebView2 binds them → **forced off** | binds none | binds none |
+| Way into DevTools | menu / JS bridge only | Safari's Develop menu | menu / JS bridge only |
+
+Two consequences worth knowing:
+
+- Disabling the accelerator keys on Windows also removes Ctrl+F, Ctrl+P,
+  Ctrl+R/F5 and the zoom shortcuts — WebView2's switch is all-or-nothing.
+  Editing keys (Ctrl+C/V/X/A/Z, Home/End, ...) are never affected. The backend
+  turns them off as soon as the core is ready (needs WebView2 runtime 89+);
+  there is no API to turn them back on.
+- On macOS there is no public API to open the Web Inspector window, so
+  `openDevTools()` returns negative there — the inspector stays reachable only
+  through Safari's Develop menu.
 
 The raw C-style bridge (`bind` / `resolve` / `reject` / `eval` / `evalAsync` /
 `broadcast` / `subscribe`) is also available; `resolve`/`reject`/`broadcast`

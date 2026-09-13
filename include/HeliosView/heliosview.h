@@ -1940,24 +1940,14 @@ HELIOSVIEW_API int heliosview_webview_set_context_menu_callback(
 HELIOSVIEW_API int heliosview_webview_set_devtools(heliosview_webview_t* webview,
                                                    int enabled);
 
-/* Open the WebView2 DevTools window programmatically (like a menu item in
- * VS Code). Independent of F12: pair it with
- * heliosview_webview_set_browser_accelerators(0) to make the shortcut
- * unavailable while a menu can still open the window. Fails (negative) when
- * DevTools are disabled or the WebView is not initialized yet. Message-loop
- * thread. 0 = success, negative = error. */
+/* Open the engine's DevTools window programmatically (like a menu item in
+ * VS Code). This is the only way in: the library never leaves the engine's own
+ * browser shortcuts (F12, Ctrl+Shift+I, Ctrl+P, F5, ...) available - see the
+ * platform notes in the README. Fails (negative) when DevTools are disabled or
+ * the WebView is not initialized yet, and on an engine that has no public way
+ * to open its DevTools window. Message-loop thread. 0 = success, negative =
+ * error. */
 HELIOSVIEW_API int heliosview_webview_open_devtools(heliosview_webview_t* webview);
-
-/* Enable (enabled != 0) or disable WebView2's built-in browser accelerator keys
- * (F12, Ctrl+P, F5, F7, Ctrl+Shift+I, ...). Disabling them leaves the API above
- * usable - the "no F12, but a menu entry" setup. Enabled by default. Applies
- * immediately when the WebView is initialized (the engine honors the new value
- * from the next navigation on); when called during initialization the setting
- * is applied when it becomes ready. Requires ICoreWebView2Settings3 (runtime 89+);
- * on runtimes without it the call returns negative and has no effect.
- * Message-loop thread. 0 = success, negative = error. */
-HELIOSVIEW_API int heliosview_webview_set_browser_accelerators(heliosview_webview_t* webview,
-                                                               int enabled);
 
 /* Enable (enabled != 0) or disable WebView2's built-in window controls overlay
  * (the min/max/restore/close buttons WebView2 draws over the page's top-right

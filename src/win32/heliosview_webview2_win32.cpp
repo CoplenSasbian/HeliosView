@@ -117,13 +117,6 @@ struct heliosview_webview {
      * toggleable at runtime via heliosview_webview_set_devtools. */
     bool devtools_enabled = true;
 
-    /* WebView2's built-in browser accelerator keys (F12, Ctrl+P, F5, F7,
-     * Ctrl+Shift+I, ...); on by default, toggleable via
-     * heliosview_webview_set_browser_accelerators. Turning them off leaves
-     * heliosview_webview_open_devtools usable (the "no F12, but a menu entry"
-     * setup). */
-    bool browser_accelerators_enabled = true;
-
     /* WebView2 built-in window controls overlay (min/max/restore/close buttons
      * drawn over the page's top-right). Off by default: apps that draw their
      * own title-bar buttons (e.g. the injected <helios-window-controls>
@@ -1245,14 +1238,15 @@ HRESULT hv_webview_init_core(heliosview_webview_t* webview)
          * as well). */
         settings->put_AreDevToolsEnabled(webview->devtools_enabled ? TRUE : FALSE);
 
-        /* Browser accelerator keys (F12, Ctrl+P, F5, F7, Ctrl+Shift+I, ...):
-         * applied from the stored value so a call made during initialization
-         * is not lost (ICoreWebView2Settings3; on older runtimes the switch has
-         * no effect). heliosview_webview_open_devtools keeps working either way. */
+        /* Browser accelerator keys (F12, Ctrl+P, F5, Ctrl+Shift+I, ...): always
+         * off, so the engine contributes no browser shortcut on any platform (the
+         * other backends have none to begin with). DevTools stay reachable through
+         * heliosview_webview_open_devtools. Needs ICoreWebView2Settings3 (runtime
+         * 89+); on an older runtime the keys keep their default - there is no
+         * older API that could turn them off. */
         Microsoft::WRL::ComPtr<ICoreWebView2Settings3> settings3;
         if (SUCCEEDED(settings.As(&settings3)))
-            settings3->put_AreBrowserAcceleratorKeysEnabled(
-                webview->browser_accelerators_enabled ? TRUE : FALSE);
+            settings3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
 
         Microsoft::WRL::ComPtr<ICoreWebView2Settings9> settings9;
         if (SUCCEEDED(settings.As(&settings9)))
@@ -1975,34 +1969,6 @@ int heliosview_webview_open_devtools(heliosview_webview_t* webview)
     const HRESULT hr = webview->webview->OpenDevToolsWindow();
     if (FAILED(hr))
         return hv_fail_hresult(hr, "OpenDevToolsWindow failed");
-    return 0;
-}
-
-int heliosview_webview_set_browser_accelerators(heliosview_webview_t* webview, int enabled)
-{
-    if (!webview)
-        return hv_fail(-1, "webview is NULL");
-    if (GetCurrentThreadId() != webview->ui_thread)
-        return hv_fail(-1, "webview API called from a non-UI thread");
-    webview->browser_accelerators_enabled = enabled != 0;
-    /* Same shape as set_devtools: store the value and apply it when the core is
-     * up; the create path applies the stored value when it becomes ready. Needs
-     * ICoreWebView2Settings3 (SDK 1.0.864.35+, runtime 89+): report that so the
-     * app knows the switch is unavailable (open_devtools is unaffected). The
-     * engine applies the new value from the next navigation on. */
-    if (webview->webview) {
-        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
-        const HRESULT hr_settings = webview->webview->get_Settings(&settings);
-        if (FAILED(hr_settings))
-            return hv_fail_hresult(hr_settings, "ICoreWebView2Settings lookup failed");
-        Microsoft::WRL::ComPtr<ICoreWebView2Settings3> settings3;
-        if (FAILED(settings.As(&settings3)))
-            return hv_fail(-4, "this WebView2 runtime cannot toggle browser accelerator keys (needs 89+)");
-        const HRESULT hr_put = settings3->put_AreBrowserAcceleratorKeysEnabled(
-            webview->browser_accelerators_enabled ? TRUE : FALSE);
-        if (FAILED(hr_put))
-            return hv_fail_hresult(hr_put, "put_AreBrowserAcceleratorKeysEnabled failed");
-    }
     return 0;
 }
 

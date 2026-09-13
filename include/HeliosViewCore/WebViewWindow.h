@@ -322,26 +322,15 @@ public:
         return heliosview_webview_set_devtools(m_webview, enabled ? 1 : 0);
     }
 
-    // Open the DevTools window explicitly (menu / JS bridge). Independent of F12:
-    // pair it with setBrowserAccelerators(false) to keep the shortcut unavailable
-    // while a menu entry can still open the window. Fails (negative) when DevTools
-    // are disabled or the WebView is not ready yet. Returns 0 = success.
+    // Open the DevTools window explicitly (menu / JS bridge). This is the only
+    // way in: the library keeps the engine's own browser shortcuts (F12,
+    // Ctrl+Shift+I, ...) unavailable - see the README's platform notes. Fails
+    // (negative) when DevTools are disabled or the WebView is not ready yet, and
+    // on an engine with no public way to open its DevTools window.
+    // Returns 0 = success.
     int openDevTools()
     {
         return heliosview_webview_open_devtools(m_webview);
-    }
-
-    // Enable (enabled) or disable WebView2's built-in browser accelerator keys
-    // (F12, Ctrl+P, F5, F7, Ctrl+Shift+I, ...). Disabling them leaves
-    // openDevTools() usable - the "no F12, but a menu entry" setup. Enabled by
-    // default. Applies immediately when initialized (the engine honors the new
-    // value from the next navigation on); when called during initialization it is
-    // applied when the WebView becomes ready. Needs a runtime with
-    // ICoreWebView2Settings3 (89+); otherwise returns negative and has no effect.
-    // Returns 0 = success, negative = error.
-    int setBrowserAccelerators(bool enabled)
-    {
-        return heliosview_webview_set_browser_accelerators(m_webview, enabled ? 1 : 0);
     }
 
     // Enable (enabled) or disable WebView2's built-in window controls overlay
