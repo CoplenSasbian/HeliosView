@@ -33,6 +33,11 @@ target_link_libraries(HeliosViewWebViewEventsDemo PRIVATE HeliosView::Core)
 add_executable(HeliosViewWindowDemo window_demo.cpp)            # windows, styles, signals, menus, tray
 target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
 
+# Canvas / painter / image checks: headless (no window at all -- a canvas is memory),
+# with pixel-level assertions and PNG previews written to examples/out.
+add_executable(HeliosViewCanvasTest canvas_test.cpp)
+target_link_libraries(HeliosViewCanvasTest PRIVATE HeliosView::HeliosView)
+
 add_executable(HeliosViewSystemDemo system_demo.cpp)            # OS integration: dialogs, hotkeys, toasts, info
 target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
 

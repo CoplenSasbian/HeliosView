@@ -1,5 +1,7 @@
 add_library(HeliosView SHARED
     heliosview.cpp   # platform-independent core: version, allocator, events, string codecs
+    heliosview_paint.cpp        # paint core: engine registry, canvas storage, painter session (no platform code)
+    heliosview_image_codec.cpp  # image decode/encode for every engine (vendored stb)
 )
 
 # Platform backends: each platform adds its implementation files under
@@ -8,6 +10,7 @@ add_library(HeliosView SHARED
 if(WIN32)
     target_sources(HeliosView PRIVATE
             win32/heliosview_window_win32.cpp      # windows / message loop / native message translation / dialogs
+        win32/heliosview_paint_gdiplus.cpp # paint engine: GDI+ (the NATIVE engine on Windows)
         win32/heliosview_host_win32.cpp # hidden library host window (tray callbacks + window-less popup menu owner)
         win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon)
         win32/heliosview_menu_win32.cpp # popup menus (heliosview_menu_* API; CreatePopupMenu / TrackPopupMenu, routing id via window subclass)
@@ -76,12 +79,22 @@ target_include_directories(HeliosView PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+# Vendored single-header libraries used by the implementation only (stb: the image
+# codec). Not part of the public include path -- consumers never see them.
+target_include_directories(HeliosView PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party
+)
+
 # HELIOSVIEW_EXPORTS is defined only when building the library itself;
 # HeliosViewExport.h then expands to __declspec(dllexport) (Windows) or
 # visibility("default") (GCC/Clang)
 target_compile_definitions(HeliosView PRIVATE
     HELIOSVIEW_EXPORTS
     HELIOSVIEW_VERSION_STR="${PROJECT_VERSION}"
+    # The image codec uses the portable stdio API (fopen/fread/fwrite), which MSVC
+    # flags as deprecated in favour of the *_s variants. The portable form is the
+    # right one here: the same code compiles on every platform the library targets.
+    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Symbols hidden by default on GCC/Clang; only HELIOSVIEW_API-marked ones are exported

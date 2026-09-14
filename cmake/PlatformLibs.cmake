@@ -26,8 +26,10 @@ macro(heliosview_link_platform_system_libs target)
     #   comctl32     - InitCommonControlsEx (common controls v6 init)
     #   runtimeobject- WinRT Ro* (toast notifications)
     #   propsys      - IPropertyStore (toast AppUserModelID shortcut)
+    #   gdiplus      - the GDI+ paint engine (antialiased 2D drawing); a system
+    #                  component, so this adds no redistributable
     target_link_libraries(${target} PRIVATE
-      user32 shell32 ole32 dwmapi comctl32 runtimeobject propsys)
+      user32 shell32 ole32 dwmapi comctl32 runtimeobject propsys gdiplus)
 
   elseif(APPLE)
     # macOS backend (src/macos/), for example:
