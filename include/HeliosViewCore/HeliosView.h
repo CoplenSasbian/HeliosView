@@ -19,6 +19,7 @@
  *   - Tray.h          system notification-area (tray) icon + signals + balloon
  *   - Menu.h          popup / context menu + signals
  *   - MenuBar.h       horizontal application / window menu bar
+ *   - Paint.h         canvases, painters, paths and images (headless: a canvas is memory)
  *   - Execution.h     C++26 <execution> (P2300) compat layer: unified std::execution namespace
  *   - WebViewWindow.h window embedding a WebView (win32: WebView2)
  *   - WebViewJson.h   Boost.JSON auto-binding sugar for the WebView bridge (bindJson / subscribeJson)
@@ -26,7 +27,9 @@
  * Threading: every Window / WebView / Tray / Menu / Dialog / event API must be
  * called on the message-loop thread (the thread running App::exec). The
  * exceptions -- safe from any thread -- are App::postTask, App::quit,
- * WebView resolve/reject/broadcast, and the notification functions.
+ * WebView resolve/reject/broadcast, the notification functions, and the whole
+ * Paint API (a Canvas is memory: any thread, one thread at a time; a Painter
+ * stays on the thread that created it).
  *
  * Usage (signals/slots):
  *   helios::App app;
@@ -48,6 +51,7 @@
 #include <HeliosViewCore/Menu.h>
 #include <HeliosViewCore/MenuBar.h>
 #include <HeliosViewCore/Notification.h>
+#include <HeliosViewCore/Paint.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/String.h>
 #include <HeliosViewCore/System.h>

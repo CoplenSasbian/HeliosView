@@ -489,7 +489,8 @@ HELIOSVIEW_API int heliosview_painter_set_clip_path(heliosview_painter_t* painte
 HELIOSVIEW_API int heliosview_painter_intersect_clip_rect(heliosview_painter_t* painter,
                                                           float x, float y, float width, float height);
 HELIOSVIEW_API int heliosview_painter_reset_clip(heliosview_painter_t* painter);
-/* Bounding box of the current clip, in canvas coordinates (conservative) */
+/* Bounding box of the current clip, in canvas coordinates. An engine may return a box
+ * that encloses the clip rather than the exact clip (conservative). */
 HELIOSVIEW_API int heliosview_painter_clip_bounds(const heliosview_painter_t* painter,
                                                   heliosview_rect_t* out_rect);
 

@@ -248,7 +248,7 @@ void blend_pixel(const CanvasData& dst, int32_t x, int32_t y, uint32_t src_argb,
     if (sa <= 0.0f)
         return;
     if (sa >= 1.0f) {
-        write_pixel(dst, x, y, src_argb);
+        write_pixel(dst, x, y, src_argb, alpha); /* opaque source: a plain overwrite */
         return;
     }
     const uint32_t dp = read_pixel(dst, x, y);
@@ -1051,10 +1051,13 @@ int heliosview_painter_clip_bounds(const heliosview_painter_t* painter, heliosvi
 {
     if (!painter || !out_rect)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "painter or out_rect is NULL");
-    out_rect->x = 0;
-    out_rect->y = 0;
-    out_rect->width = painter->canvas->data.width;
-    out_rect->height = painter->canvas->data.height;
+    Rect bounds{};
+    painter->context->clip_bounds(bounds);
+    /* The clip must be enclosed, so outward: min values round down, max values up. */
+    out_rect->x = static_cast<int32_t>(std::floor(bounds.x));
+    out_rect->y = static_cast<int32_t>(std::floor(bounds.y));
+    out_rect->width = static_cast<int32_t>(std::ceil(bounds.x + bounds.w)) - out_rect->x;
+    out_rect->height = static_cast<int32_t>(std::ceil(bounds.y + bounds.h)) - out_rect->y;
     return 0;
 }
 

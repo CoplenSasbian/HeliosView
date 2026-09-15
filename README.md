@@ -860,6 +860,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Notification.h                      OS toast notifications (thread-safe)
   Tray.h                              system notification-area (tray) icon + signals
   Menu.h                              popup / context menu + signals
+  Paint.h                             canvases, painters, paths and images (headless, no window)
   Execution.h                         schedulers/senders (stdexec, P2300)
   WebViewWindow.h                     window embedding a WebView
   WebViewJson.h                       bindJson / subscribeJson (Boost.JSON auto-binding)

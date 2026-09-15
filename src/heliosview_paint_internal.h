@@ -197,6 +197,10 @@ public:
     virtual void intersect_clip_rect(const Rect& r) = 0;
     virtual void reset_clip() = 0;
 
+    /* The current clip's device-space bounding box. It may be larger than the clip --
+     * an engine only has to report a box that encloses it ("conservative"). */
+    virtual void clip_bounds(Rect& out) const = 0;
+
     /* Shapes. Fill means fill_color, stroke means stroke_color/stroke_width; the
      * engine is told which to apply, the decision is the painter's. */
     virtual void clear(uint32_t argb) = 0;

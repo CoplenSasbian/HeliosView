@@ -624,6 +624,7 @@ include/HeliosViewCore/               纯头文件 C++ 封装
   Notification.h                      OS toast 通知（线程安全）
   Tray.h                              系统通知区（托盘）图标 + 信号
   Menu.h                              弹出 / 右键菜单 + 信号
+  Paint.h                             画布 / 画笔 / 路径 / 图像（无窗口，纯内存）
   Execution.h                         scheduler/sender（stdexec，P2300）
   WebViewWindow.h                     内嵌 WebView 的窗口
   WebViewJson.h                       bindJson / subscribeJson（Boost.JSON 自动绑定）

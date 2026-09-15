@@ -117,14 +117,6 @@ inline Gdiplus::RectF normalized(Gdiplus::RectF rect)
     return rect;
 }
 
-/* The last point of a path, which GDI+ reports through an out parameter. */
-inline Gdiplus::PointF last_point(const Gdiplus::GraphicsPath& path)
-{
-    Gdiplus::PointF point(0.0f, 0.0f);
-    path.GetLastPoint(&point);
-    return point;
-}
-
 /* ================= Path conversion =================
  *
  * The engine-neutral PathData (heliosview_paint_internal.h) becomes a Gdiplus::GraphicsPath.
@@ -135,49 +127,76 @@ void build_graphics_path(const PathData& data, Gdiplus::GraphicsPath& out)
     out.Reset();
     out.SetFillMode(data.winding == HELIOSVIEW_WINDING_EVENODD ? Gdiplus::FillModeAlternate
                                                               : Gdiplus::FillModeWinding);
-    bool has_point = false; /* is there a current point to continue from? */
+    /* GDI+ has no move-to verb and no explicit current point: a figure is started by
+     * its first segment. `current` is where the next segment must begin, and `seeded`
+     * says whether the open figure already holds that point. A figure that is not
+     * seeded yet is seeded with a zero-length line at `current`, which GDI+ does not
+     * draw; without it the first segment would be dropped or start from the origin. */
+    bool has_current = false;
+    bool seeded = false;
+    Gdiplus::PointF current(0.0f, 0.0f);
+
+    auto seed_figure = [&] {
+        if (!seeded) {
+            out.StartFigure();
+            out.AddLine(current, current);
+            seeded = true;
+        }
+    };
+
     for (const PathEntry& entry : data.entries) {
         switch (entry.verb) {
         case PathVerbStartNew:
-            out.StartFigure();
-            has_point = false; /* the next line/curve starts from this point itself */
+            current = Gdiplus::PointF(entry.pts[0], entry.pts[1]);
+            has_current = true;
+            seeded = false;
             break;
-        case PathVerbLineTo:
-            if (!has_point) {
-                out.StartFigure();
-                out.AddLine(Gdiplus::PointF(entry.pts[0], entry.pts[1]), Gdiplus::PointF(entry.pts[0], entry.pts[1]));
-            } else {
-                out.AddLine(last_point(out), Gdiplus::PointF(entry.pts[0], entry.pts[1]));
+        case PathVerbLineTo: {
+            const Gdiplus::PointF to(entry.pts[0], entry.pts[1]);
+            if (has_current) {
+                seed_figure();
+                out.AddLine(current, to);
             }
-            has_point = true;
+            current = to;
+            has_current = true;
             break;
+        }
         case PathVerbQuadTo: {
-            const Gdiplus::PointF start = has_point ? last_point(out) : Gdiplus::PointF(entry.pts[0], entry.pts[1]);
-            /* A quadratic Bezier as a cubic with the control points weighted 2/3. */
             const Gdiplus::PointF control(entry.pts[0], entry.pts[1]);
             const Gdiplus::PointF end(entry.pts[2], entry.pts[3]);
+            if (!has_current)
+                current = control; /* nothing to continue from: begin at the control point */
+            seed_figure();
+            const Gdiplus::PointF start = current;
+            /* A quadratic Bezier as a cubic with the control points weighted 2/3. */
             const Gdiplus::PointF c1(start.X + (control.X - start.X) * 2.0f / 3.0f,
                             start.Y + (control.Y - start.Y) * 2.0f / 3.0f);
             const Gdiplus::PointF c2(end.X + (control.X - end.X) * 2.0f / 3.0f,
                             end.Y + (control.Y - end.Y) * 2.0f / 3.0f);
             out.AddBezier(start, c1, c2, end);
-            has_point = true;
+            current = end;
+            has_current = true;
             break;
         }
         case PathVerbCubicTo: {
-            const Gdiplus::PointF start = has_point ? last_point(out) : Gdiplus::PointF(entry.pts[0], entry.pts[1]);
-            out.AddBezier(start, Gdiplus::PointF(entry.pts[0], entry.pts[1]), Gdiplus::PointF(entry.pts[2], entry.pts[3]),
+            if (!has_current)
+                current = Gdiplus::PointF(entry.pts[0], entry.pts[1]);
+            seed_figure();
+            out.AddBezier(current, Gdiplus::PointF(entry.pts[0], entry.pts[1]), Gdiplus::PointF(entry.pts[2], entry.pts[3]),
                           Gdiplus::PointF(entry.pts[4], entry.pts[5]));
-            has_point = true;
+            current = Gdiplus::PointF(entry.pts[4], entry.pts[5]);
+            has_current = true;
             break;
         }
         case PathVerbClose:
             out.CloseFigure();
-            has_point = false;
+            has_current = false;
+            seeded = false;
             break;
         case PathVerbRect:
             out.AddRectangle(Gdiplus::RectF(entry.pts[0], entry.pts[1], entry.pts[2], entry.pts[3]));
-            has_point = false;
+            has_current = false;
+            seeded = false;
             break;
         case PathVerbRoundRect: {
             /* GDI+ has no native rounded rectangle: four arcs plus the connecting
@@ -196,12 +215,14 @@ void build_graphics_path(const PathData& data, Gdiplus::GraphicsPath& out)
                 out.AddArc(rect.X, rect.GetBottom() - d, d, d, 90.0f, 90.0f);
                 out.CloseFigure();
             }
-            has_point = false;
+            has_current = false;
+            seeded = false;
             break;
         }
         case PathVerbEllipse:
             out.AddEllipse(normalized(Gdiplus::RectF(entry.pts[0], entry.pts[1], entry.pts[2], entry.pts[3])));
-            has_point = false;
+            has_current = false;
+            seeded = false;
             break;
         default:
             break;
@@ -249,6 +270,43 @@ Gdiplus::PixelFormat gdiplus_format(heliosview_pixel_format_t format)
 
 /* ================= Drawing session ================= */
 
+/* The device-space bounding box of a rectangle given in the transform's own space. */
+inline Rect device_bounds(const Gdiplus::RectF& box, const float m[6])
+{
+    const float xs[4] = {box.X, box.GetRight(), box.X, box.GetRight()};
+    const float ys[4] = {box.Y, box.Y, box.GetBottom(), box.GetBottom()};
+    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const float x = xs[i] * m[0] + ys[i] * m[2] + m[4];
+        const float y = ys[i] * m[3] + xs[i] * m[1] + m[5];
+        if (i == 0) {
+            left = right = x;
+            top = bottom = y;
+        } else {
+            if (x < left)
+                left = x;
+            if (x > right)
+                right = x;
+            if (y < top)
+                top = y;
+            if (y > bottom)
+                bottom = y;
+        }
+    }
+    return Rect{left, top, right - left, bottom - top};
+}
+
+inline Rect intersect_rect(const Rect& a, const Rect& b)
+{
+    const float x = a.x > b.x ? a.x : b.x;
+    const float y = a.y > b.y ? a.y : b.y;
+    const float right = a.x + a.w < b.x + b.w ? a.x + a.w : b.x + b.w;
+    const float bottom = a.y + a.h < b.y + b.h ? a.y + a.h : b.y + b.h;
+    if (right <= x || bottom <= y)
+        return Rect{x, y, 0.0f, 0.0f};
+    return Rect{x, y, right - x, bottom - y};
+}
+
 class ContextImpl final : public Context {
 public:
     ContextImpl(CanvasAdapterImpl& canvas, const CanvasData& data)
@@ -286,39 +344,39 @@ public:
 
     void set_clip_rect(const Rect& r) override
     {
-        Gdiplus::GraphicsState state = m_graphics.Save();
-        m_graphics.ResetTransform();
         const Gdiplus::RectF rect = to_rectf(r);
-        m_graphics.SetClip(rect, Gdiplus::CombineModeReplace);
-        m_graphics.Restore(state);
+        apply_clip(rect, Gdiplus::CombineModeReplace);
+        m_clip_bounds = intersect_rect(canvas_bounds(), device_bounds(rect, m_transform));
     }
 
     void intersect_clip_rect(const Rect& r) override
     {
-        Gdiplus::GraphicsState state = m_graphics.Save();
-        m_graphics.ResetTransform();
         const Gdiplus::RectF rect = to_rectf(r);
-        m_graphics.SetClip(rect, Gdiplus::CombineModeIntersect);
-        m_graphics.Restore(state);
+        apply_clip(rect, Gdiplus::CombineModeIntersect);
+        m_clip_bounds = intersect_rect(m_clip_bounds, device_bounds(rect, m_transform));
     }
 
     void set_clip_path(const PathData& path) override
     {
         Gdiplus::GraphicsPath graphics_path;
         build_graphics_path(path, graphics_path);
-        Gdiplus::GraphicsState state = m_graphics.Save();
-        m_graphics.ResetTransform();
+        /* The clip is recorded in device space using whatever transform is in effect
+         * when SetClip is called, so the painter's transform goes in first and the
+         * geometry is passed in its own (untransformed) space. */
+        apply_transform();
         m_graphics.SetClip(&graphics_path, Gdiplus::CombineModeReplace);
-        m_graphics.Restore(state);
+        Gdiplus::RectF box;
+        graphics_path.GetBounds(&box);
+        m_clip_bounds = intersect_rect(canvas_bounds(), device_bounds(box, m_transform));
     }
 
     void reset_clip() override
     {
-        /* Clears the clip and puts the painter's transform back (the clip calls run
-         * with the transform temporarily reset to identity). */
         m_graphics.ResetClip();
-        apply_transform();
+        m_clip_bounds = canvas_bounds();
     }
+
+    void clip_bounds(Rect& out) const override { out = m_clip_bounds; }
 
     /* Pushes m_transform into the Graphics. A named local, because SetTransform takes
      * a pointer and a temporary would not bind. */
@@ -328,6 +386,16 @@ public:
                                m_transform[4], m_transform[5]);
         m_graphics.SetTransform(&matrix);
     }
+
+    /* Installs a clip. Save/Restore must not be used around SetClip here: Restore puts
+     * back the state as it was at Save, which drops the new clip again. */
+    void apply_clip(const Gdiplus::RectF& rect, Gdiplus::CombineMode mode)
+    {
+        apply_transform();
+        m_graphics.SetClip(rect, mode);
+    }
+
+    Rect canvas_bounds() const { return Rect{0.0f, 0.0f, static_cast<float>(m_data.width), static_cast<float>(m_data.height)}; }
 
     /* ---- shapes ---- */
     void clear(uint32_t argb) override
@@ -690,6 +758,9 @@ private:
     heliosview_painter_state_t m_state{};
     bool m_state_dirty = true;
     float m_transform[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    /* The clip as a device-space bounding box: GDI+ can only report the bounds of the
+     * clip region, and clip_bounds must work for path clips too. */
+    Rect m_clip_bounds{0.0f, 0.0f, static_cast<float>(m_data.width), static_cast<float>(m_data.height)};
     std::unique_ptr<Gdiplus::Pen> m_pen;
     std::unique_ptr<Gdiplus::SolidBrush> m_brush;
     std::unique_ptr<Gdiplus::SolidBrush> m_fill;
