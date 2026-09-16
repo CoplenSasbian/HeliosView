@@ -35,7 +35,7 @@ target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
 
 # Canvas / painter / image checks: headless (no window at all -- a canvas is memory),
 # with pixel-level assertions and PNG previews written to examples/out. It uses the
-# C++ wrapper (<HeliosViewCore/Paint.h>), so it links the header-only core target.
+# C++ wrapper (<HeliosViewCore/Canvas.h>), so it links the header-only core target.
 add_executable(HeliosViewCanvasTest canvas_test.cpp)
 target_link_libraries(HeliosViewCanvasTest PRIVATE HeliosView::Core)
 

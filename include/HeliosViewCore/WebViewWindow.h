@@ -267,7 +267,7 @@ public:
     // ---- webview background color ----
 
     // Set the WebView's default background color (WebView2
-    // DefaultBackgroundColor): the color painted behind the page content
+    // DefaultBackgroundColor): the color drawn behind the page content
     // (default: opaque white). (r, g, b, a) are 0-255; alpha 0 = transparent —
     // the parent window's own content shows through the WebView (for the
     // desktop to show through, the parent window must itself be transparent,

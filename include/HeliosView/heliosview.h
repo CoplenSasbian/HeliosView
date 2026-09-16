@@ -29,7 +29,7 @@
  *   heliosview_dialogs.h       folder / file pickers, message box
  *   heliosview_system.h        clipboard, open URL/path, run program, hotkeys, OS info
  *   heliosview_notification.h  OS toast notifications
- *   heliosview_paint.h         drawing: canvas, painter, paths, images (rendering engines)
+ *   heliosview_canvas.h        drawing: canvas, painter, paths, images (rendering engines)
  *
  * Every part includes heliosview_base.h itself, so the parts may be included in any
  * order and on their own.
@@ -69,7 +69,7 @@
  *     - heliosview_post_event / heliosview_wake_loop / heliosview_quit
  *     - heliosview_notification_init / _show (OS toasts are thread-agnostic)
  *     - heliosview_free (and the allocator, set before any other call)
- *     - the canvas functions in heliosview_paint.h (a canvas is memory, not a
+ *     - the canvas functions in heliosview_canvas.h (a canvas is memory, not a
  *       window: any one thread at a time, never two at once)
  *
  *   To return to the message-loop thread from a worker thread, post an event
@@ -90,7 +90,7 @@
  * internally; portable code never sees the difference. The scale of one unit is
  * reported by heliosview_window_scale_factor().
  *
- * A canvas (heliosview_paint.h) uses the same top-left / x-right / y-down
+ * A canvas (heliosview_canvas.h) uses the same top-left / x-right / y-down
  * convention, in its own pixel space.
  *
  * Wide characters: wchar_t is UTF-16 on Windows and UTF-32 on macOS/Linux, so
@@ -111,7 +111,7 @@
  *    -3   HELIOSVIEW_WEBVIEW_DESTROYED: the WebView instance was already destroyed
  *    -4   HELIOSVIEW_ERROR_UNSUPPORTED: the platform or OS version cannot provide this
  *         feature (e.g. a Mica backdrop on Windows 10, any Windows-only feature on
- *         another platform, a paint engine this build does not provide). Safe to
+ *         another platform, a canvas engine this build does not provide). Safe to
  *         ignore: callers degrade to their fallback.
  *
  * Other error codes are platform codes:
@@ -154,6 +154,6 @@
 #include <HeliosView/heliosview_dialogs.h>
 #include <HeliosView/heliosview_system.h>
 #include <HeliosView/heliosview_notification.h>
-#include <HeliosView/heliosview_paint.h>
+#include <HeliosView/heliosview_canvas.h>
 
 #endif /* HELIOSVIEW_HELIOSVIEW_H */

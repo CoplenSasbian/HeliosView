@@ -97,6 +97,8 @@ HeliosView 把**所有分配都路由到一个可配置的分配器**，因此�
 | WebView2 SDK | 1.0.4129.50 | 配置时从 NuGet 下载 | 内嵌 WebView（win32） |
 | `stdexec` | 固定 commit 758f41f4（origin/main，2026-08-15，0.11.0+） | vendored（`third_party/stdexec/`） | C++23 协程（sender/receiver） |
 | `Boost`（Asio/Beast/JSON） | 1.92.0（超项目 submodule，所需库配置时自动按需初始化） | vendored（`third_party/boost/`） | 后台线程池（`Async`）、HTTP（Boost.Beast）、WebView 桥接自动绑定（Boost.JSON） |
+| `Blend2D` | v0.21.3（submodule） | vendored（`third_party/blend2d/`） | BUILTIN 画布引擎：同一个光栅化器，各平台像素完全一致 |
+| `asmjit` | 固定 commit `dffd8b1`（submodule） | vendored（`third_party/asmjit/`） | Blend2D JIT 管线背后的 x86/ARM 代码生成 |
 
 其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。Boost 库在配置时按需初始化：在 `third_party/boost/` 里执行**一条** `git submodule update --init --depth 1`，把所有需要的库作为 pathspec 一次传入（git 的输出会实时打印，`--jobs` 并行克隆，因此首次克隆不会看起来像卡住）——不要对整个 HeliosView 执行 `git submodule update --init --recursive`，那会拉取全部约 160 个 Boost 库。
 
@@ -624,7 +626,7 @@ include/HeliosViewCore/               纯头文件 C++ 封装
   Notification.h                      OS toast 通知（线程安全）
   Tray.h                              系统通知区（托盘）图标 + 信号
   Menu.h                              弹出 / 右键菜单 + 信号
-  Paint.h                             画布 / 画笔 / 路径 / 图像（无窗口，纯内存）
+  Canvas.h                            画布 / 画笔 / 路径 / 图像（无窗口，纯内存）
   Execution.h                         scheduler/sender（stdexec，P2300）
   WebViewWindow.h                     内嵌 WebView 的窗口
   WebViewJson.h                       bindJson / subscribeJson（Boost.JSON 自动绑定）
@@ -632,6 +634,8 @@ src/heliosview.cpp                    平台无关核心
 src/heliosview_internal.h             实现文件间共享的状态
 src/win32/                            win32 后端（窗口、WebView2、对话框、toast）
 third_party/stdexec/                  内置 stdexec（固定 commit，纯头文件）
+third_party/blend2d/                  内置 Blend2D（固定 v0.21.3；BUILTIN 画布引擎）
+third_party/asmjit/                   内置 asmjit（固定 commit；Blend2D 的 JIT 后端）
 examples/                             演示程序
 ```
 

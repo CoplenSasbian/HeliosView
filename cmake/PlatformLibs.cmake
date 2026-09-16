@@ -26,10 +26,15 @@ macro(heliosview_link_platform_system_libs target)
     #   comctl32     - InitCommonControlsEx (common controls v6 init)
     #   runtimeobject- WinRT Ro* (toast notifications)
     #   propsys      - IPropertyStore (toast AppUserModelID shortcut)
-    #   gdiplus      - the GDI+ paint engine (antialiased 2D drawing); a system
+    #   gdiplus      - the GDI+ canvas engine (antialiased 2D drawing); a system
     #                  component, so this adds no redistributable
+    #   d2d1         - the Direct2D canvas engine (paths, layers, render target)
+    #   dwrite       - its text stack (IDWriteFactory / IDWriteTextLayout)
+    #   windowscodecs- WIC: the device-side bitmap the D2D engine renders into
+    #                  (all three ship with Windows, so no redistributable)
     target_link_libraries(${target} PRIVATE
-      user32 shell32 ole32 dwmapi comctl32 runtimeobject propsys gdiplus)
+      user32 shell32 ole32 dwmapi comctl32 runtimeobject propsys gdiplus
+      d2d1 dwrite windowscodecs)
 
   elseif(APPLE)
     # macOS backend (src/macos/), for example:

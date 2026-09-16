@@ -6,10 +6,10 @@
 // drew as PNG files, loads them back and composites them onto a second canvas.
 //
 // It is both the effect preview (open examples/out/*.png afterwards) and the
-// regression test for the paint layer: the asserts run with no display, no message
+// regression test for the canvas layer: the asserts run with no display, no message
 // loop and no window, which is exactly the property the canvas abstraction is for.
 //
-// It goes through the C++ wrapper (<HeliosViewCore/Paint.h>) rather than the C API,
+// It goes through the C++ wrapper (<HeliosViewCore/Canvas.h>) rather than the C API,
 // so it doubles as that wrapper's test: every check below is written the way an
 // application would write it (owning objects, bool results, one scope per painter),
 // and the C API stays the ABI underneath.
@@ -17,11 +17,11 @@
 // Usage:
 //   HeliosViewCanvasTest            run the checks and write examples/out/*.png
 //   HeliosViewCanvasTest --engine=gdi|gdi+|native|auto|d2d
-//                                   build the canvases on a specific paint engine
+//                                   build the canvases on a specific canvas engine
 //
 // Exit code 0 = every check passed, 1 = at least one failed.
 
-#include <HeliosViewCore/Paint.h>
+#include <HeliosViewCore/Canvas.h>
 
 #include <cmath>
 #include <cstdio>
@@ -107,6 +107,8 @@ PaintEngine engine_from_name(const std::string& name)
 {
     if (name.empty() || name == "auto")
         return PaintEngine::Auto;
+    if (name == "builtin")
+        return PaintEngine::Builtin;
     if (name == "native")
         return PaintEngine::Native;
     if (name == "accelerated")
@@ -119,6 +121,8 @@ PaintEngine engine_from_name(const std::string& name)
         return PaintEngine::GdiPlus;
     if (name == "d2d" || name == "direct2d")
         return PaintEngine::D2D;
+    if (name == "blend2d")
+        return PaintEngine::Blend2D;
     std::printf("unknown engine '%s'\n", name.c_str());
     return PaintEngine::Auto;
 }
@@ -126,15 +130,16 @@ PaintEngine engine_from_name(const std::string& name)
 void describe_engines()
 {
     const std::vector<PaintEngine> available = helios::engines();
-    std::printf("paint engines: %d registered\n", static_cast<int>(available.size()));
+    std::printf("canvas engines: %d registered\n", static_cast<int>(available.size()));
     for (size_t i = 0; i < available.size(); ++i) {
         const PaintEngine id = available[i];
         std::printf("  [%d] %-14s compiled=%d probe=%d\n", static_cast<int>(i), helios::engineName(id).c_str(),
                     helios::engineCompiled(id) ? 1 : 0, helios::engineProbe(id) ? 1 : 0);
     }
-    /* The concept names answer for whatever this platform provides, so a portable
-     * caller never has to know that "native" means GDI+ here. */
-    std::printf("  concept: native=%d accelerated=%d software=%d\n",
+    /* The concept names answer for whatever this platform provides: Builtin is the
+     * consistent cross-platform engine, Native is the OS native renderer. */
+    std::printf("  concept: builtin=%d native=%d (legacy: accelerated=%d software=%d)\n",
+                helios::engineProbe(PaintEngine::Builtin) ? 1 : 0,
                 helios::engineProbe(PaintEngine::Native) ? 1 : 0,
                 helios::engineProbe(PaintEngine::Accelerated) ? 1 : 0,
                 helios::engineProbe(PaintEngine::Software) ? 1 : 0);
@@ -240,7 +245,7 @@ void check_drawing(PaintEngine engine, const std::string& out_dir)
     /* A solid filled rectangle: the interior must be exactly the requested color. */
     p.fillRect(20, 20, 200, 120, 0xFF2D7FF9u);
     check(color_near(pixel(canvas, 120, 80), 0xFF2D7FF9u, 1), "fill_rect fills its interior");
-    check(color_near(pixel(canvas, 10, 10), 0xFF1E2430u, 1), "fill_rect does not paint outside itself");
+    check(color_near(pixel(canvas, 10, 10), 0xFF1E2430u, 1), "fill_rect does not draw outside itself");
 
     /* Stroke only: a rectangle outline leaves its interior alone. */
     p.setStroke(0xFFFFC857u, 3.0f);
@@ -302,10 +307,10 @@ void check_drawing(PaintEngine engine, const std::string& out_dir)
     /* ---- clipping ---- */
     p.setClipRect(0, 0, 40, 40);
     p.fillRect(0, 0, 200, 200, 0xFFFF3B30u);
-    check(color_near(pixel(canvas, 20, 20), 0xFFFF3B30u, 1), "clipped fill paints inside the clip");
+    check(color_near(pixel(canvas, 20, 20), 0xFFFF3B30u, 1), "clipped fill draws inside the clip");
     /* Sample well clear of the clip and of everything drawn earlier (the ellipse and
      * the heart path both pass near the middle of the canvas). */
-    check(color_near(pixel(canvas, 620, 400), 0xFF1E2430u, 1), "clipped fill paints nothing outside the clip");
+    check(color_near(pixel(canvas, 620, 400), 0xFF1E2430u, 1), "clipped fill draws nothing outside the clip");
     p.resetClip();
     check(color_near(pixel(canvas, 620, 400), 0xFF1E2430u, 1), "reset_clip does not repaint");
 
@@ -332,7 +337,7 @@ void check_drawing(PaintEngine engine, const std::string& out_dir)
 
     check(p.end(), "painter_end succeeds");
 
-    /* Every paint operation above went through one engine; save the result so the
+    /* Every canvas operation above went through one engine; save the result so the
      * effect can be looked at. */
     const std::string path_png = out_dir + "/canvas_shapes.png";
     check(canvas.save(path_png), "canvas_save writes a PNG");
@@ -436,8 +441,8 @@ void check_lines_and_curves(PaintEngine engine)
     p.setStroke(0xFFFF3B30u, 2.0f);
     p.setFill(0);
     check(p.drawLine(10, 20, 190, 20), "draw_line succeeds");
-    check(color_near(pixel(canvas, 100, 20), 0xFFFF3B30u, 30), "the line painted its midpoint");
-    check(color_near(pixel(canvas, 100, 40), 0xFF101418u, 1), "the line did not paint below itself");
+    check(color_near(pixel(canvas, 100, 20), 0xFFFF3B30u, 30), "the line drew its midpoint");
+    check(color_near(pixel(canvas, 100, 40), 0xFF101418u, 1), "the line did not draw below itself");
 
     /* draw_arc: a quarter arc inside a box. */
     p.setStroke(0xFF34C759u, 3.0f);
@@ -445,14 +450,14 @@ void check_lines_and_curves(PaintEngine engine)
     /* The arc's midpoint (45 deg) sits at center + r/sqrt(2) on both axes. */
     const int32_t arc_x = 50 + static_cast<int32_t>(30.0 / 1.41421356);
     const int32_t arc_y = 70 + static_cast<int32_t>(30.0 / 1.41421356);
-    check(!color_near(pixel(canvas, arc_x, arc_y), 0xFF101418u, 60), "the arc painted its curve");
+    check(!color_near(pixel(canvas, arc_x, arc_y), 0xFF101418u, 60), "the arc drew its curve");
     check(color_near(pixel(canvas, 50, 70), 0xFF101418u, 1), "the arc left the box center empty");
 
     /* draw_polyline, open: a zigzag. */
     const float zigzag[8] = {120, 100, 140, 60, 160, 100, 180, 60};
     p.setStroke(0xFF0A84FFu, 2.0f);
     check(p.drawPolyline(zigzag, 4), "draw_polyline succeeds");
-    check(!color_near(pixel(canvas, 140, 62), 0xFF101418u, 60), "the polyline painted a vertex");
+    check(!color_near(pixel(canvas, 140, 62), 0xFF101418u, 60), "the polyline drew a vertex");
     /* open: nothing connects the last point back to the first */
     check(color_near(pixel(canvas, 150, 100), 0xFF101418u, 30), "an open polyline does not close");
 
@@ -591,8 +596,8 @@ void check_clipping(PaintEngine engine)
     circle.addEllipse(20, 20, 60, 60);
     check(p.setClipPath(circle), "set_clip_path succeeds");
     check(p.fillRect(0, 0, 120, 120, 0xFFFF3B30u), "the clipped fill succeeds");
-    check(color_near(pixel(canvas, 50, 50), 0xFFFF3B30u, 1), "clip_path paints inside the path");
-    check(color_near(pixel(canvas, 22, 22), 0xFF101418u, 30), "clip_path paints nothing outside the path");
+    check(color_near(pixel(canvas, 50, 50), 0xFFFF3B30u, 1), "clip_path draws inside the path");
+    check(color_near(pixel(canvas, 22, 22), 0xFF101418u, 30), "clip_path draws nothing outside the path");
 
     /* clip_bounds reports the current clip's bounding box. */
     Rect bounds;
@@ -604,7 +609,7 @@ void check_clipping(PaintEngine engine)
     check(p.intersectClipRect(50, 20, 60, 60), "intersect_clip_rect succeeds");
     p.clear(0xFF101418u);
     check(p.fillRect(0, 0, 120, 120, 0xFF34C759u), "the intersecting fill succeeds");
-    check(color_near(pixel(canvas, 60, 50), 0xFF34C759u, 1), "the intersection paints inside both");
+    check(color_near(pixel(canvas, 60, 50), 0xFF34C759u, 1), "the intersection draws inside both");
     check(color_near(pixel(canvas, 30, 50), 0xFF101418u, 1), "the intersection excludes the rect-only part");
 
     /* Clip geometry is in the transform's own space: the clip lands where the transform
@@ -614,7 +619,7 @@ void check_clipping(PaintEngine engine)
     check(p.setClipRect(0, 0, 40, 40), "set_clip_rect under a transform succeeds");
     p.clear(0xFF101418u);
     check(p.fillRect(-40, -40, 200, 200, 0xFFFF9500u), "the transformed fill succeeds");
-    check(color_near(pixel(canvas, 60, 60), 0xFFFF9500u, 1), "a clip under a transform paints inside it");
+    check(color_near(pixel(canvas, 60, 60), 0xFFFF9500u, 1), "a clip under a transform draws inside it");
     check(color_near(pixel(canvas, 20, 20), 0xFF101418u, 1), "a clip under a transform stops at its edge");
     p.resetTransform();
     p.resetClip();
@@ -707,7 +712,7 @@ void check_blit_and_direct_write(PaintEngine engine)
     /* blit the whole src into dst at (16, 16). */
     check(src.blitTo(dst, 16, 16), "canvas_blit succeeds");
     check(color_near(pixel(dst, 32, 32), 0xFFFF3B30u, 1), "the blit landed at the offset");
-    check(color_near(pixel(dst, 8, 8), 0xFF101418u, 1), "the blit did not paint outside itself");
+    check(color_near(pixel(dst, 8, 8), 0xFF101418u, 1), "the blit did not draw outside itself");
 
     /* blit a sub-rect with alpha: src (8,8)-(23,23) lands at dst (0,0)-(15,15). */
     dst.fill(0xFF101418u);
@@ -784,6 +789,8 @@ void check_image_io(PaintEngine engine, const std::string& out_dir)
 
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::printf("HeliosView %s -- canvas / painter / image checks\n", heliosview_version());
     std::printf("backend: %s\n", heliosview_backend_name());
 

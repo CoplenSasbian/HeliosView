@@ -6,9 +6,9 @@
  *
  * These are the few declarations that more than one public header needs: the
  * standard error codes, the opaque window handle, and the rectangle type. They live
- * here so the umbrella header (heliosview.h) and the drawing header
- * (heliosview_paint.h) can both be included first, in either order, without a
- * circular include -- a drawing-only translation unit never has to pull in the
+ * here so the umbrella header (heliosview.h) and the canvas header
+ * (heliosview_canvas.h) can both be included first, in either order, without a
+ * circular include -- a canvas-only translation unit never has to pull in the
  * windowing API just to name a rectangle.
  *
  * Part of the public C ABI: the declarations here are stable and platform
@@ -54,7 +54,7 @@ typedef struct heliosview_menu heliosview_menu_t;
  *
  * A rectangle in the coordinate system of whatever it belongs to: screen
  * coordinates with the origin at the top-left of the primary display and y growing
- * downward (heliosview.h), or a canvas' own pixel space (heliosview_paint.h). Width
+ * downward (heliosview.h), or a canvas' own pixel space (heliosview_canvas.h). Width
  * and height are positive. */
 typedef struct heliosview_rect {
     int32_t x;      /* left */

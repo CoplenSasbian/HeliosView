@@ -10,12 +10,12 @@
 // The codec is stb (third_party/stb, public domain / MIT): read PNG, JPEG, BMP, TGA,
 // GIF (first frame), PSD, HDR, PNM, PIC; write PNG, JPEG, BMP, TGA. Deliberately
 // absent: EXIF orientation, ICC profiles, 16-bit samples, animated GIF frames (see
-// the format list in heliosview_paint.h).
+// the format list in heliosview_canvas.h).
 //
 // The canvas keeps its own file reading only for the "path" entry point: the codec
 // works on bytes (load_memory / encode), and load(path) hands it a buffer.
 
-#include "heliosview_paint_internal.h"
+#include "heliosview_canvas_internal.h"
 
 #include <cstdio>
 #include <cstring>
@@ -48,7 +48,7 @@
 #pragma warning(pop)
 #endif
 
-namespace hv::paint {
+namespace hv::canvas {
 
 namespace {
 
@@ -280,7 +280,7 @@ void load_rgba(const uint8_t* p, heliosview_pixel_format_t format, uint8_t* r, u
 
 } // namespace
 
-/* ================= Public entry points used by the paint core ================= */
+/* ================= Public entry points used by the canvas core ================= */
 
 bool codec_supports(const char* format, bool for_encoding)
 {
@@ -306,7 +306,7 @@ std::string codec_format_from_path(const char* path)
 }
 
 heliosview_canvas_t* codec_load_path(const char* path, heliosview_pixel_format_t format,
-                                     heliosview_paint_engine_t engine)
+                                     heliosview_canvas_engine_t engine)
 {
     if (!path || !*path) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "path is NULL or empty");
@@ -323,7 +323,7 @@ heliosview_canvas_t* codec_load_path(const char* path, heliosview_pixel_format_t
 }
 
 heliosview_canvas_t* codec_load_memory(const void* data, size_t size, heliosview_pixel_format_t format,
-                                       heliosview_paint_engine_t engine)
+                                       heliosview_canvas_engine_t engine)
 {
     if (!data || size == 0) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "data is NULL or size is 0");
@@ -483,4 +483,4 @@ int codec_encode(const CanvasData& canvas, const char* format, int quality, uint
     return 0;
 }
 
-} // namespace hv::paint
+} // namespace hv::canvas

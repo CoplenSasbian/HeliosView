@@ -1,16 +1,16 @@
 #pragma once
 
 /**
- * HeliosView.Core -- painting: canvases, painters, paths and images.
+ * HeliosView.Core -- drawing: canvases, painters, paths and images.
  *
- * A typed, RAII wrapper over <HeliosView/heliosview_paint.h>; the C header stays
+ * A typed, RAII wrapper over <HeliosView/heliosview_canvas.h>; the C header stays
  * the contract, this one only changes the spelling:
  *
  *   heliosview_canvas_t*           -> helios::Canvas    (owns it, frees on destruction)
  *   heliosview_painter_begin/_end  -> helios::Painter   (begins in the constructor,
  *                                                        ends in the destructor)
  *   heliosview_path_t*             -> helios::Path      (owns it)
- *   heliosview_paint_engine_t      -> helios::PaintEngine
+ *   heliosview_canvas_engine_t      -> helios::PaintEngine
  *   heliosview_pixel_format_t      -> helios::PixelFormat
  *   heliosview_painter_state_t     -> helios::PainterState
  *   heliosview_font_desc_t         -> helios::FontDesc  (owns the family string)
@@ -44,12 +44,12 @@
  *
  * Threading: a canvas is memory, so it may be used from any thread -- one thread at
  * a time. A painter stays on the thread that created it, and a canvas must outlive
- * every painter begun on it. The window-paint functions at the end of
- * heliosview_paint.h are deliberately not wrapped: they are not implemented yet
+ * every painter begun on it. The window-canvas functions at the end of
+ * heliosview_canvas.h are deliberately not wrapped: they are not implemented yet
  * (they report HELIOSVIEW_ERROR_UNSUPPORTED on every call).
  */
 
-#include <HeliosView/heliosview_paint.h>
+#include <HeliosView/heliosview_canvas.h>
 #include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/System.h>
 
@@ -71,19 +71,20 @@ class Path;
 /* ---------- enums ---------- */
 
 // The implementation that turns painter calls into pixels (mirrors
-// heliosview_paint_engine_t). Portable code uses only Auto / Native / Accelerated /
-// Software: the concept names resolve per platform (Native is Direct2D's GDI+
-// predecessor on Windows, Core Graphics on macOS, Cairo on Linux). The vendor
-// values are valid on every platform too -- one this build does not provide simply
-// fails to create a canvas (see engineCompiled / engineProbe).
+// heliosview_canvas_engine_t). Portable code uses only Auto / Builtin / Native:
+// Builtin is the consistent high-performance cross-platform engine (Blend2D).
+// Native is this platform's OS 2D engine (GDI+ on Windows, Core Graphics on macOS,
+// Cairo on Linux).
 enum class PaintEngine : int32_t {
-	Auto = HELIOSVIEW_ENGINE_AUTO,               // best available: accelerated -> native -> software
-	Native = HELIOSVIEW_ENGINE_NATIVE,           // this platform's native 2D engine
-	Accelerated = HELIOSVIEW_ENGINE_ACCELERATED, // GPU; fails rather than silently falling back
-	Software = HELIOSVIEW_ENGINE_SOFTWARE,       // the library's own rasterizer: identical everywhere
+	Auto = HELIOSVIEW_ENGINE_AUTO,               // best available: builtin -> native
+	Builtin = HELIOSVIEW_ENGINE_BUILTIN,         // cross-platform high-performance engine (Blend2D)
+	Native = HELIOSVIEW_ENGINE_NATIVE,           // this platform's native 2D engine (GDI+ on Windows)
+	Software = HELIOSVIEW_ENGINE_SOFTWARE,       // alias for Builtin
+	Accelerated = HELIOSVIEW_ENGINE_ACCELERATED, // optional GPU engine (Direct2D on Windows)
 	Gdi = HELIOSVIEW_ENGINE_GDI,                 // Windows: classic GDI (fastest, no AA, no alpha)
 	GdiPlus = HELIOSVIEW_ENGINE_GDI_PLUS,        // Windows: == Native
 	D2D = HELIOSVIEW_ENGINE_D2D,                 // Windows: == Accelerated
+	Blend2D = HELIOSVIEW_ENGINE_BLEND2D,         // Cross-platform: == Builtin
 	CoreGraphics = HELIOSVIEW_ENGINE_CORE_GRAPHICS,
 	Metal = HELIOSVIEW_ENGINE_METAL,
 	Cairo = HELIOSVIEW_ENGINE_CAIRO,
@@ -99,7 +100,7 @@ enum class PixelFormat : int32_t {
 	Gray8 = HELIOSVIEW_FORMAT_GRAY8,              // one luminance byte per pixel
 };
 
-// A capability an engine may or may not have (mirrors heliosview_paint_feature_t);
+// A capability an engine may or may not have (mirrors heliosview_canvas_feature_t);
 // ask with engineSupportsFeature() instead of assuming.
 enum class PaintFeature : int32_t {
 	Antialias = HELIOSVIEW_FEATURE_ANTIALIAS,
@@ -188,7 +189,7 @@ struct FontDesc {
 	FontFlag flags = FontFlag::None;
 };
 
-// Everything that decides how a drawing call paints (mirrors
+// Everything that decides how a drawing call draws (mirrors
 // heliosview_painter_state_t). The transform and the clip are separate: they are
 // part of the save()/restore() stack, but not of this struct.
 struct PainterState {
@@ -224,12 +225,12 @@ inline constexpr Matrix identityMatrix()
 
 /* ---------- conversions to/from the C forms ---------- */
 
-inline heliosview_paint_engine_t toC(PaintEngine engine)
+inline heliosview_canvas_engine_t toC(PaintEngine engine)
 {
-	return static_cast<heliosview_paint_engine_t>(engine);
+	return static_cast<heliosview_canvas_engine_t>(engine);
 }
 
-inline PaintEngine fromC(heliosview_paint_engine_t engine)
+inline PaintEngine fromC(heliosview_canvas_engine_t engine)
 {
 	return static_cast<PaintEngine>(engine);
 }
@@ -244,9 +245,9 @@ inline PixelFormat fromC(heliosview_pixel_format_t format)
 	return static_cast<PixelFormat>(format);
 }
 
-inline heliosview_paint_feature_t toC(PaintFeature feature)
+inline heliosview_canvas_feature_t toC(PaintFeature feature)
 {
-	return static_cast<heliosview_paint_feature_t>(feature);
+	return static_cast<heliosview_canvas_feature_t>(feature);
 }
 
 inline heliosview_line_cap_t toC(LineCap cap)
@@ -390,12 +391,12 @@ inline bool engineSupportsFeature(PaintEngine engine, PaintFeature feature)
 // call. Set it once, before creating canvases; Auto restores the default.
 inline void setDefaultPaintEngine(PaintEngine engine)
 {
-	heliosview_set_default_paint_engine(toC(engine));
+	heliosview_set_default_canvas_engine(toC(engine));
 }
 
 inline PaintEngine defaultPaintEngine()
 {
-	return fromC(heliosview_default_paint_engine());
+	return fromC(heliosview_default_canvas_engine());
 }
 
 // Whether the codec can read (forEncoding == false) or write (true) the named format
@@ -415,7 +416,7 @@ inline bool formatSupported(std::string_view format, bool forEncoding = false)
 // failed factory call) is a plain empty object, not a broken one: everything on it
 // fails and nothing crashes.
 //
-// Painting on it needs a Painter; while one is active the canvas cannot be resized,
+// Drawing on it needs a Painter; while one is active the canvas cannot be resized,
 // filled, saved or blitted (the C layer rejects that with
 // HELIOSVIEW_ERROR_INVALID_STATE), because the engine's copy of the pixels is not
 // flushed until the painter ends.
@@ -1097,7 +1098,7 @@ public:
 	// scaled to fit, under the current transform, clip, alpha and antialias. `srcRect`
 	// selects a region of the source (NULL = all of it); a negative dw / dh mirrors it.
 	// The source may be any canvas, any format, any engine -- but not the canvas being
-	// painted into.
+	// drawn into.
 	bool drawImage(Canvas& image, float dx, float dy, float dw, float dh, const Rect* srcRect = nullptr,
 				   float alpha = 1.0f)
 	{

@@ -1,6 +1,6 @@
-// HeliosView -- win32 paint engine: GDI+.
+// HeliosView -- win32 canvas engine: GDI+.
 //
-// This is one implementation of hv::paint::Engine (see heliosview_paint_internal.h):
+// This is one implementation of hv::canvas::Engine (see heliosview_canvas_internal.h):
 // it turns painter calls into GDI+ calls writing into the canvas' own pixel buffer.
 // It wraps the caller's memory in a Gdiplus::Bitmap (no copy), owns the pens,
 // brushes, fonts and paths for the duration of a drawing session, and knows nothing
@@ -8,16 +8,16 @@
 // interface demands.
 //
 // GDI+ is a Windows system component (gdiplus.dll, linked through gdiplus.lib), so
-// this engine costs no redistribution -- the same role Core Gdiplus::Graphics plays on macOS
+// this engine costs no redistribution -- the same role Core Graphics plays on macOS
 // and Cairo on Linux. It brings what the classic GDI engine cannot: antialiasing,
 // per-pixel alpha, arbitrary affine transforms, path filling and text metrics.
 //
 // Threading: GDI+ objects are not shared across threads. This engine is used by
-// whichever thread began the painter; heliosview_paint_internal.h documents the
+// whichever thread began the painter; heliosview_canvas_internal.h documents the
 // canvas contract (one thread at a time), and the GDI+ startup is the only
 // process-wide, once-only piece of state here.
 
-#include "../heliosview_paint_internal.h"
+#include "../heliosview_canvas_internal.h"
 #include "../win32/heliosview_win32_internal.h" /* utf8_to_wide + hv_fail_win32 */
 
 #include <windows.h>
@@ -32,10 +32,10 @@
 #include <vector>
 
 /* Every GDI+ type is spelled Gdiplus::<name> rather than pulled in with
- * `using namespace Gdiplus`: hv::paint has a Color and a Rect of its own, and an
+ * `using namespace Gdiplus`: hv::canvas has a Color and a Rect of its own, and an
  * unqualified lookup would silently pick the wrong one. */
 
-namespace hv::paint {
+namespace hv::canvas {
 namespace {
 
 /* ================= GDI+ lifetime =================
@@ -83,14 +83,14 @@ inline Gdiplus::Color to_color(uint32_t argb, float alpha_factor)
 
 /* GDI+ works in float rectangles; a negative width/height means the shape is mirrored
  * about that corner, which normalized() flips back. */
-inline Gdiplus::RectF to_rectf(const hv::paint::Rect& r)
+inline Gdiplus::RectF to_rectf(const hv::canvas::Rect& r)
 {
     return Gdiplus::RectF(r.x, r.y, r.w, r.h);
 }
 
 /* Gdiplus::RectF has no Normalize() (only Rect does); a negative size means "mirrored about
  * the origin corner", so flip it in place. */
-inline Gdiplus::RectF normalized(const hv::paint::Rect& r)
+inline Gdiplus::RectF normalized(const hv::canvas::Rect& r)
 {
     Gdiplus::RectF rect = to_rectf(r);
     if (rect.Width < 0.0f) {
@@ -119,7 +119,7 @@ inline Gdiplus::RectF normalized(Gdiplus::RectF rect)
 
 /* ================= Path conversion =================
  *
- * The engine-neutral PathData (heliosview_paint_internal.h) becomes a Gdiplus::GraphicsPath.
+ * The engine-neutral PathData (heliosview_canvas_internal.h) becomes a Gdiplus::GraphicsPath.
  * Whole-shape verbs map to the native Add* so an engine rasterizes them exactly like
  * the equivalent direct call. */
 void build_graphics_path(const PathData& data, Gdiplus::GraphicsPath& out)
@@ -378,6 +378,20 @@ public:
 
     void clip_bounds(Rect& out) const override { out = m_clip_bounds; }
 
+    void save() override
+    {
+        m_saved_gdi_states.push_back(SavedGdiState{m_graphics.Save(), m_clip_bounds});
+    }
+
+    void restore() override
+    {
+        if (!m_saved_gdi_states.empty()) {
+            m_graphics.Restore(m_saved_gdi_states.back().gstate);
+            m_clip_bounds = m_saved_gdi_states.back().clip_bounds;
+            m_saved_gdi_states.pop_back();
+        }
+    }
+
     /* Pushes m_transform into the Graphics. A named local, because SetTransform takes
      * a pointer and a temporary would not bind. */
     void apply_transform()
@@ -404,7 +418,7 @@ public:
         Gdiplus::GraphicsState state = m_graphics.Save();
         m_graphics.ResetTransform();
         m_graphics.ResetClip();
-        m_graphics.Clear(to_color(argb, m_state.alpha));
+        m_graphics.Clear(to_color(argb, 1.0f));
         m_graphics.Restore(state);
     }
 
@@ -766,13 +780,19 @@ private:
     std::unique_ptr<Gdiplus::SolidBrush> m_fill;
     std::unique_ptr<Gdiplus::Font> m_font;
     std::unique_ptr<Gdiplus::FontFamily> m_family;
+
+    struct SavedGdiState {
+        Gdiplus::GraphicsState gstate;
+        Rect clip_bounds;
+    };
+    std::vector<SavedGdiState> m_saved_gdi_states;
 };
 
 /* ================= Engine ================= */
 
 class GdiPlusEngine final : public Engine {
 public:
-    heliosview_paint_engine_t id() const override { return HELIOSVIEW_ENGINE_GDI_PLUS; }
+    heliosview_canvas_engine_t id() const override { return HELIOSVIEW_ENGINE_GDI_PLUS; }
     const char* name() const override { return "gdi+"; }
     bool probe() override { return gdiplus_ready(); }
     heliosview_pixel_format_t preferred_format() const override
@@ -793,7 +813,7 @@ public:
     }
     bool supports_feature(int feature) const override
     {
-        switch (static_cast<heliosview_paint_feature_t>(feature)) {
+        switch (static_cast<heliosview_canvas_feature_t>(feature)) {
         case HELIOSVIEW_FEATURE_ANTIALIAS:
         case HELIOSVIEW_FEATURE_ALPHA_BLEND:
         case HELIOSVIEW_FEATURE_TRANSFORM:
@@ -841,4 +861,4 @@ const EngineRegistration g_registration(&g_engine, HELIOSVIEW_ENGINE_GDI_PLUS,
                                         HELIOSVIEW_ENGINE_NATIVE);
 
 } // namespace
-} // namespace hv::paint
+} // namespace hv::canvas

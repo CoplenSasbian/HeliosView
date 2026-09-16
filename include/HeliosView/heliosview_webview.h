@@ -215,7 +215,7 @@ HELIOSVIEW_API int heliosview_webview_is_low_footprint(heliosview_webview_t* web
 /* ================= WebView background color =================
  *
  * WebView2 DefaultBackgroundColor (ICoreWebView2Controller2): the color the
- * WebView paints behind the page content (default: opaque white). An alpha of
+ * WebView draws behind the page content (default: opaque white). An alpha of
  * 0 makes the background transparent — the parent window's own content shows
  * through the WebView (to see the desktop through it, the parent window must
  * itself be transparent, e.g. a layered window). Channels are (red, green,

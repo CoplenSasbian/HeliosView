@@ -5,7 +5,8 @@
 # configure; the cheap probe below skips git entirely on a populated tree.
 #
 # Exactly two git invocations are needed (no per-library loop):
-#   1. HeliosView's own submodules: stdexec + the Boost superproject.
+#   1. HeliosView's own submodules: stdexec, the Boost superproject and the
+#      blend2d + asmjit pair that the canvas layer's BUILTIN engine is built on.
 #   2. Every required Boost library in ONE call, run inside third_party/boost.
 #      Nested pathspecs are relative to the Boost superproject — from the
 #      HeliosView root git rejects them ("pathspec 'third_party/boost/libs/asio'
@@ -43,6 +44,8 @@ set(HELIOSVIEW_SUBMODULE_JOBS 4 CACHE STRING
 set(_heliosview_submodule_markers
         third_party/stdexec/.git
         third_party/boost/.git
+        third_party/blend2d/.git
+        third_party/asmjit/.git
 )
 foreach(_lib IN LISTS HELIOSVIEW_BOOST_LIBS)
     list(APPEND _heliosview_submodule_markers "third_party/boost/libs/${_lib}/.git")
@@ -111,11 +114,12 @@ else()
         set(_jobs_args "")
     endif()
 
-    # 1. HeliosView's own submodules: stdexec and the Boost superproject.
-    _heliosview_git("Fetching HeliosView submodules (stdexec, Boost superproject)..."
+    # 1. HeliosView's own submodules: stdexec, the Boost superproject and the
+    #    blend2d + asmjit pair.
+    _heliosview_git("Fetching HeliosView submodules (stdexec, Boost superproject, blend2d, asmjit)..."
             "${HELIOSVIEW_PROJECT_ROOT}"
             submodule update --init --depth 1 --progress ${_jobs_args}
-            -- third_party/stdexec third_party/boost)
+            -- third_party/stdexec third_party/boost third_party/blend2d third_party/asmjit)
 
     # 2. All required Boost libraries in a single call.
     set(_boost_lib_paths "")

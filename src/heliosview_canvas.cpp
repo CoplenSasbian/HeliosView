@@ -1,17 +1,17 @@
-// HeliosView -- platform-independent paint core: the engine registry, the canvas
+// HeliosView -- platform-independent canvas core: the engine registry, the canvas
 // (pixel storage + layout), the path builder, and the painter session that drives
 // an engine's Context. Engine implementations live in src/<platform>/ and follow
-// the contract in heliosview_paint_internal.h.
+// the contract in heliosview_canvas_internal.h.
 //
 // Nothing here knows about a platform, a window, or an image format: the pixels
-// live here, the drawing goes through hv::paint::Context, and the image codec is a
+// live here, the drawing goes through hv::canvas::Context, and the image codec is a
 // separate translation unit shared by every engine.
 //
 // The public heliosview_* functions are defined at global scope with C linkage
 // (they are declared inside extern "C" in the public header); everything else
-// lives in hv::paint.
+// lives in hv::canvas.
 
-#include "heliosview_paint_internal.h"
+#include "heliosview_canvas_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace hv::paint {
+namespace hv::canvas {
 
 /* ================= Format helpers ================= */
 
@@ -54,7 +54,7 @@ void refresh_data(heliosview_canvas& canvas)
     canvas.data.pixels = canvas.storage.empty() ? nullptr : canvas.storage.data();
 }
 
-heliosview_painter_state_t default_painter_state()
+heliosview_painter_state_t default_canvas_state()
 {
     heliosview_painter_state_t state{};
     state.stroke_color = 0; /* off */
@@ -74,21 +74,20 @@ heliosview_painter_state_t default_painter_state()
 
 EngineEntry g_registry[kMaxEngineNames];
 size_t g_registry_size = 0;
-heliosview_paint_engine_t g_default_engine = HELIOSVIEW_ENGINE_AUTO;
+heliosview_canvas_engine_t g_default_engine = HELIOSVIEW_ENGINE_AUTO;
 
 namespace detail1 {
-/* Preference order for HELIOSVIEW_ENGINE_AUTO: the best available implementation
- * first, ending with the one that cannot fail. Documented in the public header. */
-constexpr heliosview_paint_engine_t kAutoChain[] = {
-    HELIOSVIEW_ENGINE_ACCELERATED,
+/* Preference order for HELIOSVIEW_ENGINE_AUTO: BUILTIN first (consistent cross-platform),
+ * then NATIVE (OS native renderer). */
+constexpr heliosview_canvas_engine_t kAutoChain[] = {
+    HELIOSVIEW_ENGINE_BUILTIN,
     HELIOSVIEW_ENGINE_NATIVE,
-    HELIOSVIEW_ENGINE_SOFTWARE,
 };
 
 } // namespace detail1
 
-using namespace detail1; /* visible to the rest of hv::paint */
-bool register_engine(Engine* engine, const heliosview_paint_engine_t* names, size_t name_count)
+using namespace detail1; /* visible to the rest of hv::canvas */
+bool register_engine(Engine* engine, const heliosview_canvas_engine_t* names, size_t name_count)
 {
     if (!engine || !names || name_count == 0)
         return false;
@@ -106,13 +105,13 @@ bool register_engine(Engine* engine, const heliosview_paint_engine_t* names, siz
     return true;
 }
 
-bool register_engine(Engine* engine, heliosview_paint_engine_t vendor, heliosview_paint_engine_t concept_name)
+bool register_engine(Engine* engine, heliosview_canvas_engine_t vendor, heliosview_canvas_engine_t concept_name)
 {
-    const heliosview_paint_engine_t names[2] = {vendor, concept_name};
+    const heliosview_canvas_engine_t names[2] = {vendor, concept_name};
     return register_engine(engine, names, 2);
 }
 
-Engine* find_engine(heliosview_paint_engine_t engine)
+Engine* find_engine(heliosview_canvas_engine_t engine)
 {
     for (size_t i = 0; i < g_registry_size; ++i)
         if (g_registry[i].name == engine)
@@ -120,13 +119,13 @@ Engine* find_engine(heliosview_paint_engine_t engine)
     return nullptr;
 }
 
-Engine* resolve_engine(heliosview_paint_engine_t engine)
+Engine* resolve_engine(heliosview_canvas_engine_t engine)
 {
     if (engine == HELIOSVIEW_ENGINE_AUTO)
-        engine = g_default_engine; /* heliosview_set_default_paint_engine overrides the chain */
+        engine = g_default_engine; /* heliosview_set_default_canvas_engine overrides the chain */
 
     if (engine == HELIOSVIEW_ENGINE_AUTO) {
-        for (const heliosview_paint_engine_t candidate : kAutoChain)
+        for (const heliosview_canvas_engine_t candidate : kAutoChain)
             if (Engine* e = find_engine(candidate); e && e->probe())
                 return e;
         return nullptr;
@@ -137,9 +136,9 @@ Engine* resolve_engine(heliosview_paint_engine_t engine)
     return nullptr;
 }
 
-} // namespace hv::paint
+} // namespace hv::canvas
 
-using namespace hv::paint;
+using namespace hv::canvas;
 
 
 /* ================= Color conversion =================
@@ -267,8 +266,8 @@ void blend_pixel(const CanvasData& dst, int32_t x, int32_t y, uint32_t src_argb,
 
 } // namespace detail2
 
-using namespace detail2; /* visible to the rest of hv::paint */
-void hv::paint::convert_copy(const CanvasData& src, Rect src_rect, const CanvasData& dst, int32_t dst_x,
+using namespace detail2; /* visible to the rest of hv::canvas */
+void hv::canvas::convert_copy(const CanvasData& src, Rect src_rect, const CanvasData& dst, int32_t dst_x,
                              int32_t dst_y, float alpha)
 {
     const int32_t w = static_cast<int32_t>(src_rect.w);
@@ -305,19 +304,19 @@ namespace detail3 {
  * qualified lookup from there. They are not exported (internal linkage would be the
  * only thing an anonymous namespace added, and the header does not declare them). */
 
-Engine* engine_for_canvas(heliosview_paint_engine_t requested)
+Engine* engine_for_canvas(heliosview_canvas_engine_t requested)
 {
     if (Engine* e = resolve_engine(requested))
         return e;
     if (requested == HELIOSVIEW_ENGINE_AUTO)
-        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "no paint engine is available on this platform");
+        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "no canvas engine is available on this platform");
     else
-        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "the requested paint engine is not available");
+        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "the requested canvas engine is not available");
     return nullptr;
 }
 
 heliosview_canvas_t* canvas_alloc(int32_t width, int32_t height, heliosview_pixel_format_t format,
-                                  heliosview_paint_engine_t engine_id)
+                                  heliosview_canvas_engine_t engine_id)
 {
     if (width <= 0 || height <= 0) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas size must be positive");
@@ -347,7 +346,7 @@ heliosview_canvas_t* canvas_alloc(int32_t width, int32_t height, heliosview_pixe
         canvas->adapter = engine->create_canvas(canvas->data);
         if (!canvas->adapter) {
             hv::hv_dealloc(canvas);
-            hv_fail(HELIOSVIEW_ERROR_GENERIC, "the paint engine could not wrap the canvas pixels");
+            hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas engine could not wrap the canvas pixels");
             return nullptr;
         }
     } catch (const std::bad_alloc&) {
@@ -405,9 +404,9 @@ bool shape_state(const Painter* p, heliosview_painter_state_t* out)
 
 } // namespace detail3
 
-using namespace detail3; /* visible to the rest of hv::paint */
+using namespace detail3; /* visible to the rest of hv::canvas */
 
-/* The helper block above is the last one inside hv::paint; close it here. */
+/* The helper block above is the last one inside hv::canvas; close it here. */
 
 
 /* ================= Public C API: engine queries ================= */
@@ -419,63 +418,64 @@ int heliosview_engine_count(void)
     /* Count distinct engines, not names: an engine registered under a concept name
      * and a vendor name is one engine. */
     int count = 0;
-    hv::paint::Engine* seen[hv::paint::kMaxEngineNames];
-    for (size_t i = 0; i < hv::paint::g_registry_size; ++i) {
+    hv::canvas::Engine* seen[hv::canvas::kMaxEngineNames];
+    for (size_t i = 0; i < hv::canvas::g_registry_size; ++i) {
         bool known = false;
         for (int j = 0; j < count; ++j)
-            if (seen[j] == hv::paint::g_registry[i].engine)
+            if (seen[j] == hv::canvas::g_registry[i].engine)
                 known = true;
         if (!known)
-            seen[count++] = hv::paint::g_registry[i].engine;
+            seen[count++] = hv::canvas::g_registry[i].engine;
     }
     return count;
 }
 
-heliosview_paint_engine_t heliosview_engine_at(int index)
+heliosview_canvas_engine_t heliosview_engine_at(int index)
 {
     if (index < 0)
         return HELIOSVIEW_ENGINE_AUTO;
-    hv::paint::Engine* seen[hv::paint::kMaxEngineNames];
+    hv::canvas::Engine* seen[hv::canvas::kMaxEngineNames];
     int count = 0;
-    for (size_t i = 0; i < hv::paint::g_registry_size; ++i) {
+    for (size_t i = 0; i < hv::canvas::g_registry_size; ++i) {
         bool known = false;
         for (int j = 0; j < count; ++j)
-            if (seen[j] == hv::paint::g_registry[i].engine)
+            if (seen[j] == hv::canvas::g_registry[i].engine)
                 known = true;
         if (!known) {
             if (count == index)
-                return hv::paint::g_registry[i].engine->id();
-            seen[count++] = hv::paint::g_registry[i].engine;
+                return hv::canvas::g_registry[i].engine->id();
+            seen[count++] = hv::canvas::g_registry[i].engine;
         }
     }
     return HELIOSVIEW_ENGINE_AUTO;
 }
 
-int heliosview_engine_compiled(heliosview_paint_engine_t engine)
+int heliosview_engine_compiled(heliosview_canvas_engine_t engine)
 {
     if (engine == HELIOSVIEW_ENGINE_AUTO)
         return heliosview_engine_count() > 0 ? 1 : 0;
-    return hv::paint::find_engine(engine) ? 1 : 0;
+    return hv::canvas::find_engine(engine) ? 1 : 0;
 }
 
-int heliosview_engine_probe(heliosview_paint_engine_t engine)
+int heliosview_engine_probe(heliosview_canvas_engine_t engine)
 {
-    return hv::paint::resolve_engine(engine) ? 1 : 0;
+    return hv::canvas::resolve_engine(engine) ? 1 : 0;
 }
 
-const char* heliosview_engine_name(heliosview_paint_engine_t engine)
+const char* heliosview_engine_name(heliosview_canvas_engine_t engine)
 {
     if (engine == HELIOSVIEW_ENGINE_AUTO)
         return "auto";
-    if (hv::paint::Engine* e = hv::paint::find_engine(engine))
+    if (hv::canvas::Engine* e = hv::canvas::find_engine(engine))
         return e->name();
     switch (engine) {
+    case HELIOSVIEW_ENGINE_BUILTIN: return "builtin";
     case HELIOSVIEW_ENGINE_NATIVE: return "native";
     case HELIOSVIEW_ENGINE_ACCELERATED: return "accelerated";
-    case HELIOSVIEW_ENGINE_SOFTWARE: return "software";
     case HELIOSVIEW_ENGINE_GDI: return "gdi";
     case HELIOSVIEW_ENGINE_GDI_PLUS: return "gdi+";
     case HELIOSVIEW_ENGINE_D2D: return "d2d";
+    case HELIOSVIEW_ENGINE_BLEND2D: return "blend2d";
     case HELIOSVIEW_ENGINE_CORE_GRAPHICS: return "coregraphics";
     case HELIOSVIEW_ENGINE_METAL: return "metal";
     case HELIOSVIEW_ENGINE_CAIRO: return "cairo";
@@ -483,36 +483,36 @@ const char* heliosview_engine_name(heliosview_paint_engine_t engine)
     }
 }
 
-int heliosview_engine_supports_feature(heliosview_paint_engine_t engine, heliosview_paint_feature_t feature)
+int heliosview_engine_supports_feature(heliosview_canvas_engine_t engine, heliosview_canvas_feature_t feature)
 {
-    hv::paint::Engine* e = hv::paint::resolve_engine(engine);
+    hv::canvas::Engine* e = hv::canvas::resolve_engine(engine);
     if (!e)
         return 0;
     return e->supports_feature(static_cast<int>(feature)) ? 1 : 0;
 }
 
-void heliosview_set_default_paint_engine(heliosview_paint_engine_t engine)
+void heliosview_set_default_canvas_engine(heliosview_canvas_engine_t engine)
 {
-    hv::paint::g_default_engine = engine;
+    hv::canvas::g_default_engine = engine;
 }
 
-heliosview_paint_engine_t heliosview_default_paint_engine(void)
+heliosview_canvas_engine_t heliosview_default_canvas_engine(void)
 {
-    return hv::paint::g_default_engine;
+    return hv::canvas::g_default_engine;
 }
 
 /* ================= Public C API: canvas ================= */
 
 heliosview_canvas_t* heliosview_canvas_create(int32_t width, int32_t height,
                                               heliosview_pixel_format_t format,
-                                              heliosview_paint_engine_t engine)
+                                              heliosview_canvas_engine_t engine)
 {
     return canvas_alloc(width, height, format, engine);
 }
 
 heliosview_canvas_t* heliosview_canvas_clone(const heliosview_canvas_t* canvas,
                                              heliosview_pixel_format_t format,
-                                             heliosview_paint_engine_t engine)
+                                             heliosview_canvas_engine_t engine)
 {
     if (!canvas) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas is NULL");
@@ -520,16 +520,16 @@ heliosview_canvas_t* heliosview_canvas_clone(const heliosview_canvas_t* canvas,
     }
     const heliosview_pixel_format_t want_format =
         format == HELIOSVIEW_FORMAT_AUTO ? canvas->data.format : format;
-    const heliosview_paint_engine_t want_engine =
+    const heliosview_canvas_engine_t want_engine =
         engine == HELIOSVIEW_ENGINE_AUTO ? canvas->engine_id : engine;
 
     heliosview_canvas_t* copy = heliosview_canvas_create(canvas->data.width, canvas->data.height,
                                                          want_format, want_engine);
     if (!copy)
         return nullptr;
-    const hv::paint::Rect all{0, 0, static_cast<float>(canvas->data.width),
+    const hv::canvas::Rect all{0, 0, static_cast<float>(canvas->data.width),
                               static_cast<float>(canvas->data.height)};
-    hv::paint::convert_copy(canvas->data, all, copy->data, 0, 0, 1.0f);
+    hv::canvas::convert_copy(canvas->data, all, copy->data, 0, 0, 1.0f);
     if (copy->adapter)
         copy->adapter->reload(); /* the pixels were written behind the engine's back */
     return copy;
@@ -565,7 +565,7 @@ heliosview_pixel_format_t heliosview_canvas_format(const heliosview_canvas_t* ca
     return canvas ? canvas->data.format : HELIOSVIEW_FORMAT_AUTO;
 }
 
-heliosview_paint_engine_t heliosview_canvas_engine(const heliosview_canvas_t* canvas)
+heliosview_canvas_engine_t heliosview_canvas_engine(const heliosview_canvas_t* canvas)
 {
     return canvas ? canvas->engine_id : HELIOSVIEW_ENGINE_AUTO;
 }
@@ -600,11 +600,11 @@ int heliosview_canvas_resize(heliosview_canvas_t* canvas, int32_t width, int32_t
     if (width <= 0 || height <= 0)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas size must be positive");
     if (canvas->active_painter)
-        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas is being painted");
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "a painter is active on the canvas");
 
     canvas->data.width = width;
     canvas->data.height = height;
-    canvas->data.stride = stride_for(width, hv::paint::bytes_per_pixel(canvas->data.format));
+    canvas->data.stride = stride_for(width, hv::canvas::bytes_per_pixel(canvas->data.format));
     try {
         canvas->storage.assign(static_cast<size_t>(canvas->data.stride) * static_cast<size_t>(height), 0);
     } catch (const std::bad_alloc&) {
@@ -614,7 +614,7 @@ int heliosview_canvas_resize(heliosview_canvas_t* canvas, int32_t width, int32_t
     /* The pixels moved: the engine must be handed the new buffer. */
     canvas->adapter = canvas->engine->create_canvas(canvas->data);
     if (!canvas->adapter)
-        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the paint engine could not wrap the resized canvas");
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas engine could not wrap the resized canvas");
     return 0;
 }
 
@@ -623,15 +623,15 @@ int heliosview_canvas_fill(heliosview_canvas_t* canvas, uint32_t argb)
     if (!canvas)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas is NULL");
     if (canvas->active_painter)
-        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas is being painted; use painter_clear");
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "a painter is active on the canvas; use painter_clear");
 
-    const int bpp = hv::paint::bytes_per_pixel(canvas->data.format);
+    const int bpp = hv::canvas::bytes_per_pixel(canvas->data.format);
     for (int32_t y = 0; y < canvas->data.height; ++y) {
         uint8_t* row = canvas->data.pixels + static_cast<size_t>(y) * static_cast<size_t>(canvas->data.stride);
         if (bpp == 4) {
             /* One conversion per row: splat the resulting word. */
             uint32_t word = 0;
-            hv::paint::CanvasData probe{1, 1, 4, canvas->data.format, reinterpret_cast<uint8_t*>(&word)};
+            hv::canvas::CanvasData probe{1, 1, 4, canvas->data.format, reinterpret_cast<uint8_t*>(&word)};
             write_pixel(probe, 0, 0, argb);
             for (int32_t x = 0; x < canvas->data.width; ++x)
                 std::memcpy(row + static_cast<size_t>(x) * 4, &word, 4);
@@ -674,11 +674,11 @@ int heliosview_canvas_blit(heliosview_canvas_t* src, heliosview_canvas_t* dst, i
 {
     if (!src || !dst)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "src or dst canvas is NULL");
-    hv::paint::Rect region{0, 0, static_cast<float>(src->data.width), static_cast<float>(src->data.height)};
+    hv::canvas::Rect region{0, 0, static_cast<float>(src->data.width), static_cast<float>(src->data.height)};
     if (src_rect)
-        region = hv::paint::Rect{static_cast<float>(src_rect->x), static_cast<float>(src_rect->y),
+        region = hv::canvas::Rect{static_cast<float>(src_rect->x), static_cast<float>(src_rect->y),
                                  static_cast<float>(src_rect->width), static_cast<float>(src_rect->height)};
-    hv::paint::convert_copy(src->data, region, dst->data, x, y, std::clamp(alpha, 0.0f, 1.0f));
+    hv::canvas::convert_copy(src->data, region, dst->data, x, y, std::clamp(alpha, 0.0f, 1.0f));
     if (dst->adapter)
         dst->adapter->reload();
     return 0;
@@ -687,24 +687,24 @@ int heliosview_canvas_blit(heliosview_canvas_t* src, heliosview_canvas_t* dst, i
 /* ================= Public C API: images ================= */
 
 heliosview_canvas_t* heliosview_canvas_load(const char* path, heliosview_pixel_format_t format,
-                                            heliosview_paint_engine_t engine)
+                                            heliosview_canvas_engine_t engine)
 {
     if (!path || !*path) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "path is NULL or empty");
         return nullptr;
     }
-    return hv::paint::codec_load_path(path, format, engine);
+    return hv::canvas::codec_load_path(path, format, engine);
 }
 
 heliosview_canvas_t* heliosview_canvas_load_memory(const void* data, size_t size,
                                                    heliosview_pixel_format_t format,
-                                                   heliosview_paint_engine_t engine)
+                                                   heliosview_canvas_engine_t engine)
 {
     if (!data || size == 0) {
         hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "data is NULL or size is 0");
         return nullptr;
     }
-    return hv::paint::codec_load_memory(data, size, format, engine);
+    return hv::canvas::codec_load_memory(data, size, format, engine);
 }
 
 int heliosview_canvas_encode(heliosview_canvas_t* canvas, const char* format, int quality,
@@ -715,14 +715,14 @@ int heliosview_canvas_encode(heliosview_canvas_t* canvas, const char* format, in
     if (!format || !*format)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "format is NULL or empty");
     if (canvas->active_painter)
-        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas is being painted");
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "a painter is active on the canvas");
     if (out_data)
         *out_data = nullptr;
     if (out_size)
         *out_size = 0;
 
     std::vector<uint8_t> bytes;
-    const int rc = hv::paint::codec_encode(canvas->data, format, quality, background, bytes);
+    const int rc = hv::canvas::codec_encode(canvas->data, format, quality, background, bytes);
     if (rc != 0)
         return rc;
     if (out_size)
@@ -748,17 +748,17 @@ int heliosview_canvas_save(heliosview_canvas_t* canvas, const char* path, const 
     if (!path || !*path)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "path is NULL or empty");
     if (canvas->active_painter)
-        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas is being painted");
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "a painter is active on the canvas");
 
-    const std::string encoder = format && *format ? std::string(format) : hv::paint::codec_format_from_path(path);
+    const std::string encoder = format && *format ? std::string(format) : hv::canvas::codec_format_from_path(path);
     if (encoder.empty())
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT,
                        "cannot infer the image format from the path extension");
-    if (!hv::paint::codec_supports(encoder.c_str(), /*for_encoding=*/true))
+    if (!hv::canvas::codec_supports(encoder.c_str(), /*for_encoding=*/true))
         return hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, "the image format cannot be written by the codec");
 
     std::vector<uint8_t> bytes;
-    const int rc = hv::paint::codec_encode(canvas->data, encoder.c_str(), quality, background, bytes);
+    const int rc = hv::canvas::codec_encode(canvas->data, encoder.c_str(), quality, background, bytes);
     if (rc != 0)
         return rc;
 
@@ -777,7 +777,7 @@ int heliosview_format_supported(const char* format, int for_encoding)
 {
     if (!format || !*format)
         return 0;
-    return hv::paint::codec_supports(format, for_encoding != 0) ? 1 : 0;
+    return hv::canvas::codec_supports(format, for_encoding != 0) ? 1 : 0;
 }
 
 /* ================= Public C API: painters ================= */
@@ -794,15 +794,15 @@ heliosview_painter_t* heliosview_painter_begin(heliosview_canvas_t* canvas)
     }
     heliosview_painter_t* painter = nullptr;
     try {
-        painter = hv::hv_alloc<hv::paint::Painter>();
+        painter = hv::hv_alloc<hv::canvas::Painter>();
         painter->canvas = canvas;
         painter->context = canvas->engine->create_context(*canvas->adapter, canvas->data);
         if (!painter->context) {
             hv::hv_dealloc(painter);
-            hv_fail(HELIOSVIEW_ERROR_GENERIC, "the paint engine could not start a drawing session");
+            hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas engine could not start a drawing session");
             return nullptr;
         }
-        painter->state = hv::paint::default_painter_state();
+        painter->state = hv::canvas::default_canvas_state();
         painter->context->set_state(painter->state);
         painter->context->set_transform(painter->transform);
         canvas->active_painter = painter;
@@ -951,7 +951,7 @@ int painter_apply_matrix(heliosview_painter_t* painter, const float extra[6])
 
 } // namespace detail4
 
-using namespace detail4; /* visible to the rest of hv::paint */
+using namespace detail4; /* visible to the rest of hv::canvas */
 
 
 int heliosview_painter_set_transform(heliosview_painter_t* painter, const float* m)
@@ -1016,7 +1016,7 @@ int heliosview_painter_set_clip_rect(heliosview_painter_t* painter, float x, flo
 {
     if (!painter_checked(painter, "painter is NULL"))
         return HELIOSVIEW_ERROR_INVALID_ARGUMENT;
-    painter->context->set_clip_rect(hv::paint::Rect{x, y, width, height});
+    painter->context->set_clip_rect(hv::canvas::Rect{x, y, width, height});
     return 0;
 }
 
@@ -1035,7 +1035,7 @@ int heliosview_painter_intersect_clip_rect(heliosview_painter_t* painter, float 
 {
     if (!painter_checked(painter, "painter is NULL"))
         return HELIOSVIEW_ERROR_INVALID_ARGUMENT;
-    painter->context->intersect_clip_rect(hv::paint::Rect{x, y, width, height});
+    painter->context->intersect_clip_rect(hv::canvas::Rect{x, y, width, height});
     return 0;
 }
 
@@ -1084,7 +1084,7 @@ int heliosview_painter_fill_rect(heliosview_painter_t* painter, float x, float y
     {
         ScopedState guard(painter, s);
         painter->context->set_transform(painter->transform);
-        painter->context->draw_rect(hv::paint::Rect{x, y, width, height});
+        painter->context->draw_rect(hv::canvas::Rect{x, y, width, height});
     }
     return 0;
 }
@@ -1112,7 +1112,7 @@ int heliosview_painter_draw_rect(heliosview_painter_t* painter, float x, float y
         return 0;
     ScopedState guard(painter, s);
     painter->context->set_transform(painter->transform);
-    painter->context->draw_rect(hv::paint::Rect{x, y, width, height});
+    painter->context->draw_rect(hv::canvas::Rect{x, y, width, height});
     return 0;
 }
 
@@ -1126,7 +1126,7 @@ int heliosview_painter_draw_round_rect(heliosview_painter_t* painter, float x, f
         return 0;
     ScopedState guard(painter, s);
     painter->context->set_transform(painter->transform);
-    painter->context->draw_round_rect(hv::paint::Rect{x, y, width, height}, radius);
+    painter->context->draw_round_rect(hv::canvas::Rect{x, y, width, height}, radius);
     return 0;
 }
 
@@ -1140,7 +1140,7 @@ int heliosview_painter_draw_ellipse(heliosview_painter_t* painter, float x, floa
         return 0;
     ScopedState guard(painter, s);
     painter->context->set_transform(painter->transform);
-    painter->context->draw_ellipse(hv::paint::Rect{x, y, width, height});
+    painter->context->draw_ellipse(hv::canvas::Rect{x, y, width, height});
     return 0;
 }
 
@@ -1155,7 +1155,7 @@ int heliosview_painter_draw_arc(heliosview_painter_t* painter, float x, float y,
     s.fill_color = 0; /* an arc is an outline only */
     ScopedState guard(painter, s);
     painter->context->set_transform(painter->transform);
-    painter->context->draw_arc(hv::paint::Rect{x, y, width, height}, start_deg, sweep_deg);
+    painter->context->draw_arc(hv::canvas::Rect{x, y, width, height}, start_deg, sweep_deg);
     return 0;
 }
 
@@ -1187,7 +1187,7 @@ int heliosview_painter_draw_polygon(heliosview_painter_t* painter, const float* 
 heliosview_path_t* heliosview_path_create(void)
 {
     try {
-        return hv::hv_alloc<hv::paint::PathBuilder>();
+        return hv::hv_alloc<hv::canvas::PathBuilder>();
     } catch (const std::bad_alloc&) {
         hv_fail(HELIOSVIEW_ERROR_GENERIC, "out of memory creating the path");
         return nullptr;
@@ -1211,7 +1211,7 @@ void path_add(heliosview_path_t* path, uint8_t verb, const float* pts, int count
 {
     if (!path)
         return;
-    hv::paint::PathEntry entry;
+    hv::canvas::PathEntry entry;
     entry.verb = verb;
     if (pts && count > 0)
         std::memcpy(entry.pts, pts, static_cast<size_t>(count) * sizeof(float));
@@ -1226,54 +1226,54 @@ void path_add_point(heliosview_path_t* path, uint8_t verb, float x, float y)
 
 } // namespace detail5
 
-using namespace detail5; /* visible to the rest of hv::paint */
+using namespace detail5; /* visible to the rest of hv::canvas */
 
 
 void heliosview_path_move_to(heliosview_path_t* path, float x, float y)
 {
-    path_add_point(path, hv::paint::PathVerbStartNew, x, y);
+    path_add_point(path, hv::canvas::PathVerbStartNew, x, y);
 }
 
 void heliosview_path_line_to(heliosview_path_t* path, float x, float y)
 {
-    path_add_point(path, hv::paint::PathVerbLineTo, x, y);
+    path_add_point(path, hv::canvas::PathVerbLineTo, x, y);
 }
 
 void heliosview_path_quad_to(heliosview_path_t* path, float cx, float cy, float x, float y)
 {
     const float pts[4] = {cx, cy, x, y};
-    path_add(path, hv::paint::PathVerbQuadTo, pts, 4);
+    path_add(path, hv::canvas::PathVerbQuadTo, pts, 4);
 }
 
 void heliosview_path_cubic_to(heliosview_path_t* path, float c1x, float c1y, float c2x, float c2y,
                               float x, float y)
 {
     const float pts[6] = {c1x, c1y, c2x, c2y, x, y};
-    path_add(path, hv::paint::PathVerbCubicTo, pts, 6);
+    path_add(path, hv::canvas::PathVerbCubicTo, pts, 6);
 }
 
 void heliosview_path_close(heliosview_path_t* path)
 {
-    path_add(path, hv::paint::PathVerbClose, nullptr, 0);
+    path_add(path, hv::canvas::PathVerbClose, nullptr, 0);
 }
 
 void heliosview_path_add_rect(heliosview_path_t* path, float x, float y, float width, float height)
 {
     const float pts[4] = {x, y, width, height};
-    path_add(path, hv::paint::PathVerbRect, pts, 4);
+    path_add(path, hv::canvas::PathVerbRect, pts, 4);
 }
 
 void heliosview_path_add_round_rect(heliosview_path_t* path, float x, float y, float width,
                                     float height, float radius)
 {
     const float pts[5] = {x, y, width, height, radius};
-    path_add(path, hv::paint::PathVerbRoundRect, pts, 5);
+    path_add(path, hv::canvas::PathVerbRoundRect, pts, 5);
 }
 
 void heliosview_path_add_ellipse(heliosview_path_t* path, float x, float y, float width, float height)
 {
     const float pts[4] = {x, y, width, height};
-    path_add(path, hv::paint::PathVerbEllipse, pts, 4);
+    path_add(path, hv::canvas::PathVerbEllipse, pts, 4);
 }
 
 void heliosview_path_set_winding(heliosview_path_t* path, heliosview_path_winding_t winding)
@@ -1342,7 +1342,7 @@ int heliosview_painter_draw_text(heliosview_painter_t* painter, const char* utf8
     if (!has_alpha(painter->state.fill_color))
         return 0;
     painter->context->set_transform(painter->transform);
-    painter->context->draw_text(utf8, hv::paint::Rect{x, y, 0.0f, 0.0f},
+    painter->context->draw_text(utf8, hv::canvas::Rect{x, y, 0.0f, 0.0f},
                                 HELIOSVIEW_ALIGN_LEFT | HELIOSVIEW_ALIGN_TOP);
     return 0;
 }
@@ -1357,7 +1357,7 @@ int heliosview_painter_draw_text_ex(heliosview_painter_t* painter, const char* u
     if (!has_alpha(painter->state.fill_color))
         return 0;
     painter->context->set_transform(painter->transform);
-    painter->context->draw_text(utf8, hv::paint::Rect{x, y, width, height}, align);
+    painter->context->draw_text(utf8, hv::canvas::Rect{x, y, width, height}, align);
     return 0;
 }
 
@@ -1401,10 +1401,10 @@ int heliosview_painter_draw_image(heliosview_painter_t* painter, heliosview_canv
     if (image == painter->canvas)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "a canvas cannot draw itself");
 
-    hv::paint::Rect src{0, 0, static_cast<float>(image->data.width),
+    hv::canvas::Rect src{0, 0, static_cast<float>(image->data.width),
                         static_cast<float>(image->data.height)};
     if (src_rect)
-        src = hv::paint::Rect{static_cast<float>(src_rect->x), static_cast<float>(src_rect->y),
+        src = hv::canvas::Rect{static_cast<float>(src_rect->x), static_cast<float>(src_rect->y),
                               static_cast<float>(src_rect->width), static_cast<float>(src_rect->height)};
     /* Clamp to the source so an engine never reads outside the buffer. */
     const float x0 = std::max(0.0f, src.x);
@@ -1416,8 +1416,8 @@ int heliosview_painter_draw_image(heliosview_painter_t* painter, heliosview_canv
 
     painter->context->set_transform(painter->transform);
     painter->context->draw_image(image->adapter.get(), image->data,
-                                 hv::paint::Rect{x0, y0, x1 - x0, y1 - y0},
-                                 hv::paint::Rect{dx, dy, dw, dh}, std::clamp(alpha, 0.0f, 1.0f));
+                                 hv::canvas::Rect{x0, y0, x1 - x0, y1 - y0},
+                                 hv::canvas::Rect{dx, dy, dw, dh}, std::clamp(alpha, 0.0f, 1.0f));
     return 0;
 }
 
@@ -1427,14 +1427,17 @@ int heliosview_painter_save(heliosview_painter_t* painter)
 {
     if (!painter_checked(painter, "painter is NULL"))
         return HELIOSVIEW_ERROR_INVALID_ARGUMENT;
-    hv::paint::Painter::SavedState saved;
+    hv::canvas::Painter::SavedState saved;
     saved.state = painter->state;
+    saved.font_family = painter->font_family;
     std::memcpy(saved.transform, painter->transform, sizeof(saved.transform));
     try {
         painter->stack.push_back(saved);
     } catch (const std::bad_alloc&) {
         return hv_fail(HELIOSVIEW_ERROR_GENERIC, "out of memory saving the painter state");
     }
+    if (painter->context)
+        painter->context->save();
     return 0;
 }
 
@@ -1444,11 +1447,14 @@ int heliosview_painter_restore(heliosview_painter_t* painter)
         return HELIOSVIEW_ERROR_INVALID_ARGUMENT;
     if (painter->stack.empty())
         return hv_fail(HELIOSVIEW_ERROR_GENERIC, "painter_restore without a matching painter_save");
-    const hv::paint::Painter::SavedState saved = painter->stack.back();
+    const hv::canvas::Painter::SavedState saved = painter->stack.back();
     painter->stack.pop_back();
     painter->state = saved.state;
+    painter->font_family = saved.font_family;
     painter->state.font.family = painter->font_family.empty() ? nullptr : painter->font_family.c_str();
     std::memcpy(painter->transform, saved.transform, sizeof(painter->transform));
+    if (painter->context)
+        painter->context->restore();
     painter->context->set_state(painter->state);
     painter->context->set_transform(painter->transform);
     return 0;
@@ -1457,33 +1463,33 @@ int heliosview_painter_restore(heliosview_painter_t* painter)
 /* ================= Public C API: window integration (next batch) ================= */
 
 namespace detail6 {
-int window_paint_not_implemented(const char* what)
+int window_canvas_not_implemented(const char* what)
 {
     return hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED, what);
 }
 
 } // namespace detail6
 
-using namespace detail6; /* visible to the rest of hv::paint */
+using namespace detail6; /* visible to the rest of hv::canvas */
 heliosview_canvas_t* heliosview_window_canvas(const heliosview_window_t*)
 {
-    window_paint_not_implemented("window painting is not implemented yet");
+    window_canvas_not_implemented("window drawing is not implemented yet");
     return nullptr;
 }
 
-int heliosview_window_set_paint_engine(heliosview_window_t*, heliosview_paint_engine_t)
+int heliosview_window_set_canvas_engine(heliosview_window_t*, heliosview_canvas_engine_t)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
-heliosview_paint_engine_t heliosview_window_paint_engine(const heliosview_window_t*)
+heliosview_canvas_engine_t heliosview_window_canvas_engine(const heliosview_window_t*)
 {
     return HELIOSVIEW_ENGINE_AUTO;
 }
 
 int heliosview_window_set_double_buffered(heliosview_window_t*, int)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_is_double_buffered(const heliosview_window_t*)
@@ -1493,32 +1499,32 @@ int heliosview_window_is_double_buffered(const heliosview_window_t*)
 
 int heliosview_window_set_background_color(heliosview_window_t*, uint32_t)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_invalidate(heliosview_window_t*)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_invalidate_rect(heliosview_window_t*, const heliosview_rect_t*)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_update(heliosview_window_t*)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_present(heliosview_window_t*)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 int heliosview_window_client_rect(const heliosview_window_t*, heliosview_rect_t*)
 {
-    return window_paint_not_implemented("window painting is not implemented yet");
+    return window_canvas_not_implemented("window drawing is not implemented yet");
 }
 
 } // extern "C"

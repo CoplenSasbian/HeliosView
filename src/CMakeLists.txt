@@ -1,6 +1,7 @@
 add_library(HeliosView SHARED
     heliosview.cpp   # platform-independent core: version, allocator, events, string codecs
-    heliosview_paint.cpp        # paint core: engine registry, canvas storage, painter session (no platform code)
+    heliosview_canvas.cpp        # canvas core: engine registry, canvas storage, painter session (no platform code)
+    heliosview_canvas_blend2d.cpp # unified JIT software rasterizer engine (Blend2D)
     heliosview_image_codec.cpp  # image decode/encode for every engine (vendored stb)
 )
 
@@ -10,7 +11,8 @@ add_library(HeliosView SHARED
 if(WIN32)
     target_sources(HeliosView PRIVATE
             win32/heliosview_window_win32.cpp      # windows / message loop / native message translation / dialogs
-        win32/heliosview_paint_gdiplus.cpp # paint engine: GDI+ (the NATIVE engine on Windows)
+        win32/heliosview_canvas_gdiplus.cpp # canvas engine: GDI+ (the NATIVE engine on Windows)
+        win32/heliosview_canvas_d2d.cpp # canvas engine: Direct2D + DirectWrite (the D2D vendor engine; not the NATIVE/ACCELERATED default yet)
         win32/heliosview_host_win32.cpp # hidden library host window (tray callbacks + window-less popup menu owner)
         win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon)
         win32/heliosview_menu_win32.cpp # popup menus (heliosview_menu_* API; CreatePopupMenu / TrackPopupMenu, routing id via window subclass)
@@ -84,6 +86,8 @@ target_include_directories(HeliosView PUBLIC
 target_include_directories(HeliosView PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party
 )
+
+target_link_libraries(HeliosView PRIVATE blend2d::blend2d)
 
 # HELIOSVIEW_EXPORTS is defined only when building the library itself;
 # HeliosViewExport.h then expands to __declspec(dllexport) (Windows) or

@@ -1,16 +1,17 @@
 #pragma once
 
 /**
- * HeliosView internal paint layer: the engine interface and the shared state of a
- * canvas and a painter. NOT part of the public API (include/HeliosView/heliosview_paint.h
- * is), and never crossing the DLL boundary -- engines are C++ objects inside the
- * library, so plain virtual functions, std::vector and RAII are fine here.
+ * HeliosView internal canvas layer: the engine interface and the shared state of a
+ * canvas and a painter. NOT part of the public API (include/HeliosView/
+ * heliosview_canvas.h is), and never crossing the DLL boundary -- engines are C++
+ * objects inside the library, so plain virtual functions, std::vector and RAII are
+ * fine here.
  *
  * ==================== What an engine must provide ====================
  *
  * An engine turns painter calls into pixels written into a caller-owned buffer. It
  * does NOT own the pixels, does NOT know about windows, and does NOT do image
- * encoding: the canvas owns the memory (hv::paint::Canvas), and the codec
+ * encoding: the canvas owns the memory (hv::canvas::Canvas), and the codec
  * (heliosview_image_codec.cpp) handles PNG/JPEG/... for every engine alike. That
  * split is what keeps a new engine small and keeps formats identical everywhere.
  *
@@ -21,12 +22,12 @@
  * ==================== Adding an engine ====================
  *
  * 1. Implement Engine and Context (below) in one .cpp.
- * 2. Register it from a file-static object (hv::paint::register_engine), listing
+ * 2. Register it from a file-static object (hv::canvas::register_engine), listing
  *    every name it answers to -- a concept name (NATIVE/ACCELERATED/SOFTWARE) and
  *    the vendor name(s) it is. Registration order is irrelevant: resolution is by
  *    a fixed preference order, not by insertion.
  * 3. Add the .cpp to src/CMakeLists.txt. Nothing else changes -- no public header
- *    edit, no new enum value beyond the reserved block in heliosview_paint.h.
+ *    edit, no new enum value beyond the reserved block in heliosview_canvas.h.
  *
  * An engine that cannot be used in this process (an unavailable GPU, a missing
  * system component) must report it from probe(), not crash: the canvas creation
@@ -35,7 +36,7 @@
 
 #include "heliosview_internal.h"
 
-#include <HeliosView/heliosview_paint.h>
+#include <HeliosView/heliosview_canvas.h>
 
 #include <cstdint>
 #include <cstring>
@@ -43,7 +44,7 @@
 #include <string>
 #include <vector>
 
-namespace hv::paint {
+namespace hv::canvas {
 
 /* ================= Reusable path description =================
  *
@@ -185,7 +186,7 @@ public:
      * depends on it; engines may cache the translated objects (pen, brush, font). */
     virtual void set_state(const heliosview_painter_state_t& state) = 0;
 
-    /* Transform: the 2x3 affine matrix [a b c d e f] (see heliosview_paint.h).
+    /* Transform: the 2x3 affine matrix [a b c d e f] (see heliosview_canvas.h).
      * Replaces, never accumulates -- the painter owns the matrix. */
     virtual void set_transform(const float m[6]) = 0;
 
@@ -223,6 +224,10 @@ public:
     virtual void draw_image(CanvasAdapter* src_adapter, const CanvasData& src, const Rect& src_rect,
                             const Rect& dst_rect, float alpha) = 0;
 
+    /* State stack. Engines that track clipping or internal state push/pop here. */
+    virtual void save() {}
+    virtual void restore() {}
+
     /* Finish: flush pending work so the pixels in the buffer are final. */
     virtual void flush() = 0;
 };
@@ -233,7 +238,7 @@ public:
 
     /* The primary enum value this engine answers to (its vendor name, e.g.
      * HELIOSVIEW_ENGINE_GDI_PLUS). Also the ordering key for AUTO resolution. */
-    virtual heliosview_paint_engine_t id() const = 0;
+    virtual heliosview_canvas_engine_t id() const = 0;
 
     /* Short lowercase name for heliosview_engine_name ("gdi+", "cairo", ...) */
     virtual const char* name() const = 0;
@@ -251,7 +256,7 @@ public:
      * done by the caller). */
     virtual bool supports_format(heliosview_pixel_format_t format) const = 0;
 
-    /* Capability query, answering heliosview_paint_feature_t values. */
+    /* Capability query, answering heliosview_canvas_feature_t values. */
     virtual bool supports_feature(int feature) const = 0;
 
     /* Wrap `data`'s pixels. Returns nullptr on failure (the engine must not keep a
@@ -264,25 +269,25 @@ public:
 
 /* ================= Engine registry =================
  *
- * A small fixed table owned by the paint core (heliosview_paint.cpp). Engines add
+ * A small fixed table owned by the canvas core (heliosview_canvas.cpp). Engines add
  * themselves from a file-static object; see register_engine below. */
 
 /* Register an engine under several names: `id` plus the concept names it
  * satisfies (HELIOSVIEW_ENGINE_NATIVE / _ACCELERATED / _SOFTWARE) and any
  * additional vendor value. Idempotent per (engine, name) pair. Returns false if the
  * table is full or a name is already taken by another engine. */
-bool register_engine(Engine* engine, const heliosview_paint_engine_t* names, size_t name_count);
+bool register_engine(Engine* engine, const heliosview_canvas_engine_t* names, size_t name_count);
 
 /* Convenience for the common case of one vendor id plus one concept name. */
-bool register_engine(Engine* engine, heliosview_paint_engine_t vendor,
-                     heliosview_paint_engine_t concept_name);
+bool register_engine(Engine* engine, heliosview_canvas_engine_t vendor,
+                     heliosview_canvas_engine_t concept_name);
 
-/* The registry itself (owned by heliosview_paint.cpp; the query functions read it
+/* The registry itself (owned by heliosview_canvas.cpp; the query functions read it
  * directly, so it is not hidden in an anonymous namespace). */
 constexpr size_t kMaxEngineNames = 32;
 
 struct EngineEntry {
-    heliosview_paint_engine_t name = HELIOSVIEW_ENGINE_AUTO;
+    heliosview_canvas_engine_t name = HELIOSVIEW_ENGINE_AUTO;
     Engine* engine = nullptr;
 };
 
@@ -290,23 +295,23 @@ extern EngineEntry g_registry[kMaxEngineNames];
 extern size_t g_registry_size;
 
 /* The engine a bare HELIOSVIEW_ENGINE_AUTO resolves to first (set by
- * heliosview_set_default_paint_engine); AUTO means "use the resolution chain". */
-extern heliosview_paint_engine_t g_default_engine;
+ * heliosview_set_default_canvas_engine); AUTO means "use the resolution chain". */
+extern heliosview_canvas_engine_t g_default_engine;
 
 /* The engine serving `engine`, after resolving AUTO and the concept names, with
  * probe() already confirmed. nullptr when nothing can serve it (the caller records
  * HELIOSVIEW_ERROR_UNSUPPORTED). */
-Engine* resolve_engine(heliosview_paint_engine_t engine);
+Engine* resolve_engine(heliosview_canvas_engine_t engine);
 
 /* Registration-free variant used by the query functions: resolves without probing,
  * so a compiled-but-unavailable engine can still be named. */
-Engine* find_engine(heliosview_paint_engine_t engine);
+Engine* find_engine(heliosview_canvas_engine_t engine);
 
 /* Registers an engine from a static initializer, the pattern the win32 backend uses
  * for other process-wide hooks (see heliosview_window_win32.cpp). */
 struct EngineRegistration {
-    EngineRegistration(Engine* engine, heliosview_paint_engine_t vendor,
-                       heliosview_paint_engine_t concept_name)
+    EngineRegistration(Engine* engine, heliosview_canvas_engine_t vendor,
+                       heliosview_canvas_engine_t concept_name)
     {
         register_engine(engine, vendor, concept_name);
     }
@@ -327,9 +332,9 @@ using Painter = ::heliosview_painter;
 using PathBuilder = ::heliosview_path;
 
 /* The defaults heliosview_painter_begin installs (documented in the public header). */
-heliosview_painter_state_t default_painter_state();
+heliosview_painter_state_t default_canvas_state();
 
-} // namespace hv::paint
+} // namespace hv::canvas
 
 /* ================= The opaque public types (definitions) =================
  *
@@ -338,11 +343,11 @@ heliosview_painter_state_t default_painter_state();
  * them stays private to the implementation files. */
 
 struct heliosview_canvas {
-    hv::paint::CanvasData data;
+    hv::canvas::CanvasData data;
     std::vector<uint8_t> storage; /* data.pixels points into this */
-    hv::paint::Engine* engine = nullptr; /* never null on a live canvas */
-    heliosview_paint_engine_t engine_id = HELIOSVIEW_ENGINE_AUTO;
-    std::unique_ptr<hv::paint::CanvasAdapter> adapter;
+    hv::canvas::Engine* engine = nullptr; /* never null on a live canvas */
+    heliosview_canvas_engine_t engine_id = HELIOSVIEW_ENGINE_AUTO;
+    std::unique_ptr<hv::canvas::CanvasAdapter> adapter;
     heliosview_painter_t* active_painter = nullptr; /* a canvas takes one painter at a time */
 
     void refresh_data();
@@ -350,7 +355,7 @@ struct heliosview_canvas {
 
 struct heliosview_painter {
     heliosview_canvas_t* canvas = nullptr;
-    std::unique_ptr<hv::paint::Context> context;
+    std::unique_ptr<hv::canvas::Context> context;
     heliosview_painter_state_t state{};
     /* Font family storage: state.font.family points here, so the caller's string
      * does not have to outlive set_font. */
@@ -359,16 +364,17 @@ struct heliosview_painter {
 
     struct SavedState {
         heliosview_painter_state_t state;
+        std::string font_family;
         float transform[6];
     };
     std::vector<SavedState> stack;
 };
 
 struct heliosview_path {
-    hv::paint::PathData data;
+    hv::canvas::PathData data;
 };
 
-namespace hv::paint {
+namespace hv::canvas {
 
 /* ================= Image codec (heliosview_image_codec.cpp) =================
  *
@@ -378,12 +384,12 @@ namespace hv::paint {
  * Returns nullptr on failure, having recorded the reason (unsupported format, bad
  * data, ...). Two entry points, because the two inputs are not interchangeable. */
 heliosview_canvas_t* codec_load_path(const char* path, heliosview_pixel_format_t format,
-                                     heliosview_paint_engine_t engine);
+                                     heliosview_canvas_engine_t engine);
 
 /* `data` is the encoded image itself (PNG/JPEG/... bytes), not a path. */
 heliosview_canvas_t* codec_load_memory(const void* data, size_t size,
                                        heliosview_pixel_format_t format,
-                                       heliosview_paint_engine_t engine);
+                                       heliosview_canvas_engine_t engine);
 
 /* Encode a canvas' pixels into a growing byte buffer. `format` is the encoder
  * ("png"/"jpeg"/...), already normalized. Returns 0 on success. */
@@ -398,4 +404,4 @@ bool codec_supports(const char* format, bool for_encoding);
  * extension is not a known encoder. */
 std::string codec_format_from_path(const char* path);
 
-} // namespace hv::paint
+} // namespace hv::canvas

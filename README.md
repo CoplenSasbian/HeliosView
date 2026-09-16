@@ -124,6 +124,8 @@ install**:
 | WebView2 SDK | 1.0.4129.50 | downloaded from NuGet at configure time | embedded WebView (win32) |
 | `stdexec` | pinned commit 758f41f4 (origin/main, 2026-08-15, 0.11.0+) | vendored (`third_party/stdexec/`) | C++23 coroutines (senders/receivers) |
 | `Boost` (Asio/Beast/JSON) | 1.92.0 (superproject submodule, needed libs auto-initialized) | vendored (`third_party/boost/`) | background thread pool (`Async`), HTTP via Boost.Beast, WebView bridge auto-binding via Boost.JSON |
+| `Blend2D` | v0.21.3 (submodule) | vendored (`third_party/blend2d/`) | the BUILTIN canvas engine: one rasterizer, the same pixels on every platform |
+| `asmjit` | pinned commit `dffd8b1` (submodule) | vendored (`third_party/asmjit/`) | x86/ARM code generation behind Blend2D's JIT pipeline |
 
 Everything else comes from the OS: windowing, dialogs, toasts (WinRT via the
 Windows SDK), DWM backdrop. The WebView2 SDK is the only thing fetched at
@@ -860,7 +862,7 @@ include/HeliosViewCore/               header-only C++ wrapper
   Notification.h                      OS toast notifications (thread-safe)
   Tray.h                              system notification-area (tray) icon + signals
   Menu.h                              popup / context menu + signals
-  Paint.h                             canvases, painters, paths and images (headless, no window)
+  Canvas.h                            canvases, painters, paths and images (headless, no window)
   Execution.h                         schedulers/senders (stdexec, P2300)
   WebViewWindow.h                     window embedding a WebView
   WebViewJson.h                       bindJson / subscribeJson (Boost.JSON auto-binding)
@@ -868,6 +870,8 @@ src/heliosview.cpp                    platform-independent core
 src/heliosview_internal.h             state shared across implementation files
 src/win32/                            win32 backend (windows, WebView2, dialogs, toasts)
 third_party/stdexec/                  vendored stdexec (pinned commit, header-only)
+third_party/blend2d/                  vendored Blend2D (pinned v0.21.3; the BUILTIN canvas engine)
+third_party/asmjit/                   vendored asmjit (pinned commit; Blend2D's JIT backend)
 examples/                             the demo programs
 ```
 

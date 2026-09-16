@@ -26,7 +26,8 @@ include(cmake/ensure-submodule.cmake)
 # ---------- Third-party dependencies ----------
 #
 # Git submodules (third_party/, fetched with `git submodule update --init`
-# — NOT --recursive, see the Boost note below; header-only, nothing to compile):
+# — NOT --recursive, see the Boost note below; stdexec and Boost are header-only,
+# blend2d/asmjit are compiled by this build):
 #   - stdexec:     P2300 senders/receivers reference implementation, pinned to
 #                  the latest origin/main commit (0.11.0+) HeliosView.Core is
 #                  built and tested against.
@@ -40,6 +41,12 @@ include(cmake/ensure-submodule.cmake)
 #                  selective init runs automatically at configure time
 #                  (cmake/ensure-submodule.cmake issues one `git submodule
 #                  update` call with every lib in HELIOSVIEW_BOOST_LIBS).
+#   - blend2d:     high-performance 2D vector rasterizer with a JIT pipeline,
+#                  pinned to v0.21.3. It is the BUILTIN canvas engine
+#                  (src/heliosview_canvas_blend2d.cpp): the same pixels on every
+#                  platform, with no OS 2D API involved.
+#   - asmjit:      the x86/ARM assembler blend2d's JIT is built on, pinned to the
+#                  commit that blend2d v0.21.3 is tested against.
 #
 # WebView2 SDK: downloaded from NuGet at configure time (a .nupkg is just a
 # zip of headers + the WebView2Loader loader library/dll), so consumers do not
@@ -245,6 +252,15 @@ if(WIN32)
     set(HELIOSVIEW_WEBVIEW2_LOADER_DLL
         "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/${HELIOSVIEW_WEBVIEW2_ARCH}/WebView2Loader.dll")
 endif()
+
+# Blend2D: unified 2D vector graphics engine (software rasterizer with JIT)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(BLEND2D_TARGET_ARCH "X86_64" CACHE STRING "" FORCE)
+endif()
+set(BLEND2D_STATIC ON CACHE BOOL "" FORCE)
+set(BLEND2D_TEST OFF CACHE BOOL "" FORCE)
+set(BLEND2D_NO_INSTALL ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/blend2d)
 
 add_subdirectory(src)
 

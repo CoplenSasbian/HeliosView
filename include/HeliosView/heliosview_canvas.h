@@ -1,5 +1,5 @@
-#ifndef HELIOSVIEW_HELIOSVIEW_PAINT_H
-#define HELIOSVIEW_HELIOSVIEW_PAINT_H
+#ifndef HELIOSVIEW_HELIOSVIEW_CANVAS_H
+#define HELIOSVIEW_HELIOSVIEW_CANVAS_H
 
 /**
  * HeliosView C API -- drawing: canvas, painter, paths, images.
@@ -13,10 +13,10 @@
  *                                 stride and a pixel format. It is a drawing
  *                                 target, an image (load/save/encode/decode) and
  *                                 a source to draw from -- one type, three uses.
- *         -> a paint engine       the implementation that turns those calls into
+ *         -> a canvas engine       the implementation that turns those calls into
  *                                 pixels: GDI+ / GDI / Direct2D / Core Graphics /
  *                                 Cairo / a built-in rasterizer. Chosen per canvas
- *                                 at creation (see "Paint engines"), never hinted
+ *                                 at creation (see "Canvas engines"), never hinted
  *                                 at anywhere else.
  *           -> the window         heliosview_window_present() blits a canvas onto
  *                                 a native window -- the LAST step, and the only
@@ -100,20 +100,19 @@
 extern "C" {
 #endif
 
-/* ================= Paint engines =================
+/* ================= Canvas engines =================
  *
  * The engine is the implementation that turns painter calls into pixels. It is
  * chosen when a canvas is created and reported back by
  * heliosview_canvas_engine(), so an application can build equivalent canvases on
  * several engines and compare them at runtime.
  *
- * CROSS-PLATFORM CODE SHOULD USE ONLY AUTO / NATIVE / ACCELERATED / SOFTWARE.
+ * CROSS-PLATFORM CODE SHOULD USE ONLY AUTO / BUILTIN / NATIVE.
  * Those are concepts, resolved per platform:
  *
  *                Windows        macOS           Linux
+ *     BUILTIN    Blend2D (consistent high-performance 2D engine across all platforms)
  *     NATIVE     GDI+           Core Graphics   Cairo
- *     ACCELERATED Direct2D      Metal-backed    GL backend
- *     SOFTWARE   the built-in rasterizer (once it exists)
  *
  * The vendor values (>= 16) exist for single-platform tuning and for side-by-side
  * comparison. A vendor engine this platform or build does not provide is still a
@@ -125,23 +124,27 @@ extern "C" {
  * Every value below is FIXED for the ABI's lifetime. New engines append in their
  * own reserved block; a value is never reused or renumbered, so an old application
  * binary always resolves an engine to the same implementation. */
-typedef enum heliosview_paint_engine {
+typedef enum heliosview_canvas_engine {
     /* ---- concept names: use these in portable code ---- */
-    HELIOSVIEW_ENGINE_AUTO = 0,         /* best available: ACCELERATED -> NATIVE -> SOFTWARE */
-    HELIOSVIEW_ENGINE_NATIVE = 1,       /* this platform's native 2D engine */
-    HELIOSVIEW_ENGINE_ACCELERATED = 2,  /* GPU accelerated; fails if unavailable, never silently falls back */
-    HELIOSVIEW_ENGINE_SOFTWARE = 3,     /* the library's own rasterizer: identical everywhere, no dependency */
+    HELIOSVIEW_ENGINE_AUTO = 0,         /* best available: BUILTIN -> NATIVE */
+    HELIOSVIEW_ENGINE_BUILTIN = 1,      /* built-in 2D engine (Blend2D): identical everywhere, no OS differences */
+    HELIOSVIEW_ENGINE_NATIVE = 2,       /* this platform's native 2D engine (GDI+ on Windows) */
+
+    /* ---- backwards compatibility aliases ---- */
+    HELIOSVIEW_ENGINE_SOFTWARE = 1,     /* alias for BUILTIN */
+    HELIOSVIEW_ENGINE_ACCELERATED = 3,  /* optional GPU engine (Direct2D on Windows) */
 
     /* ---- vendor names: single-platform tuning and comparison ---- */
     HELIOSVIEW_ENGINE_GDI = 16,             /* Windows: classic GDI -- fastest, no AA, no alpha */
     HELIOSVIEW_ENGINE_GDI_PLUS = 17,        /* Windows: == NATIVE */
     HELIOSVIEW_ENGINE_D2D = 18,             /* Windows: == ACCELERATED */
+    HELIOSVIEW_ENGINE_BLEND2D = 19,         /* Cross-platform: == BUILTIN */
     HELIOSVIEW_ENGINE_CORE_GRAPHICS = 32,   /* macOS:   == NATIVE */
     HELIOSVIEW_ENGINE_METAL = 33,           /* macOS:   == ACCELERATED */
     HELIOSVIEW_ENGINE_CAIRO = 48,           /* Linux:   == NATIVE */
 
     /* New engines go here (64, 80, ...), one block per platform. */
-} heliosview_paint_engine_t;
+} heliosview_canvas_engine_t;
 
 /* ================= Canvas pixel formats =================
  *
@@ -177,31 +180,31 @@ typedef enum heliosview_pixel_format {
 
 /* Whether the engine is part of this build: != 0 = yes. AUTO reports whether any
  * engine is available at all. */
-HELIOSVIEW_API int heliosview_engine_compiled(heliosview_paint_engine_t engine);
+HELIOSVIEW_API int heliosview_engine_compiled(heliosview_canvas_engine_t engine);
 
 /* Whether the engine can be used right now (compiled and able to initialize).
  * Creating a canvas asks the same question and fails with
  * HELIOSVIEW_ERROR_UNSUPPORTED when the answer is no. Pass AUTO to ask whether any
  * engine would work. */
-HELIOSVIEW_API int heliosview_engine_probe(heliosview_paint_engine_t engine);
+HELIOSVIEW_API int heliosview_engine_probe(heliosview_canvas_engine_t engine);
 
 /* How many engines this build provides, and the value of the i-th of them
  * (i < count) -- lets a host list what it can choose from without knowing this
  * build's configuration. Both report 0 for an out-of-range index. */
 HELIOSVIEW_API int heliosview_engine_count(void);
-HELIOSVIEW_API heliosview_paint_engine_t heliosview_engine_at(int index);
+HELIOSVIEW_API heliosview_canvas_engine_t heliosview_engine_at(int index);
 
 /* Short lowercase engine name for logs and diagnostics:
  * "gdi+", "gdi", "d2d", "coregraphics", "metal", "cairo", "software", "auto".
  * Which engine a concept name resolved to is asked of the canvas
  * (heliosview_canvas_engine), not guessed from this string. Never NULL. */
-HELIOSVIEW_API const char* heliosview_engine_name(heliosview_paint_engine_t engine);
+HELIOSVIEW_API const char* heliosview_engine_name(heliosview_canvas_engine_t engine);
 
 /* Whether the engine provides a capability (1 = yes, 0 = no; AUTO answers for the
  * engine it would resolve to). Use this instead of testing engine names to decide
  * how to draw -- e.g. ask about ANTIALIAS before relying on smooth edges: a plain
  * GDI canvas reports 0 and the same code still runs, just without smoothing. */
-typedef enum heliosview_paint_feature {
+typedef enum heliosview_canvas_feature {
     HELIOSVIEW_FEATURE_ANTIALIAS = 0,     /* smooth edge and text rendering */
     HELIOSVIEW_FEATURE_ALPHA_BLEND = 1,   /* per-pixel alpha compositing */
     HELIOSVIEW_FEATURE_TRANSFORM = 2,     /* the full affine transform (rotate/skew, not just translate+scale) */
@@ -211,17 +214,17 @@ typedef enum heliosview_paint_feature {
     HELIOSVIEW_FEATURE_TEXT_AA = 6,       /* antialiased text specifically */
     HELIOSVIEW_FEATURE_IMAGE_DRAW = 7,    /* drawing one canvas into another */
     HELIOSVIEW_FEATURE_DIRECT_PIXELS = 8, /* heliosview_canvas_data() hands out the live pixel buffer */
-} heliosview_paint_feature_t;
+} heliosview_canvas_feature_t;
 
-HELIOSVIEW_API int heliosview_engine_supports_feature(heliosview_paint_engine_t engine,
-                                                      heliosview_paint_feature_t feature);
+HELIOSVIEW_API int heliosview_engine_supports_feature(heliosview_canvas_engine_t engine,
+                                                      heliosview_canvas_feature_t feature);
 
 /* The library-wide default engine, used wherever AUTO is passed to a canvas
  * creation call. Defaults to HELIOSVIEW_ENGINE_AUTO; set it once, before creating
  * canvases (the same contract as heliosview_set_allocator). Passing AUTO restores
- * the resolution chain (ACCELERATED -> NATIVE -> SOFTWARE). */
-HELIOSVIEW_API void heliosview_set_default_paint_engine(heliosview_paint_engine_t engine);
-HELIOSVIEW_API heliosview_paint_engine_t heliosview_default_paint_engine(void);
+ * the resolution chain (BUILTIN -> NATIVE). */
+HELIOSVIEW_API void heliosview_set_default_canvas_engine(heliosview_canvas_engine_t engine);
+HELIOSVIEW_API heliosview_canvas_engine_t heliosview_default_canvas_engine(void);
 
 /* ================= Canvas =================
  *
@@ -236,7 +239,7 @@ typedef struct heliosview_canvas heliosview_canvas_t;
  * unsupported format, out of memory) with the reason recorded. */
 HELIOSVIEW_API heliosview_canvas_t* heliosview_canvas_create(int32_t width, int32_t height,
                                                              heliosview_pixel_format_t format,
-                                                             heliosview_paint_engine_t engine);
+                                                             heliosview_canvas_engine_t engine);
 
 /* Clone a canvas into a new one, converting to `format` (AUTO = keep the source's)
  * and wrapping it in `engine` (AUTO = keep the source's). The pixels are copied,
@@ -244,7 +247,7 @@ HELIOSVIEW_API heliosview_canvas_t* heliosview_canvas_create(int32_t width, int3
  * a canvas moves to another engine or format. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_canvas_t* heliosview_canvas_clone(const heliosview_canvas_t* canvas,
                                                             heliosview_pixel_format_t format,
-                                                            heliosview_paint_engine_t engine);
+                                                            heliosview_canvas_engine_t engine);
 
 /* Destroy a canvas (NULL is a no-op). A painter begun on it must be ended first. */
 HELIOSVIEW_API void heliosview_canvas_destroy(heliosview_canvas_t* canvas);
@@ -259,7 +262,7 @@ HELIOSVIEW_API int32_t heliosview_canvas_stride(const heliosview_canvas_t* canva
 /* The canvas's concrete pixel format / engine; 0 (AUTO) when canvas is NULL. The
  * engine answer is what AUTO resolved to. */
 HELIOSVIEW_API heliosview_pixel_format_t heliosview_canvas_format(const heliosview_canvas_t* canvas);
-HELIOSVIEW_API heliosview_paint_engine_t heliosview_canvas_engine(const heliosview_canvas_t* canvas);
+HELIOSVIEW_API heliosview_canvas_engine_t heliosview_canvas_engine(const heliosview_canvas_t* canvas);
 
 /* The live pixel buffer: stride bytes per row, format as reported, writable.
  * Returns NULL when the engine has no directly addressable pixels -- ask
@@ -269,7 +272,7 @@ HELIOSVIEW_API heliosview_paint_engine_t heliosview_canvas_engine(const heliosvi
 HELIOSVIEW_API void* heliosview_canvas_data(heliosview_canvas_t* canvas);
 
 /* Announce a direct write through heliosview_canvas_data(): the engine drops any
- * cached copy of these pixels. Call it after writing and before the next paint,
+ * cached copy of these pixels. Call it after writing and before the next canvas,
  * blit or save. 0 = success. */
 HELIOSVIEW_API int heliosview_canvas_end_write(heliosview_canvas_t* canvas);
 
@@ -314,13 +317,13 @@ HELIOSVIEW_API int heliosview_canvas_blit(heliosview_canvas_t* src, heliosview_c
  * format and engine; AUTO for either uses the default. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_canvas_t* heliosview_canvas_load(const char* path,
                                                            heliosview_pixel_format_t format,
-                                                           heliosview_paint_engine_t engine);
+                                                           heliosview_canvas_engine_t engine);
 
 /* Decode an in-memory image (the bytes of a PNG/JPEG/... file). `data` is copied,
  * the caller keeps ownership. Returns NULL on failure. */
 HELIOSVIEW_API heliosview_canvas_t* heliosview_canvas_load_memory(const void* data, size_t size,
                                                                   heliosview_pixel_format_t format,
-                                                                  heliosview_paint_engine_t engine);
+                                                                  heliosview_canvas_engine_t engine);
 
 /* Encode the canvas into a freshly allocated buffer -- the layer that makes an
  * image usable beyond the filesystem (HTTP upload, clipboard, archive, a data URI,
@@ -417,18 +420,18 @@ typedef struct heliosview_painter_state {
     int antialias;                    /* != 0 = antialiased edges and text (default) */
 } heliosview_painter_state_t;
 
-/* Begin painting on a canvas. Every call must be paired with
+/* Begin drawing on a canvas. Every call must be paired with
  * heliosview_painter_end. Returns NULL on failure (NULL canvas, a painter already
  * active on that canvas, out of memory). */
 HELIOSVIEW_API heliosview_painter_t* heliosview_painter_begin(heliosview_canvas_t* canvas);
 
-/* End painting: flush the engine and destroy the painter. Once it returns, the
+/* End drawing: flush the engine and destroy the painter. Once it returns, the
  * canvas is complete and safe to save, blit or present. 0 = success. */
 HELIOSVIEW_API int heliosview_painter_end(heliosview_painter_t* painter);
 
 /* Destroy a painter without a clean end -- for error paths only (e.g. a C++
  * exception unwound past heliosview_painter_end). Releasing the canvas is the
- * point: a canvas with a live painter cannot be painted again. Safe on NULL and
+ * point: a canvas with a live painter cannot be drawn again. Safe on NULL and
  * after _end. */
 HELIOSVIEW_API void heliosview_painter_destroy(heliosview_painter_t* painter);
 
@@ -502,7 +505,7 @@ HELIOSVIEW_API int heliosview_painter_clip_bounds(const heliosview_painter_t* pa
  * the shape about x/y. Angles are degrees, clockwise on screen. */
 
 /* Fill the whole canvas with argb, ignoring painter state, transform and clipping --
- * the "clear the canvas" call while painting (its standalone equivalent is
+ * the "clear the canvas" call while drawing (its standalone equivalent is
  * heliosview_canvas_fill). 0 = success. */
 HELIOSVIEW_API int heliosview_painter_clear(heliosview_painter_t* painter, uint32_t argb);
 
@@ -588,7 +591,7 @@ HELIOSVIEW_API int heliosview_painter_stroke_path(heliosview_painter_t* painter,
 
 /* ---- text ----
  *
- * Text is UTF-8 in, laid out by the platform's text stack, painted with the state's
+ * Text is UTF-8 in, laid out by the platform's text stack, drawn with the state's
  * fill_color (stroke_color does not outline glyphs). Family, pixel size and
  * bold/italic/underline/strikeout come from the state's font.
  *
@@ -645,7 +648,7 @@ HELIOSVIEW_API int heliosview_painter_line_height(const heliosview_painter_t* pa
  *
  * The source may be any canvas of any format on any engine -- the engine converts,
  * and a straight copy is used when formats and scale allow it. It must not be the
- * canvas being painted. 0 = success. */
+ * canvas being drawn. 0 = success. */
 HELIOSVIEW_API int heliosview_painter_draw_image(heliosview_painter_t* painter,
                                                  heliosview_canvas_t* image,
                                                  float dx, float dy, float dw, float dh,
@@ -663,8 +666,8 @@ HELIOSVIEW_API int heliosview_painter_restore(heliosview_painter_t* painter);
 
 /* ================= Window integration (the last step) =================
  *
- * A window owns a canvas ("backing canvas") sized to its client area. Painting a
- * window is: the library hands the paint handler a painter already targeting that
+ * A window owns a canvas ("backing canvas") sized to its client area. Drawing a
+ * window is: the library hands the canvas handler a painter already targeting that
  * canvas, the handler draws, the library blits the canvas onto the window. That is
  * why double buffering is on by default and why there is no flicker: nothing is
  * ever drawn straight to the screen.
@@ -680,9 +683,9 @@ HELIOSVIEW_API int heliosview_painter_restore(heliosview_painter_t* painter);
  * batch; everything above this line works headless today. */
 
 HELIOSVIEW_API heliosview_canvas_t* heliosview_window_canvas(const heliosview_window_t* window);
-HELIOSVIEW_API int heliosview_window_set_paint_engine(heliosview_window_t* window,
-                                                      heliosview_paint_engine_t engine);
-HELIOSVIEW_API heliosview_paint_engine_t heliosview_window_paint_engine(const heliosview_window_t* window);
+HELIOSVIEW_API int heliosview_window_set_canvas_engine(heliosview_window_t* window,
+                                                      heliosview_canvas_engine_t engine);
+HELIOSVIEW_API heliosview_canvas_engine_t heliosview_window_canvas_engine(const heliosview_window_t* window);
 HELIOSVIEW_API int heliosview_window_set_double_buffered(heliosview_window_t* window, int on);
 HELIOSVIEW_API int heliosview_window_is_double_buffered(const heliosview_window_t* window);
 HELIOSVIEW_API int heliosview_window_set_background_color(heliosview_window_t* window, uint32_t argb);
@@ -698,4 +701,4 @@ HELIOSVIEW_API int heliosview_window_client_rect(const heliosview_window_t* wind
 } /* extern "C" */
 #endif
 
-#endif /* HELIOSVIEW_HELIOSVIEW_PAINT_H */
+#endif /* HELIOSVIEW_HELIOSVIEW_CANVAS_H */
