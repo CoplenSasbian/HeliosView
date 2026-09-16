@@ -3,6 +3,7 @@ add_library(HeliosView SHARED
     heliosview_canvas.cpp        # canvas core: engine registry, canvas storage, painter session (no platform code)
     heliosview_canvas_blend2d.cpp # unified JIT software rasterizer engine (Blend2D)
     heliosview_image_codec.cpp  # image decode/encode for every engine (vendored stb)
+    heliosview_ui.cpp           # retained UI component tree & built-in widgets
 )
 
 # Platform backends: each platform adds its implementation files under
@@ -13,9 +14,11 @@ if(WIN32)
             win32/heliosview_window_win32.cpp      # windows / message loop / native message translation / dialogs
         win32/heliosview_canvas_gdiplus.cpp # canvas engine: GDI+ (the NATIVE engine on Windows)
         win32/heliosview_canvas_d2d.cpp # canvas engine: Direct2D + DirectWrite (the D2D vendor engine; not the NATIVE/ACCELERATED default yet)
-        win32/heliosview_host_win32.cpp # hidden library host window (tray callbacks + window-less popup menu owner)
+        win32/heliosview_hidden_host_win32.cpp # hidden library message host (tray + menu callbacks)
+        win32/heliosview_host_win32.cpp        # child viewport host + UI subclass
         win32/heliosview_tray_win32.cpp # tray icon (heliosview_tray_* API; Shell_NotifyIcon)
         win32/heliosview_menu_win32.cpp # popup menus (heliosview_menu_* API; CreatePopupMenu / TrackPopupMenu, routing id via window subclass)
+        win32/heliosview_presenter_win32.cpp # window buffer presenter (bit-blit to HWND via subclass)
         win32/heliosview_webview2_win32.cpp # WebView2 backend (heliosview_webview_* API; self-manages via parent-window subclass)
         win32/heliosview_notify_win32.cpp # OS toast notifications (WinRT via the Windows SDK)
         # Common-Controls v6 manifest: CMake passes .manifest sources to the MSVC

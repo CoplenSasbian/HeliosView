@@ -321,7 +321,15 @@ public:
         }
     }
 
+    ~ContextImpl() override
+    {
+        if (m_graphics.GetLastStatus() == Gdiplus::Ok) {
+            m_graphics.Flush(Gdiplus::FlushIntentionSync);
+        }
+    }
+
     bool valid() const { return m_graphics.GetLastStatus() == Gdiplus::Ok; }
+
 
     /* ---- state ---- */
     void set_state(const heliosview_painter_state_t& state) override

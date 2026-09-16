@@ -584,7 +584,21 @@ void* heliosview_canvas_data(heliosview_canvas_t* canvas)
     return canvas->data.pixels;
 }
 
+heliosview_pixel_view_t heliosview_canvas_pixel_view(const heliosview_canvas_t* canvas)
+{
+    if (!canvas)
+        return heliosview_pixel_view_t{nullptr, 0, 0, 0, HELIOSVIEW_FORMAT_AUTO};
+    return heliosview_pixel_view_t{
+        canvas->data.pixels,
+        canvas->data.width,
+        canvas->data.height,
+        canvas->data.stride,
+        canvas->data.format
+    };
+}
+
 int heliosview_canvas_end_write(heliosview_canvas_t* canvas)
+
 {
     if (!canvas)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas is NULL");

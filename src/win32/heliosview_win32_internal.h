@@ -393,3 +393,9 @@ inline HWND hv_window_hwnd(heliosview_window_t* window)
 {
     return reinterpret_cast<HWND>(heliosview_window_id(window));
 }
+
+/* ================= Host handle (HWND) & Subclass Helpers ================= */
+struct heliosview_host;
+heliosview_host* hv_host_create_raw(heliosview_window_t* parent, int x, int y, int width, int height);
+HWND hv_host_hwnd(heliosview_host* host);
+void hv_host_attach_subclass(heliosview_host* host, void* subclass_data, void (*subclass_dtor)(heliosview_host* host));

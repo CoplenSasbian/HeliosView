@@ -52,7 +52,10 @@
 #include <HeliosViewCore/MenuBar.h>
 #include <HeliosViewCore/Notification.h>
 #include <HeliosViewCore/Canvas.h>
+#include <HeliosViewCore/PixelView.h>
+#include <HeliosViewCore/BufferPresenter.h>
 #include <HeliosViewCore/Signal.h>
+
 #include <HeliosViewCore/String.h>
 #include <HeliosViewCore/System.h>
 #include <HeliosViewCore/Timer.h>

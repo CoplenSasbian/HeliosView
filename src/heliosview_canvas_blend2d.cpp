@@ -256,18 +256,19 @@ public:
 
     void sync_to_buffer()
     {
-        if (m_format == HELIOSVIEW_FORMAT_BGRA8_PREMUL)
-            return;
-        // Read back converted pixels into canvas buffer
+        // Read back pixels if image buffer was detached/converted from canvas buffer
         BLImageData img_data;
         if (m_image.get_data(&img_data) != BL_SUCCESS)
             return;
-        const CanvasData src{m_width, m_height, static_cast<int32_t>(img_data.stride),
-                             HELIOSVIEW_FORMAT_BGRA8_PREMUL, static_cast<uint8_t*>(img_data.pixel_data)};
-        const CanvasData dst{m_width, m_height, m_stride, m_format, m_pixels};
-        convert_copy(src, Rect{0.0f, 0.0f, static_cast<float>(m_width), static_cast<float>(m_height)},
-                     dst, 0, 0, 1.0f);
+        if (img_data.pixel_data != m_pixels) {
+            const CanvasData src{m_width, m_height, static_cast<int32_t>(img_data.stride),
+                                 HELIOSVIEW_FORMAT_BGRA8_PREMUL, static_cast<uint8_t*>(img_data.pixel_data)};
+            const CanvasData dst{m_width, m_height, m_stride, m_format, m_pixels};
+            convert_copy(src, Rect{0.0f, 0.0f, static_cast<float>(m_width), static_cast<float>(m_height)},
+                         dst, 0, 0, 1.0f);
+        }
     }
+
 
 private:
     void wrap_or_convert()

@@ -1414,12 +1414,11 @@ int heliosview_webview_engine_version(char* buf, size_t size)
     return 0;
 }
 
-heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
-                                                   const heliosview_webview_env_opts_t* opts)
+static heliosview_webview_t* hv_webview_create_for_hwnd(HWND container_hwnd,
+                                                        const heliosview_webview_env_opts_t* opts)
 {
-    const HWND parent_hwnd = hv_window_hwnd(parent);
-    if (!parent_hwnd) {
-        hv_fail(HELIOSVIEW_ERROR_GENERIC, "parent window is NULL or its native window is not created");
+    if (!container_hwnd) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "container window is NULL or its native window is not created");
         return nullptr;
     }
 
@@ -1429,10 +1428,6 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
             ? utf8_to_wide(opts->browser_executable_folder)
             : std::wstring();
 
-    /* The WebView2 Runtime is a deploy-time component: preinstalled on Windows
-     * 11, present on most but not all Windows 10 devices. Report the honest
-     * "unsupported here" instead of an opaque HRESULT — but only when the caller
-     * did not pin a fixed-version folder, whose presence only the OS can tell. */
     if (browser_folder.empty() && hv_webview2_runtime_version().empty()) {
         hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED,
                 "WebView2 Runtime is not installed — install the Evergreen Runtime, or pass a "
@@ -1440,15 +1435,10 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
         return nullptr;
     }
 
-    /* WebView2 requires a COM STA apartment on the calling thread (the UI
-     * thread): the environment/controller completion callbacks are dispatched
-     * on this thread's message loop. Initialize once and keep the apartment
-     * for the process lifetime (WebView objects outlive this call; repeated
-     * calls return S_FALSE = already initialized). */
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (co == RPC_E_CHANGED_MODE) {
         hv_fail(HELIOSVIEW_ERROR_GENERIC, "thread is already in an MTA apartment; WebView2 requires STA");
-        return nullptr; /* the thread is already MTA: WebView2 needs STA */
+        return nullptr;
     }
     if (FAILED(co)) {
         hv_fail_hresult(co, "CoInitializeEx failed");
@@ -1456,28 +1446,19 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
     }
 
     auto* webview = hv::hv_alloc<heliosview_webview>();
-    webview->parent = parent_hwnd;
-    /* Attach the parent-window subclass NOW: from this point the WebView keeps
-     * itself in sync with its parent (WM_SIZE → put_Bounds / put_IsVisible)
-     * through the subclass callout — the window layer stays completely
-     * WebView2-free, and no HWND → WebView registry is needed (a running
-     * callout proves the object is alive). */
-    SetWindowSubclass(parent_hwnd, hv_webview_subclass_proc, 0, (DWORD_PTR)webview);
+    webview->parent = container_hwnd;
+    SetWindowSubclass(container_hwnd, hv_webview_subclass_proc, 0, (DWORD_PTR)webview);
     webview->creating = true;
-    /* Creation-locked environment options: captured here (before the WebView2
-     * environment is created); they cannot be changed afterwards. */
+
     if (opts && opts->user_data_folder && *opts->user_data_folder)
         webview->user_data_folder = utf8_to_wide(opts->user_data_folder);
 
-    /* hv_alloc + Release: hand the initial reference to the API (Release to zero deletes it when done) */
     auto* env_handler = hv::hv_alloc<env_completed_handler>(
         [webview](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
             if (FAILED(result)) {
                 webview->creating = false;
                 return result;
             }
-            /* controller ready: hand off to hv_webview_init_core (all wiring
-             * and initial state lives there, so the lambdas stay flat) */
             auto* controller_handler = hv::hv_alloc<controller_completed_handler>(
                 [webview](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
                     webview->creating = false;
@@ -1500,11 +1481,8 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
     env_handler->Release();
 
     if (FAILED(hr)) {
-        RemoveWindowSubclass(webview->parent, hv_webview_subclass_proc, 0); /* undo the subclass above */
+        RemoveWindowSubclass(webview->parent, hv_webview_subclass_proc, 0);
         hv::hv_dealloc(webview);
-        /* A fixed-version folder that does not exist (or a runtime removed
-         * between the check above and here) surfaces as a "not found" HRESULT:
-         * report it as the missing engine, not as an opaque platform code. */
         if (browser_folder.empty()
             && (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
                 || hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)
@@ -1514,14 +1492,72 @@ heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
             hv_fail_hresult(hr, "CreateCoreWebView2EnvironmentWithOptions failed");
         return nullptr;
     }
-    hv_webview_register_live(webview); /* track the instance for stale-call detection */
+    hv_webview_register_live(webview);
     return webview;
+}
+
+heliosview_webview_t* heliosview_webview_create_ex(heliosview_window_t* parent,
+                                                   const heliosview_webview_env_opts_t* opts)
+{
+    const HWND parent_hwnd = hv_window_hwnd(parent);
+    if (!parent_hwnd) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "parent window is NULL or its native window is not created");
+        return nullptr;
+    }
+    return hv_webview_create_for_hwnd(parent_hwnd, opts);
 }
 
 heliosview_webview_t* heliosview_webview_create(heliosview_window_t* parent)
 {
     return heliosview_webview_create_ex(parent, nullptr);
 }
+
+/* ================= WebView Subclass on Host ================= */
+
+namespace {
+
+void DestroyWebviewHostSubclass(heliosview_host_t* host) {
+    if (!host)
+        return;
+    auto* wv = static_cast<heliosview_webview_t*>(heliosview_host_get_subclass(host));
+    if (wv)
+        heliosview_webview_destroy(wv);
+}
+
+} // namespace
+
+heliosview_host_t* heliosview_host_create_webview_ex(
+    heliosview_window_t* parent, int x, int y, int width, int height,
+    const heliosview_webview_env_opts_t* opts)
+{
+    heliosview_host_t* host = hv_host_create_raw(parent, x, y, width, height);
+    if (!host)
+        return nullptr;
+
+    HWND child_hwnd = hv_host_hwnd(host);
+    heliosview_webview_t* webview = hv_webview_create_for_hwnd(child_hwnd, opts);
+    if (!webview) {
+        heliosview_host_destroy(host);
+        return nullptr;
+    }
+
+    hv_host_attach_subclass(host, webview, DestroyWebviewHostSubclass);
+    return host;
+}
+
+heliosview_host_t* heliosview_host_create_webview(
+    heliosview_window_t* parent, int x, int y, int width, int height)
+{
+    return heliosview_host_create_webview_ex(parent, x, y, width, height, nullptr);
+}
+
+heliosview_webview_t* heliosview_host_get_webview(heliosview_host_t* host)
+{
+    if (!host)
+        return nullptr;
+    return static_cast<heliosview_webview_t*>(heliosview_host_get_subclass(host));
+}
+
 
 void heliosview_webview_destroy(heliosview_webview_t* webview)
 {

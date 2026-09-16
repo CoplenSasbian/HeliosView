@@ -51,7 +51,9 @@
 
 #include <HeliosView/heliosview_canvas.h>
 #include <HeliosViewCore/Error.h>
+#include <HeliosViewCore/PixelView.h>
 #include <HeliosViewCore/System.h>
+
 
 #include <array>
 #include <cstddef>
@@ -90,15 +92,8 @@ enum class PaintEngine : int32_t {
 	Cairo = HELIOSVIEW_ENGINE_CAIRO,
 };
 
-// The pixel layout of a canvas (mirrors heliosview_pixel_format_t). Auto is an
-// input only: a live canvas always reports a concrete format.
-enum class PixelFormat : int32_t {
-	Auto = HELIOSVIEW_FORMAT_AUTO,
-	Bgra8Premul = HELIOSVIEW_FORMAT_BGRA8_PREMUL, // b,g,r,a; alpha premultiplied (the default)
-	Bgra8 = HELIOSVIEW_FORMAT_BGRA8,              // b,g,r,a; alpha straight
-	Rgba8 = HELIOSVIEW_FORMAT_RGBA8,              // r,g,b,a; alpha straight
-	Gray8 = HELIOSVIEW_FORMAT_GRAY8,              // one luminance byte per pixel
-};
+// PixelFormat is defined in <HeliosViewCore/PixelView.h>
+
 
 // A capability an engine may or may not have (mirrors heliosview_canvas_feature_t);
 // ask with engineSupportsFeature() instead of assuming.
@@ -576,11 +571,25 @@ public:
 		return heliosview_canvas_data(m_canvas);
 	}
 
+	// Non-owning read-only PixelView referencing this canvas's current pixels
+	PixelView pixelView() const noexcept
+	{
+		if (!m_canvas) return PixelView();
+		return PixelView(heliosview_canvas_pixel_view(m_canvas));
+	}
+
+	// Implicit conversion to PixelView for zero-copy presentation
+	operator PixelView() const noexcept
+	{
+		return pixelView();
+	}
+
 	// Announce a direct write through data(). Fails when there was none.
 	bool endWrite()
 	{
 		return heliosview_canvas_end_write(m_canvas) == 0;
 	}
+
 
 	// Copy this canvas onto `dst` at (x, y): no scaling and no transform, but format
 	// conversion and alpha blending (0..1 scales the source's opacity). `srcRect`

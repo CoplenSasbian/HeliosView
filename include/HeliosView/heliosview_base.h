@@ -50,6 +50,14 @@ typedef struct heliosview_action heliosview_action_t;
 /* A popup menu / menu bar (see heliosview_menu.h) */
 typedef struct heliosview_menu heliosview_menu_t;
 
+/* A 2D drawing canvas & painter (see heliosview_canvas.h) */
+typedef struct heliosview_canvas heliosview_canvas_t;
+typedef struct heliosview_painter heliosview_painter_t;
+
+/* A child viewport host (see heliosview_host.h) */
+typedef struct heliosview_host heliosview_host_t;
+
+
 /* ================= Geometry =================
  *
  * A rectangle in the coordinate system of whatever it belongs to: screen
@@ -62,6 +70,28 @@ typedef struct heliosview_rect {
     int32_t width;  /* positive */
     int32_t height; /* positive */
 } heliosview_rect_t;
+
+/* ================= Pixel formats & views =================
+ *
+ * Platform-independent representation of uncompressed 2D raster data in memory.
+ * Decoupled from any windowing system or drawing engine. */
+typedef enum heliosview_pixel_format {
+    HELIOSVIEW_FORMAT_AUTO = 0,          /* resolve to preferred format */
+    HELIOSVIEW_FORMAT_BGRA8_PREMUL = 1,  /* default: 32-bit premultiplied BGRA (Win32 32bpp DIB native) */
+    HELIOSVIEW_FORMAT_BGRA8 = 2,         /* 32-bit straight BGRA */
+    HELIOSVIEW_FORMAT_RGBA8 = 3,         /* 32-bit straight RGBA */
+    HELIOSVIEW_FORMAT_GRAY8 = 4,         /* 8-bit single channel luminance */
+} heliosview_pixel_format_t;
+
+/* A non-owning rectangular slice of pixels in memory. */
+typedef struct heliosview_pixel_view {
+    const void* pixels;                 /* pointer to top-left pixel */
+    int32_t width;                      /* width in pixels (> 0) */
+    int32_t height;                     /* height in pixels (> 0) */
+    int32_t stride;                     /* byte distance between consecutive rows */
+    heliosview_pixel_format_t format;   /* pixel format */
+} heliosview_pixel_view_t;
+
 
 #ifdef __cplusplus
 } /* extern "C" */

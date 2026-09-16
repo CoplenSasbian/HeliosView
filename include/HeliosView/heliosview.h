@@ -155,5 +155,10 @@
 #include <HeliosView/heliosview_system.h>
 #include <HeliosView/heliosview_notification.h>
 #include <HeliosView/heliosview_canvas.h>
+#include <HeliosView/heliosview_presenter.h>
+#include <HeliosView/heliosview_host.h>
+#include <HeliosView/heliosview_ui.h>
 
 #endif /* HELIOSVIEW_HELIOSVIEW_H */
+
+

@@ -163,13 +163,8 @@ typedef enum heliosview_canvas_engine {
  * Use heliosview_canvas_stride() for the row pitch: it is always at least
  * width * bytes-per-pixel and 4-byte aligned, but never assume it equals
  * width * bytes-per-pixel. */
-typedef enum heliosview_pixel_format {
-    HELIOSVIEW_FORMAT_AUTO = 0,          /* resolve to the engine's preferred format (input only) */
-    HELIOSVIEW_FORMAT_BGRA8_PREMUL = 1,  /* default */
-    HELIOSVIEW_FORMAT_BGRA8 = 2,
-    HELIOSVIEW_FORMAT_RGBA8 = 3,
-    HELIOSVIEW_FORMAT_GRAY8 = 4,
-} heliosview_pixel_format_t;
+/* heliosview_pixel_format_t and heliosview_pixel_view_t are defined in heliosview_base.h */
+
 
 /* ================= Engine queries =================
  *
@@ -270,6 +265,10 @@ HELIOSVIEW_API heliosview_canvas_engine_t heliosview_canvas_engine(const heliosv
  * and fall back to set_pixel/get_pixel, which every engine provides.
  * After writing through this pointer, call heliosview_canvas_end_write. */
 HELIOSVIEW_API void* heliosview_canvas_data(heliosview_canvas_t* canvas);
+
+/* Convenience: create a non-owning pixel view referencing the canvas pixels */
+HELIOSVIEW_API heliosview_pixel_view_t heliosview_canvas_pixel_view(const heliosview_canvas_t* canvas);
+
 
 /* Announce a direct write through heliosview_canvas_data(): the engine drops any
  * cached copy of these pixels. Call it after writing and before the next canvas,

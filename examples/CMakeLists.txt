@@ -39,12 +39,30 @@ target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
 add_executable(HeliosViewCanvasTest canvas_test.cpp)
 target_link_libraries(HeliosViewCanvasTest PRIVATE HeliosView::Core)
 
+add_executable(HeliosViewPresenterTest presenter_test.cpp)
+target_link_libraries(HeliosViewPresenterTest PRIVATE HeliosView::Core)
+
+# BufferPresenter full pipeline interactive live demo
+add_executable(HeliosViewPresenterDemo presenter_demo.cpp)
+target_link_libraries(HeliosViewPresenterDemo PRIVATE HeliosView::Core)
+
 add_executable(HeliosViewSystemDemo system_demo.cpp)            # OS integration: dialogs, hotkeys, toasts, info
+
+
 target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
 
 # Console demo (no window): Async pool (timers/sockets) + HttpClient (http/https GET, POST).
 add_executable(HeliosViewAsyncHttpDemo async_http_demo.cpp)
 target_link_libraries(HeliosViewAsyncHttpDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewHostDemo host_demo.cpp)
+target_link_libraries(HeliosViewHostDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewCustomUiDemo custom_ui_demo.cpp)
+target_link_libraries(HeliosViewCustomUiDemo PRIVATE HeliosView::Core)
+
+add_executable(HeliosViewStudioDemo studio_demo.cpp)
+target_link_libraries(HeliosViewStudioDemo PRIVATE HeliosView::Core)
 
 # Pure-C consumer: proves the C API header compiles as C99 and links cleanly.
 # HeliosView::HeliosView is the namespaced target in both build modes (alias in

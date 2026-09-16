@@ -216,12 +216,14 @@ void heliosview_timer_cancel(uint32_t timer_id)
 
 bool hv::run_due_timers()
 {
+    const int64_t now = hv::now_ms();
     bool any = false;
+
     for (;;) {
         hv_timer t;
         {
             std::lock_guard<std::mutex> lock(g_timer_mutex);
-            if (g_timers.empty() || g_timers.front().due_ms > hv::now_ms())
+            if (g_timers.empty() || g_timers.front().due_ms > now)
                 break;
             t = g_timers.front();
             g_timers.erase(g_timers.begin());
@@ -235,6 +237,7 @@ bool hv::run_due_timers()
     }
     return any;
 }
+
 
 int64_t hv::next_timer_wait_ms()
 {
