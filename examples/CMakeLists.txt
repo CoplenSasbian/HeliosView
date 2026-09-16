@@ -1,16 +1,21 @@
-# The demos are normally built as part of the HeliosView top-level project
-# (add_subdirectory). Built standalone against an installed SDK (e.g. the
-# release zip), declare the project here - HeliosView::Core is then the
-# imported target from find_package(HeliosView).
+# =============================================================================
+# HeliosView Examples CMakeLists.txt
+# =============================================================================
+# Structured modular demos for HeliosView:
+#   01_console_core/    - Core async tasks, thread pool, HTTP client, signals
+#   02_window_shell/    - Native window styles, titlebars, menus, tray, dialogs
+#   03_webview_bridge/  - WebView2, HTML5 dashboard, bidirectional RPC bridge
+#   04_canvas_ui/       - Retained DirectDraw UI, custom components, layout
+#   05_studio_hybrid/   - Flagship dual-viewport (UIHost + WebViewHost) showcase
+#   06_c_api/           - Pure C99 ABI tour and FFI interop demo
+# =============================================================================
+
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 4.3)
     project(HeliosViewExamples CXX C)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# The demo sources contain UTF-8 string literals (Chinese labels in the WebView
-# pages). MSVC defaults to the system ANSI codepage, which would corrupt them;
-# force UTF-8 for the demo TUs.
 if(MSVC)
     add_compile_options(/utf-8)
 endif()
@@ -19,53 +24,38 @@ if(NOT TARGET HeliosView::Core)
     find_package(HeliosView REQUIRED)
 endif()
 
-# One executable per topic - see the demo table in README.md. Each file's header
-# comment states what it demonstrates and how to drive it.
-add_executable(HeliosViewDemo main.cpp)                         # WebView master demo: every feature via the JS bridge
-target_link_libraries(HeliosViewDemo PRIVATE HeliosView::Core )
+# -----------------------------------------------------------------------------
+# 01. Console Core & Async Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_ConsoleCoreDemo 01_console_core/console_core_demo.cpp)
+target_link_libraries(HeliosView_ConsoleCoreDemo PRIVATE HeliosView::Core)
 
-add_executable(HeliosViewWebViewDemo webview_demo.cpp)          # the JS <-> native bridge (bindJson / subscribeJson)
-target_link_libraries(HeliosViewWebViewDemo PRIVATE HeliosView::Core)
+# -----------------------------------------------------------------------------
+# 02. Native Window Shell Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_WindowShellDemo 02_window_shell/window_shell_demo.cpp)
+target_link_libraries(HeliosView_WindowShellDemo PRIVATE HeliosView::Core)
 
-add_executable(HeliosViewWebViewEventsDemo webview_events_demo.cpp)  # navigation events, local assets, native dialogs
-target_link_libraries(HeliosViewWebViewEventsDemo PRIVATE HeliosView::Core)
+# -----------------------------------------------------------------------------
+# 03. Modern WebView & RPC Bridge Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_WebViewBridgeDemo 03_webview_bridge/webview_bridge_demo.cpp)
+target_link_libraries(HeliosView_WebViewBridgeDemo PRIVATE HeliosView::Core)
 
-add_executable(HeliosViewWindowDemo window_demo.cpp)            # windows, styles, signals, menus, tray
-target_link_libraries(HeliosViewWindowDemo PRIVATE HeliosView::Core)
+# -----------------------------------------------------------------------------
+# 04. Retained Canvas UI Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_CanvasUiDemo 04_canvas_ui/canvas_ui_demo.cpp)
+target_link_libraries(HeliosView_CanvasUiDemo PRIVATE HeliosView::Core)
 
-# Canvas / painter / image checks: headless (no window at all -- a canvas is memory),
-# with pixel-level assertions and PNG previews written to examples/out. It uses the
-# C++ wrapper (<HeliosViewCore/Canvas.h>), so it links the header-only core target.
-add_executable(HeliosViewCanvasTest canvas_test.cpp)
-target_link_libraries(HeliosViewCanvasTest PRIVATE HeliosView::Core)
+# -----------------------------------------------------------------------------
+# 05. Studio Hybrid Dual-Viewport Showcase Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_StudioHybridDemo 05_studio_hybrid/studio_hybrid_demo.cpp)
+target_link_libraries(HeliosView_StudioHybridDemo PRIVATE HeliosView::Core)
 
-add_executable(HeliosViewPresenterTest presenter_test.cpp)
-target_link_libraries(HeliosViewPresenterTest PRIVATE HeliosView::Core)
-
-# BufferPresenter full pipeline interactive live demo
-add_executable(HeliosViewPresenterDemo presenter_demo.cpp)
-target_link_libraries(HeliosViewPresenterDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewSystemDemo system_demo.cpp)            # OS integration: dialogs, hotkeys, toasts, info
-
-
-target_link_libraries(HeliosViewSystemDemo PRIVATE HeliosView::Core)
-
-# Console demo (no window): Async pool (timers/sockets) + HttpClient (http/https GET, POST).
-add_executable(HeliosViewAsyncHttpDemo async_http_demo.cpp)
-target_link_libraries(HeliosViewAsyncHttpDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewHostDemo host_demo.cpp)
-target_link_libraries(HeliosViewHostDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewCustomUiDemo custom_ui_demo.cpp)
-target_link_libraries(HeliosViewCustomUiDemo PRIVATE HeliosView::Core)
-
-add_executable(HeliosViewStudioDemo studio_demo.cpp)
-target_link_libraries(HeliosViewStudioDemo PRIVATE HeliosView::Core)
-
-# Pure-C consumer: proves the C API header compiles as C99 and links cleanly.
-# HeliosView::HeliosView is the namespaced target in both build modes (alias in
-# the top-level project, imported target via find_package).
-add_executable(HeliosViewCDemo c_demo.c)
-target_link_libraries(HeliosViewCDemo PRIVATE HeliosView::HeliosView)
+# -----------------------------------------------------------------------------
+# 06. Pure C99 ABI Showcase Demo
+# -----------------------------------------------------------------------------
+add_executable(HeliosView_CApiDemo 06_c_api/c_api_demo.c)
+target_link_libraries(HeliosView_CApiDemo PRIVATE HeliosView::HeliosView)

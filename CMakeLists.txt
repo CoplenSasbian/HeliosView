@@ -292,6 +292,11 @@ if(HELIOSVIEW_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+option(HELIOSVIEW_BUILD_TESTS "Build the test executables" ON)
+if(HELIOSVIEW_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
+
 # ---------- Install / packaging ----------
 #
 # Consumers (including FFI wrappers in other languages) link the built DLL/import

@@ -12,10 +12,12 @@
  */
 
 #include <HeliosView/heliosview_ui.h>
-#include <memory>
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace HeliosView::UI {
 
@@ -63,10 +65,20 @@ public:
         if (m_handle) heliosview_ui_widget_request_repaint(m_handle);
     }
 
+    Widget* setVisible(bool visible) {
+        if (m_handle) heliosview_ui_widget_set_visible(m_handle, visible ? 1 : 0);
+        return this;
+    }
+
+    bool isVisible() const {
+        return m_handle ? (heliosview_ui_widget_is_visible(m_handle) != 0) : false;
+    }
+
     // Children management
     Widget* addChild(std::shared_ptr<Widget> child) {
         if (child && m_handle) {
             heliosview_ui_widget_add_child(m_handle, child->handle());
+            child->m_isBorrowed = true;
             m_children.push_back(std::move(child));
         }
         return this;
@@ -181,7 +193,7 @@ public:
     }
 
 private:
-    explicit Button(const std::string& label) {
+    explicit Button(const std::string& label) : Widget(nullptr) {
         m_handle = heliosview_ui_button_create(label.c_str(), StaticClick, this);
         m_isBorrowed = false;
     }
@@ -229,6 +241,435 @@ private:
     explicit HStack(heliosview_ui_widget_t* raw) : Widget(raw) {
         m_isBorrowed = false;
     }
+};
+
+/* ================= Built-in Slider ================= */
+class Slider : public Widget {
+public:
+    static std::shared_ptr<Slider> create(float minVal = 0.0f, float maxVal = 100.0f, float initial = 50.0f) {
+        return std::shared_ptr<Slider>(new Slider(minVal, maxVal, initial));
+    }
+
+    Slider* setValue(float val) {
+        float clamped = std::clamp(val, m_min, m_max);
+        if (m_val != clamped) {
+            m_val = clamped;
+            requestRepaint();
+            if (m_onChange) m_onChange(m_val);
+        }
+        return this;
+    }
+
+    float value() const noexcept { return m_val; }
+
+    Slider* onChange(std::function<void(float)> cb) {
+        m_onChange = std::move(cb);
+        return this;
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        float trackH = 6.0f;
+        float cy = h / 2.0f;
+        float padding = 12.0f;
+        float availW = (float)w - padding * 2.0f;
+
+        // Inactive background track
+        heliosview_painter_set_fill(p, 0xFF313244);
+        heliosview_painter_set_stroke(p, 0, 0);
+        heliosview_painter_draw_round_rect(p, padding, cy - trackH / 2.0f, availW, trackH, trackH / 2.0f);
+
+        // Active highlighted track
+        float fraction = (m_max > m_min) ? ((m_val - m_min) / (m_max - m_min)) : 0.0f;
+        fraction = std::clamp(fraction, 0.0f, 1.0f);
+        float fillW = availW * fraction;
+        heliosview_painter_set_fill(p, m_isDragging ? 0xFFCBA6F7 : (m_isHovered ? 0xFFB4BEFE : 0xFF8AADF4));
+        heliosview_painter_draw_round_rect(p, padding, cy - trackH / 2.0f, fillW, trackH, trackH / 2.0f);
+
+        // Thumb knob
+        float thumbX = padding + fillW;
+        float thumbR = m_isDragging ? 9.0f : (m_isHovered ? 8.0f : 7.0f);
+        heliosview_painter_set_fill(p, 0xFFCAD3F5);
+        heliosview_painter_set_stroke(p, 0xFFB4BEFE, 2.0f);
+        heliosview_painter_draw_ellipse(p, thumbX - thumbR, cy - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+    }
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        float padding = 12.0f;
+        float availW = (float)w - padding * 2.0f;
+
+        auto updateFromX = [this, availW, padding](int mouseX) {
+            if (availW <= 0.0f) return;
+            float frac = std::clamp(((float)mouseX - padding) / availW, 0.0f, 1.0f);
+            setValue(m_min + frac * (m_max - m_min));
+        };
+
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+            if (!m_isHovered) { m_isHovered = true; requestRepaint(); }
+            if (m_isDragging) {
+                updateFromX(e->x);
+                return true;
+            }
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
+            m_isDragging = true;
+            updateFromX(e->x);
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_UP && e->button == 1) {
+            if (m_isDragging) {
+                m_isDragging = false;
+                requestRepaint();
+                return true;
+            }
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            if (m_isHovered || m_isDragging) {
+                m_isHovered = false;
+                m_isDragging = false;
+                requestRepaint();
+            }
+        }
+        return false;
+    }
+
+private:
+    Slider(float minVal, float maxVal, float initial)
+        : m_min(minVal), m_max(maxVal), m_val(initial) {
+        setSize(240, 32);
+    }
+
+    float m_min = 0.0f;
+    float m_max = 100.0f;
+    float m_val = 50.0f;
+    bool m_isDragging = false;
+    bool m_isHovered = false;
+    std::function<void(float)> m_onChange;
+};
+
+/* ================= Built-in Toggle Switch ================= */
+class Switch : public Widget {
+public:
+    static std::shared_ptr<Switch> create(bool initial = false) {
+        return std::shared_ptr<Switch>(new Switch(initial));
+    }
+
+    Switch* setChecked(bool checked) {
+        if (m_checked != checked) {
+            m_checked = checked;
+            requestRepaint();
+            if (m_onToggle) m_onToggle(m_checked);
+        }
+        return this;
+    }
+
+    bool isChecked() const noexcept { return m_checked; }
+
+    Switch* onToggle(std::function<void(bool)> cb) {
+        m_onToggle = std::move(cb);
+        return this;
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        float pillW = 46.0f;
+        float pillH = 24.0f;
+        float px = 4.0f;
+        float py = ((float)h - pillH) / 2.0f;
+
+        // Pill background
+        uint32_t bg = m_checked ? (m_isHovered ? 0xFFA6E3A1 : 0xFFA6DA95)
+                                : (m_isHovered ? 0xFF45475A : 0xFF313244);
+        heliosview_painter_set_fill(p, bg);
+        heliosview_painter_set_stroke(p, m_checked ? 0xFF8AADF4 : 0xFF585B70, 1.0f);
+        heliosview_painter_draw_round_rect(p, px, py, pillW, pillH, pillH / 2.0f);
+
+        // Thumb circle
+        float thumbR = 9.0f;
+        float thumbX = m_checked ? (px + pillW - thumbR - 3.0f) : (px + thumbR + 3.0f);
+        float thumbY = py + pillH / 2.0f;
+        heliosview_painter_set_fill(p, 0xFFFFFFFF);
+        heliosview_painter_set_stroke(p, 0, 0);
+        heliosview_painter_draw_ellipse(p, thumbX - thumbR, thumbY - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+    }
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+            if (!m_isHovered) { m_isHovered = true; requestRepaint(); }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            if (m_isHovered) { m_isHovered = false; requestRepaint(); }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
+            setChecked(!m_checked);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    explicit Switch(bool initial) : m_checked(initial) {
+        setSize(54, 32);
+    }
+    bool m_checked = false;
+    bool m_isHovered = false;
+    std::function<void(bool)> m_onToggle;
+};
+
+/* ================= Built-in Checkbox ================= */
+class Checkbox : public Widget {
+public:
+    static std::shared_ptr<Checkbox> create(const std::string& label, bool initial = false) {
+        return std::shared_ptr<Checkbox>(new Checkbox(label, initial));
+    }
+
+    Checkbox* setChecked(bool checked) {
+        if (m_checked != checked) {
+            m_checked = checked;
+            requestRepaint();
+            if (m_onToggle) m_onToggle(m_checked);
+        }
+        return this;
+    }
+
+    bool isChecked() const noexcept { return m_checked; }
+
+    Checkbox* onToggle(std::function<void(bool)> cb) {
+        m_onToggle = std::move(cb);
+        return this;
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        float boxSize = 18.0f;
+        float bx = 4.0f;
+        float by = ((float)h - boxSize) / 2.0f;
+
+        // Box
+        uint32_t bg = m_checked ? 0xFF8AADF4 : (m_isHovered ? 0xFF313244 : 0xFF1E1E2E);
+        heliosview_painter_set_fill(p, bg);
+        heliosview_painter_set_stroke(p, m_isHovered ? 0xFFB4BEFE : 0xFF585B70, 1.5f);
+        heliosview_painter_draw_round_rect(p, bx, by, boxSize, boxSize, 4.0f);
+
+        // Vector Checkmark (✓)
+        if (m_checked) {
+            heliosview_painter_set_stroke(p, 0xFF181926, 2.2f);
+            heliosview_painter_draw_line(p, bx + 4.0f, by + 9.0f, bx + 8.0f, by + 13.5f);
+            heliosview_painter_draw_line(p, bx + 8.0f, by + 13.5f, bx + 14.0f, by + 5.0f);
+        }
+
+        // Label
+        if (!m_label.empty()) {
+            heliosview_font_desc_t font{"Segoe UI", 13.0f, 0};
+            heliosview_painter_set_font(p, &font);
+            heliosview_painter_set_fill(p, m_isHovered ? 0xFFFFFFFF : 0xFFCDD6F4);
+            heliosview_text_metrics_t m{};
+            heliosview_painter_measure_text(p, m_label.c_str(), &m);
+            heliosview_painter_draw_text(p, m_label.c_str(), bx + boxSize + 10.0f, ((float)h - m.height) / 2.0f);
+        }
+    }
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+            if (!m_isHovered) { m_isHovered = true; requestRepaint(); }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            if (m_isHovered) { m_isHovered = false; requestRepaint(); }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
+            setChecked(!m_checked);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    Checkbox(std::string label, bool initial)
+        : m_label(std::move(label)), m_checked(initial) {
+        setSize(220, 28);
+    }
+    std::string m_label;
+    bool m_checked = false;
+    bool m_isHovered = false;
+    std::function<void(bool)> m_onToggle;
+};
+
+/* ================= Built-in ProgressBar ================= */
+class ProgressBar : public Widget {
+public:
+    static std::shared_ptr<ProgressBar> create(float initial = 0.0f) {
+        return std::shared_ptr<ProgressBar>(new ProgressBar(initial));
+    }
+
+    ProgressBar* setProgress(float val) {
+        m_progress = std::clamp(val, 0.0f, 1.0f);
+        requestRepaint();
+        return this;
+    }
+
+    float progress() const noexcept { return m_progress; }
+
+    ProgressBar* setColor(uint32_t barColor) {
+        m_barColor = barColor;
+        requestRepaint();
+        return this;
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        float trackH = (float)h;
+
+        // Background track
+        heliosview_painter_set_fill(p, 0xFF313244);
+        heliosview_painter_set_stroke(p, 0, 0);
+        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, trackH, trackH / 2.0f);
+
+        // Filled bar
+        if (m_progress > 0.001f) {
+            float fillW = (float)w * m_progress;
+            heliosview_painter_set_fill(p, m_barColor);
+            heliosview_painter_draw_round_rect(p, 0, 0, fillW, trackH, trackH / 2.0f);
+        }
+    }
+
+private:
+    explicit ProgressBar(float initial) : m_progress(initial) {
+        setSize(260, 10);
+    }
+    float m_progress = 0.0f;
+    uint32_t m_barColor = 0xFFA6E3A1;
+};
+
+/* ================= Built-in SegmentedControl / TabBar ================= */
+class SegmentedControl : public Widget {
+public:
+    static std::shared_ptr<SegmentedControl> create(const std::vector<std::string>& items, int initial = 0) {
+        return std::shared_ptr<SegmentedControl>(new SegmentedControl(items, initial));
+    }
+
+    int selectedIndex() const noexcept { return m_selectedIndex; }
+
+    SegmentedControl* setSelectedIndex(int idx) {
+        if (idx >= 0 && idx < (int)m_items.size() && m_selectedIndex != idx) {
+            m_selectedIndex = idx;
+            requestRepaint();
+            if (m_onChange) m_onChange(m_selectedIndex);
+        }
+        return this;
+    }
+
+    SegmentedControl* onChange(std::function<void(int)> cb) {
+        m_onChange = std::move(cb);
+        return this;
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        if (m_items.empty()) return;
+
+        // Container background
+        heliosview_painter_set_fill(p, 0xFF181926);
+        heliosview_painter_set_stroke(p, 0xFF313244, 1.0f);
+        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 8.0f);
+
+        float tabW = (float)(w - 8) / (float)m_items.size();
+        float tabH = (float)(h - 8);
+
+        heliosview_font_desc_t font{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
+        heliosview_painter_set_font(p, &font);
+
+        for (size_t i = 0; i < m_items.size(); ++i) {
+            float tx = 4.0f + i * tabW;
+            float ty = 4.0f;
+
+            if ((int)i == m_selectedIndex) {
+                // Active pill
+                heliosview_painter_set_fill(p, 0xFF8AADF4);
+                heliosview_painter_set_stroke(p, 0, 0);
+                heliosview_painter_draw_round_rect(p, tx, ty, tabW, tabH, 6.0f);
+                heliosview_painter_set_fill(p, 0xFF181926);
+            } else if ((int)i == m_hoveredIndex) {
+                // Hover pill
+                heliosview_painter_set_fill(p, 0xFF24273A);
+                heliosview_painter_set_stroke(p, 0, 0);
+                heliosview_painter_draw_round_rect(p, tx, ty, tabW, tabH, 6.0f);
+                heliosview_painter_set_fill(p, 0xFFCDD6F4);
+            } else {
+                heliosview_painter_set_fill(p, 0xFFA6ADC8);
+            }
+
+            heliosview_text_metrics_t m{};
+            heliosview_painter_measure_text(p, m_items[i].c_str(), &m);
+            heliosview_painter_draw_text(p, m_items[i].c_str(), tx + (tabW - m.width) / 2.0f, ty + (tabH - m.height) / 2.0f);
+        }
+    }
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        if (m_items.empty()) return false;
+
+        float tabW = (float)(w - 8) / (float)m_items.size();
+        int idx = (int)(((float)e->x - 4.0f) / tabW);
+        idx = std::clamp(idx, 0, (int)m_items.size() - 1);
+
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+            if (m_hoveredIndex != idx) {
+                m_hoveredIndex = idx;
+                requestRepaint();
+            }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            if (m_hoveredIndex != -1) {
+                m_hoveredIndex = -1;
+                requestRepaint();
+            }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
+            setSelectedIndex(idx);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    SegmentedControl(std::vector<std::string> items, int initial)
+        : m_items(std::move(items)), m_selectedIndex(initial) {
+        setSize(480, 36);
+    }
+
+    std::vector<std::string> m_items;
+    int m_selectedIndex = 0;
+    int m_hoveredIndex = -1;
+    std::function<void(int)> m_onChange;
+};
+
+/* ================= Built-in Card Panel ================= */
+class Card : public Widget {
+public:
+    static std::shared_ptr<Card> create(int width, int height, uint32_t bg = 0xFF1E1E2E, uint32_t border = 0xFF313244) {
+        return std::shared_ptr<Card>(new Card(width, height, bg, border));
+    }
+
+    void onPaint(heliosview_painter_t* p) override {
+        int w = 0, h = 0;
+        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        heliosview_painter_set_fill(p, m_bg);
+        heliosview_painter_set_stroke(p, m_border, 1.0f);
+        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 10.0f);
+    }
+
+private:
+    Card(int width, int height, uint32_t bg, uint32_t border)
+        : m_bg(bg), m_border(border) {
+        setSize(width, height);
+    }
+    uint32_t m_bg;
+    uint32_t m_border;
 };
 
 } // namespace HeliosView::UI

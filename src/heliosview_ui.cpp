@@ -24,6 +24,12 @@ struct heliosview_ui_widget {
     bool hovered = false;
     bool pressed = false;
 
+    // Stack container layout configuration
+    bool is_stack = false;
+    bool is_vertical_stack = true;
+    int stack_spacing = 8;
+    int stack_padding = 10;
+
     heliosview_host_t* get_host() {
         if (host_attached) return host_attached;
         if (parent) return parent->get_host();
@@ -186,6 +192,9 @@ struct HostUiBinding {
 static void HostPaintCallback(heliosview_host_t* host, heliosview_painter_t* painter, void* userdata) {
     auto* binding = static_cast<HostUiBinding*>(userdata);
     if (!binding || !binding->root) return;
+
+    // Clear background with dark theme color
+    heliosview_painter_clear(painter, 0xFF1E1E2E);
 
     int w = 0, h = 0;
     heliosview_host_get_bounds(host, nullptr, nullptr, &w, &h);
@@ -430,16 +439,9 @@ void heliosview_ui_button_set_color(heliosview_ui_widget_t* button, uint32_t bg_
 
 // ================= Built-in Layout Containers =================
 
-struct StackData {
-    bool is_vertical = true;
-    int spacing = 8;
-    int padding = 10;
-};
-
 void heliosview_ui_widget_layout(heliosview_ui_widget_t* widget) {
     if (!widget) return;
-    auto* d = static_cast<StackData*>(widget->user_data);
-    if (!d) {
+    if (!widget->is_stack) {
         // If not a stack, still lay out its children
         for (auto* child : widget->children) {
             heliosview_ui_widget_layout(child);
@@ -452,35 +454,35 @@ void heliosview_ui_widget_layout(heliosview_ui_widget_t* widget) {
         heliosview_ui_widget_layout(child);
     }
 
-    if (d->is_vertical) {
-        int cy = d->padding;
+    if (widget->is_vertical_stack) {
+        int cy = widget->stack_padding;
         int max_w = 0;
         for (auto* child : widget->children) {
             if (!child->visible) continue;
-            child->x = d->padding;
+            child->x = widget->stack_padding;
             child->y = cy;
-            cy += child->height + d->spacing;
+            cy += child->height + widget->stack_spacing;
             if (child->width > max_w) max_w = child->width;
         }
         // If this stack has no fixed size or is a nested container, size to content
-        int total_h = (cy > d->padding) ? (cy - d->spacing + d->padding) : (d->padding * 2);
-        int total_w = max_w + d->padding * 2;
+        int total_h = (cy > widget->stack_padding) ? (cy - widget->stack_spacing + widget->stack_padding) : (widget->stack_padding * 2);
+        int total_w = max_w + widget->stack_padding * 2;
         if (widget->parent != nullptr) {
             widget->width = total_w;
             widget->height = total_h;
         }
     } else {
-        int cx = d->padding;
+        int cx = widget->stack_padding;
         int max_h = 0;
         for (auto* child : widget->children) {
             if (!child->visible) continue;
             child->x = cx;
-            child->y = d->padding;
-            cx += child->width + d->spacing;
+            child->y = widget->stack_padding;
+            cx += child->width + widget->stack_spacing;
             if (child->height > max_h) max_h = child->height;
         }
-        int total_w = (cx > d->padding) ? (cx - d->spacing + d->padding) : (d->padding * 2);
-        int total_h = max_h + d->padding * 2;
+        int total_w = (cx > widget->stack_padding) ? (cx - widget->stack_spacing + widget->stack_padding) : (widget->stack_padding * 2);
+        int total_h = max_h + widget->stack_padding * 2;
         if (widget->parent != nullptr) {
             widget->width = total_w;
             widget->height = total_h;
@@ -488,31 +490,22 @@ void heliosview_ui_widget_layout(heliosview_ui_widget_t* widget) {
     }
 }
 
-static void StackDestroy(void* udata) {
-    auto* d = static_cast<StackData*>(udata);
-    hv::hv_dealloc(d);
-}
-
 heliosview_ui_widget_t* heliosview_ui_vstack_create(int spacing, int padding) {
-    auto* d = hv::hv_alloc<StackData>();
-    d->is_vertical = true;
-    d->spacing = spacing;
-    d->padding = padding;
-
     heliosview_ui_widget_desc_t desc{};
-    desc.destroy = StackDestroy;
-
-    return heliosview_ui_widget_create(&desc, d);
+    auto* w = heliosview_ui_widget_create(&desc, nullptr);
+    w->is_stack = true;
+    w->is_vertical_stack = true;
+    w->stack_spacing = spacing;
+    w->stack_padding = padding;
+    return w;
 }
 
 heliosview_ui_widget_t* heliosview_ui_hstack_create(int spacing, int padding) {
-    auto* d = hv::hv_alloc<StackData>();
-    d->is_vertical = false;
-    d->spacing = spacing;
-    d->padding = padding;
-
     heliosview_ui_widget_desc_t desc{};
-    desc.destroy = StackDestroy;
-
-    return heliosview_ui_widget_create(&desc, d);
+    auto* w = heliosview_ui_widget_create(&desc, nullptr);
+    w->is_stack = true;
+    w->is_vertical_stack = false;
+    w->stack_spacing = spacing;
+    w->stack_padding = padding;
+    return w;
 }

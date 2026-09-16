@@ -2,10 +2,17 @@
 
 > **[English](README.md) | 简体中文**
 
-一个 C++ **WebView** 窗口库：嵌入一个 webview，从 C++ 或 C 驱动它，并围绕它构建桌面壳 —— 窗口、托盘图标、菜单、对话框、通知、任务栏进度、系统集成。分两层：
+一个现代、高性能的 C++23 桌面 GUI 开发框架，融合了 **原生 Win32 窗口系统**、**Chromium WebView2 深度集成**、**Blend2D JIT 驱动的 2D 矢量画布**、**保留模式 UI 组件系统** 以及 **C++23 stdexec 异步协程运行时**。
 
-- **`HeliosView.dll`** — 纯 **C API**（ABI 稳定）。窗口与事件、WebView 桥接、托盘/菜单、原生对话框与系统辅助（剪贴板、打开 URL、toast 通知、任务栏进度、DWM 背景材质）。平台相关代码放在各平台的 backend（当前为 `src/win32/`：Win32 窗口/消息循环、WebView2、IFileDialog、WinRT toast）。
-- **`HeliosView.Core`** — 构建在 C API 之上的**纯头文件 C++ 封装**：带 **Boost.JSON 自动绑定**（`bindJson`）的 WebView 桥接、信号/槽、`std::execution` 消息循环 scheduler，以及每个 C API 的薄封装。
+HeliosView 采用清晰的两层架构：
+
+- **`HeliosView.dll`** — 纯 **C99 ABI**（`extern "C"`，标准 POD 类型，零 C++ 异常跨 DLL 边界）。涵盖顶层窗口、子视口宿主（`heliosview_host_t`）、WebView2 引擎桥接、JIT 加速 2D 矢量画布（`heliosview_canvas_t`）、保留模式 UI 组件调度（`heliosview_ui.h`）、系统托盘、菜单、原生文件对话框、WinRT 系统通知、任务栏进度与 Win11 DWM 背景材质（Mica、Acrylic、深色模式）。
+- **`HeliosView.Core`** — 构建在 C API 之上的**纯头文件 C++23 框架**：
+  - **子视口宿主架构（Child Viewport Host）**：在同一个顶层窗口内无缝混编原生 2D 自绘画布视口（`UIHost`）与 Web 视口（`WebViewHost`）。
+  - **Blend2D 矢量直绘引擎**：集成 JIT 编译的软件光栅化器（`Canvas`、`Painter`、`BufferPresenter`、`PixelView`），支持高质量亚像素抗锯齿、仿射变换、渐变笔刷、贝塞尔路径与文字排版。
+  - **保留模式 UI 组件树**：可自由嵌套与组合的控件体系（`Widget`、`Button`、`Slider`、`Switch`、`Checkbox`、`ProgressBar`、`SegmentedControl`、`Card`、`VStack`、`HStack`、`CustomWidget`），内建自动布局与事件冒泡机制。
+  - **双向 WebView2 RPC 桥**：基于 Boost.Describe 的自动参数类型推导绑定（`bindJson`）、强类型 DTO 映射、`broadcast`/`subscribe` 发布订阅机制，以及免本地端口的虚拟 URI 资源映射。
+  - **现代异步与协程运行时**：集成 `stdexec`（P2300 Senders/Receivers）协程体系（`std::execution::task`）、Boost.Asio 后台工作线程池（`Async`），以及支持 Keep-Alive 连接池的 Boost.Beast HTTP/1.1 客户端。
 
 只需包含一个头文件、链接一个 CMake target：
 
@@ -17,424 +24,53 @@
 target_link_libraries(my_app PRIVATE HeliosView::Core)
 ```
 
-当前全部基于 Windows (win32)；C API 是移植边界 —— 其他平台在它后面重新实现 `src/<platform>/`。
+---
+
+## 核心架构设计
+
+```
++-----------------------------------------------------------------------------------+
+|                                  HeliosView.Core                                  |
+|                                (纯头文件 C++23 框架)                               |
++------------------------+------------------------+---------------------------------+
+|      现代原生窗口壳    |      子视口宿主架构    |        现代异步与协程执行       |
+|  - 窗口样式、无边框    |  - UIHost (2D自绘画布) |  - stdexec (P2300 Senders)      |
+|  - Mica, Acrylic, 深色 |  - WebViewHost (Web视口|  - Boost.Asio 后台工作线程池    |
+|  - 托盘、菜单、对话框  |  - 旗舰双视口混合 Studio|  - Boost.Beast Keep-Alive HTTP  |
++------------------------+------------------------+---------------------------------+
+|   WebView2 RPC 桥接    |    Blend2D 矢量直绘    |        保留模式 UI 组件树       |
+|  - bindJson 自动推导   |  - JIT x86_64 光栅化器 |  - 控件继承树、自动布局容器     |
+|  - 强类型 DTO 与协程   |  - Painter、路径、文字 |  - Button, Slider, Switch 等    |
+|  - broadcast/subscribe |  - BufferPresenter GDI |  - 事件捕获、冒泡与自定义控件   |
++------------------------+------------------------+---------------------------------+
+|                                   HeliosView.dll                                  |
+|                         (稳定 C99 ABI 与底层跨平台移植边界)                       |
++-----------------------------------------------------------------------------------+
+```
 
 ---
 
 ## 线程模型
 
-**所有窗口 / WebView / 托盘 / 菜单 / 对话框 / 事件队列 API 必须在消息循环线程调用** —— 即运行 `App::exec()` 的线程（C 侧是调用 `heliosview_run` 的线程）。在其他线程调用是未定义行为。
+**所有涉及 UI 操作的 API（窗口、视口宿主、WebView、画布自绘、UI 控件、托盘、菜单、对话框以及事件循环）必须在消息循环线程调用** —— 即执行 `App::exec()` 的线程（C 接口中即调用 `heliosview_run` 的线程）。在其他工作线程直接调用 UI 相关 API 属于未定义行为。
 
-**例外**（任意线程安全）：
-
-- `App::postTask(fn)` —— 工作线程回到 UI 线程的官方途径（`app.quit()` 也可以）。
-- WebView 的 `resolve` / `reject` / `broadcast`。
-- 通知（`notificationShow` / `heliosview_notification_show`）—— OS toast 与线程无关。
-- `heliosview_free`。
-
-其余一切：仅限 UI 线程。
+**例外（可在任意线程安全调用）：**
+- `App::postTask(fn)` —— 将工作函数投递回 UI 线程队列安全执行（跨线程唤醒官方途径）。
+- `app.quit()` —— 请求退出消息循环。
+- WebView 异步响应与广播：`resolve`、`reject`、`broadcast`。
+- 操作系统 Toast 通知（`notificationShow` / `heliosview_notification_show`）。
+- 后台计算线程池任务（`helios::Async`）。
+- 内存释放：`heliosview_free`。
 
 ```cpp
 helios::App app;
-// 后台线程回到 UI 线程：
+
+// 在后台线程执行耗时计算，并安全切回 UI 线程更新界面：
 std::thread worker([app] {
-    do_slow_work();
-    app->postTask([] { /* 消息循环空闲时在 UI 线程执行 */ });
-});
-```
-
----
-
-## 功能一览
-
-| 领域 | API（C / C++） |
-| --- | --- |
-| 窗口 + 事件 | `heliosview_window_*` / `helios::Window`（样式、透明度、图标、置顶、隐藏、最小化/最大化/还原、可调整大小、最小/最大尺寸、拖拽区域、全屏、闪烁、禁用、DPI、焦点/移动/尺寸事件） |
-| 屏幕几何 | `heliosview_*_work_area` / `System::screenWorkArea` / `Window::workArea`（多显示器） |
-| 任务栏进度 | `heliosview_window_set_progress` / `Window::setProgress`（含状态、角标） |
-| 会话结束 | `heliosview_set_session_end_callback` / `System::setSessionEndCallback`（关机保存） |
-| 背景材质与深色模式（Win11） | `heliosview_window_set_backdrop/_dark_mode` / `Window::setBackdrop/setDarkMode` |
-| WebView + JS 桥 | `heliosview_webview_*` / `WebViewWindow` + `bindJson` 自动绑定 |
-| WebView 右键 | `heliosview_webview_set_context_menu` + `..._set_context_menu_callback` / `setContextMenuEnabled` + `contextMenuGate`（一个开关控制引擎菜单，页面与原生两个拦截点） |
-| 托盘 + 菜单 | `heliosview_tray_*` / `heliosview_menu_*` / `Tray` / `Menu` |
-| 对话框 | 文件夹/文件选择、消息框（`Dialogs.h`） |
-| 系统辅助 | 剪贴板、打开 URL、资源管理器定位、启动进程、标准目录、系统信息（`System.h`） |
-| 全局热键 | `heliosview_hotkey_register` / `System::hotkeyRegister`（应用失焦也会触发） |
-| 通知（toast） | `heliosview_notification_*` / `Notification.h`（任意线程） |
-| 消息循环、`std::execution` scheduler | `heliosview_run` / `App` |
-| 异步 + HTTP 客户端 | `Async`（asio 线程池：定时器、socket）/ `http::Client`（keep-alive 连接池、TLS） |
-
----
-
-## 内存分配
-
-HeliosView 把**所有分配都路由到一个可配置的分配器**，因此内存可以来自 pool、arena 或其他分配器，而不是进程堆。这是 C API 和 C++ 封装共享的同一机制：配置一次，库分配的所有内存都走它。
-
-**经验法则：** 无论你配置什么，**分配和释放必须使用同一个分配器**，并且必须在**创建任何对象之前**完成配置（在对象存活期间更换分配器是未定义行为）。
-
-- **C** — `heliosview_set_allocator(&heliosview_allocator_t)` 把库默认的 `malloc`/`free` 换成你自己的。库交到你手里的字符串（对话框路径、剪贴板文本）必须用 **`heliosview_free`** 释放 —— 绝不要用平台的 `free()`（DLL 边界两侧的 CRT 堆可能不同）：
-
-  ```c
-  char* path = NULL;
-  if (heliosview_select_folder(NULL, "Pick a folder", &path) == 1) {
-      printf("folder: %s\n", path);
-      heliosview_free(path);   /* 库返回的字符串一律配 heliosview_free */
-  }
-  ```
-
-- **C++** — 封装使用同一个 C 分配器；它产出的 C++ 字符串是普通 `std::string`（UTF-8）。
-
-> **一句话：** 在创建任何对象之前调用 `heliosview_set_allocator`，库返回的每个字符串都用 `heliosview_free` 释放。
-
----
-
-## 构建
-
-需要 CMake ≥ 4.3 和 C++23 编译器（C demo 用 C99）。所有第三方依赖要么内置（vendored）要么在配置时自动获取 —— **无 vcpkg、无系统包安装**：
-
-| 依赖 | 版本 | 来源 | 用途 |
-| --- | --- | --- | --- |
-| WebView2 SDK | 1.0.4129.50 | 配置时从 NuGet 下载 | 内嵌 WebView（win32） |
-| `stdexec` | 固定 commit 758f41f4（origin/main，2026-08-15，0.11.0+） | vendored（`third_party/stdexec/`） | C++23 协程（sender/receiver） |
-| `Boost`（Asio/Beast/JSON） | 1.92.0（超项目 submodule，所需库配置时自动按需初始化） | vendored（`third_party/boost/`） | 后台线程池（`Async`）、HTTP（Boost.Beast）、WebView 桥接自动绑定（Boost.JSON） |
-| `Blend2D` | v0.21.3（submodule） | vendored（`third_party/blend2d/`） | BUILTIN 画布引擎：同一个光栅化器，各平台像素完全一致 |
-| `asmjit` | 固定 commit `dffd8b1`（submodule） | vendored（`third_party/asmjit/`） | Blend2D JIT 管线背后的 x86/ARM 代码生成 |
-
-其余全部来自操作系统：窗口、对话框、toast（经 Windows SDK 的 WinRT）、DWM 背景材质。WebView2 SDK 是唯一在配置时获取的东西（`.nupkg` 其实就是个包含头文件和 WebView2Loader 库的 zip），缓存在构建目录中。Boost 库在配置时按需初始化：在 `third_party/boost/` 里执行**一条** `git submodule update --init --depth 1`，把所有需要的库作为 pathspec 一次传入（git 的输出会实时打印，`--jobs` 并行克隆，因此首次克隆不会看起来像卡住）——不要对整个 HeliosView 执行 `git submodule update --init --recursive`，那会拉取全部约 160 个 Boost 库。
-
-```sh
-git submodule update --init
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
-
-DLL 和 demo 一起落在 `build/bin/`，无需配置 `PATH`。
-
-`HELIOSVIEW_BUILD_EXAMPLES=ON`（默认）会构建演示程序：
-
-| demo | 文件 | 演示内容 |
-| --- | --- | --- |
-| `HeliosViewDemo` | `examples/main.cpp` | **总演示**：一个 WebView 页面通过 `bindJson` + `broadcast` 驱动全部功能（先看这个） |
-| `HeliosViewWebViewDemo` | `examples/webview_demo.cpp` | 专注 JS ↔ 原生桥：类型化 DTO、成员函数处理器、`subscribeJson`、在处理器里用 Async 池 + HTTP |
-| `HeliosViewWebViewEventsDemo` | `examples/webview_events_demo.cpp` | 导航事件与否决门、`mapLocalFolder`/`localUrl`、页面调用原生对话框 |
-| `HeliosViewWindowDemo` | `examples/window_demo.cpp` | 窗口：样式/标志、状态 API、信号（成员函数槽 + lambda 两种写法）、菜单栏 + 弹出菜单、托盘 |
-| `HeliosViewSystemDemo` | `examples/system_demo.cpp` | 系统集成：文件对话框、剪贴板、toast、全局热键、标准目录、会话结束 |
-| `HeliosViewAsyncHttpDemo` | `examples/async_http_demo.cpp` | 控制台（无窗口）：`Async` 线程池（调度器、定时器、socket）+ 连接池 `http::Client` |
-| `HeliosViewCDemo` | `examples/c_demo.c` | **纯 C**：C API 全流程（窗口、事件循环、托盘、菜单、对话框） |
-
----
-
-## 发布包 —— SDK
-
-GitHub Release 资产是面向 Windows x64 的完整 **SDK zip**
-（`HeliosView-<版本>-win64-SDK.zip`），使用者无需自己构建库：
-
-```
-bin/        HeliosView.dll + WebView2Loader.dll + 预编译示例（解压即用）
-lib/        HeliosView.lib + libboost_json.lib + CMake 包配置（find_package）
-include/    C API 头文件（HeliosView/）、C++ 封装头文件（HeliosViewCore/）、vendored 的 stdexec + Boost
-examples/   示例源码——可独立针对 SDK 构建
-README.md   使用说明（zip 内已附带）
-```
-
-CMake 消费方式：
-
-```cmake
-find_package(HeliosView REQUIRED)      # -DCMAKE_PREFIX_PATH=<SDK 根目录>
-target_link_libraries(my_app PRIVATE HeliosView::Core)
-```
-
-纯 C 消费方式：包含 `include\`、链接 `lib\HeliosView.lib`，并把 `bin\` 里的
-`HeliosView.dll` 和 `WebView2Loader.dll` 拷到 exe 旁边。完整说明见
-[packaging/README.md](packaging/README.md)，它会作为 zip 内的 `README.md` 一并发布。
-
----
-
-## 教程
-
-教程按依赖顺序展开：**App**（消息循环）→ **Signals** → **Window** → **WebView**（库的核心），然后是新系统 API 和支撑一切的 C API。
-
-### 1. App + 消息循环
-
-`helios::App` 是进程唯一的应用对象：它拥有消息循环和 UI 线程任务队列。其他一切（窗口、webview…）都经由它分发。
-
-```cpp
-#include <HeliosViewCore/HeliosView.h>
-#include <print>
-
-int main()
-{
-    helios::App app;                       // 每个进程恰好一个 App
-
-    // postTask(fn)：可从任意线程调用；fn 在消息循环空闲时于 UI 线程上执行
-    // —— 这是后台工作回到 UI 线程的途径。
-    app.postTask([] { std::println("hello from the UI thread"); });
-
-    return app.exec();                     // 消息循环；quit() 或
-                                           // 最后一个窗口关闭时返回
-}
-```
-
-`exec()` 运行消息循环（正常退出返回 0）；`quit()` 请求退出，可从任意线程调用。`pollEvent` / `waitEvent` / `postEvent` 提供底层队列访问；可重写 `event()` 处理应用级未处理事件。消息循环同时是一个 `std::execution::scheduler`：`std::execution::schedule(app.get_scheduler()) | std::execution::then(fn)`。
-
-### 2. 信号与槽
-
-`helios::Signal<Args...>` 持有槽并在发射时调用它们；`connect` 返回槽 id，供 `disconnect(id)` 使用：
-
-```cpp
-helios::Signal<int32_t, int32_t> resized;
-resized.connect([](int32_t w, int32_t h) { std::println("resized {}x{}", w, h); });
-resized(800, 600);
-```
-
-槽有三种形式 —— 同步可调用对象、成员函数（`connect(&MyWindow::onKeyPressed, this)`），以及**异步槽**（返回 sender 的可调用对象，fire-and-forget 启动）。Window、WebView、Tray… 把事件暴露为现成的信号。
-
-### 3. 窗口
-
-`helios::Window` 是由 App 消息循环驱动的顶层窗口。信号上报输入：
-
-```cpp
-#include <HeliosViewCore/HeliosView.h>
-#include <print>
-
-int main()
-{
-    helios::App app;
-    helios::Window window(800, 600, "Hello");
-    window.show();
-
-    window.resized.connect([](int32_t w, int32_t h) { std::println("resized {}x{}", w, h); });
-    window.keyPressed.connect([&](helios::KeyCode key) {
-        std::println("key {}", static_cast<int>(key));
-        if (key == helios::KeyCode::Escape)
-            window.close();          // 最后一个窗口关闭 -> 循环退出
-    });
-    window.closeRequested.connect(&Window::close, &window);  // 关闭按钮（×）触发此信号
-
-    return app.exec();
-}
-```
-
-`Window` 还提供 `showMinimized/Maximized/Normal`（以及便捷的 `minimize`/`maximize`/`restore`/`toggleMaximize`）、`move/resize`、`position/size/geometry`、`setTitle`、`center`、`setOpacity`、`focus`、`hide`、`setTopmost`、`setIcon`、`requestClose`、`setResizable`、`setProgress`（任务栏）、`setBackdrop(Mica/Acrylic)` + `setDarkMode`（Win11）、`dpi`，以及 `WindowStyle::{Normal, Borderless, Frameless}`。`focused`/`blurred` 信号上报窗口激活状态变化。标题与字符串均为 UTF-8。
-
-**文本输入与修饰键状态。** `keyPressed` 只在首次按下时触发，`keyRepeated` 用于系统自动重复，`keyEvent(const KeyEvent&)` 覆盖每次按下/释放并带 `modifiers`（`helios::mods::Ctrl | helios::mods::Shift | …`，含左右键位与锁定状态）和 `repeat` 标志。`textInput(const std::string&)` 按输入内容投递 UTF-8 文本（包含输入法上屏）；超过事件缓冲区的长文本会拆成连续的多个事件，不会截断。C API 中同样的信息在 `heliosview_event_t` 里（`modifiers`、`flags`、`text`/`text_len`，事件类型 `HELIOSVIEW_EVENT_TEXT_INPUT`）。
-
-**关闭按钮行为。** 点击关闭按钮（×）或按 Alt+F4 **不会**销毁窗口——它只发出 `closeRequested` 信号。需要连接该信号并调用 `close()` 才能真正关闭：
-
-```cpp
-window.closeRequested.connect(&Window::close, &window);  // 点击 × → 关闭
-```
-
-**无边框窗口拖拽。** 无边框 / 无标题栏窗口没有系统标题栏，因此把自定义标题栏条带注册为拖拽区域即可 —— 在区域内按下并拖动会像原生标题栏一样移动窗口（`WM_NCHITTEST → HTCAPTION`）：
-
-```cpp
-helios::Window win(480, 320, "Frameless", helios::WindowStyle::Frameless);
-win.addDragRegion(0, 0, 480, 40);          // 标题栏条带
-win.show();
-```
-
-> **WebView 注意事项。** 拖拽区域依赖宿主窗口的 `WM_NCHITTEST`。全幅 WebView 是覆盖整个客户区的子窗口，其上的命中测试由 WebView 自身的窗口过程应答、永远不会到达宿主——因此 WebView 覆盖范围内注册的拖拽区域**不生效**。使用 `WebViewWindow` 时，应在页面侧注册拖拽区：注入的 `<helios-window-title-bar>` 组件通过 WebView2 原生 `app-region: drag` 支持拖拽（库已启用 `IsNonClientRegionSupportEnabled`），或把 `startDrag()` 绑定到页面回调实现完全自定义的区域。
-
-**Web 绘制标题栏（推荐）。** 因为铺满的 WebView 无法被原生 DWM caption 按钮覆盖（"无可见标题栏"与"系统标题栏按钮"在 Win32 上互斥），标题栏最自然的做法就是在页面里画。桥 shim 在每个页面注入两个 web component：
-
-- `<helios-window-title-bar>` —— 放在页面顶部：通过 WebView2 的**原生 `app-region: drag` 支持**拖动窗口（库已启用 `IsNonClientRegionSupportEnabled`——无桥接往返、无需绑定），双击切换最大化；
-- `<helios-window-controls>` —— 放进标题栏里：绘制 Win10/11 最小化 / 最大化 / 关闭字形（hover / 按下反馈，关闭键 hover 变红），调用内置 `__hv.control` / `__hv.state` 桥；最大化时按钮自动切换为还原字形（窗口不可调整大小时最大化按钮禁用）。它会给自己的按钮自动加 `app-region: no-drag`，保证可点击。
-
-```cpp
-auto win = std::make_shared<helios::WebViewWindow>(
-    900, 640, "App", helios::WindowStyle::Frameless);
-win->show();
-win->createWebView();
-// 就这些——拖拽是原生 app-region，按钮用内置的 __hv.control / __hv.state 桥
-// （__hv.state 还返回 titleBarHeight，即 DPI 缩放的标题栏条带高度）。
-```
-
-```html
-<helios-window-title-bar>
-  <span>App</span>
-  <helios-window-controls></helios-window-controls>
-</helios-window-title-bar>
-```
-
-组件可用 CSS 在元素上自定义（标题栏默认 48px flex 行；按钮浮在右上角）。标题栏内其他交互子元素需要加 `app-region: no-drag` 才能保持可点击。
-
-**调整大小。** `Frameless` 风格保留四周一圈非客户区边框（`WM_NCCALCSIZE`），系统会绘制可抓取的边框并原生处理调整大小——即使全幅 WebView 也没关系（边框是非客户区，系统直接命中测试）。页面无需任何改动。
-
-> 原生 DWM 按钮必须保留系统 caption（即"普通窗口"），而铺满的 WebView 覆盖不了它；web 自绘按钮也没有 Win11 snap layouts 悬浮菜单（那需要真实 caption）。
-
-**自定义控制按钮。** 或者自行绘制按钮并注册其矩形 —— 库把它们接到真实的标题栏行为上（点击执行动作且不会触发拖动；最大化 / 还原自动切换）。
-
-**DPI。** 在创建任何窗口之前调用一次 `helios::enableDpiAwareness()`，使进程按显示器感知 DPI（v2）；`window.dpi()` 返回窗口当前 DPI。
-
-**屏幕几何。** `System::screenWorkArea`、`Window::workArea` 与 `System::primaryWorkArea` 返回显示器可用区域（不含任务栏）的屏幕坐标 —— 便于在多显示器环境下居中 / 定位窗口。`System::cursorPosition` 返回鼠标位置。
-
-**尺寸限制、全屏、闪烁与模态锁。** `setMinimumSize` / `setMaximumSize` 限制客户端尺寸（`WM_GETMINMAXINFO`）；`setFullscreen` 铺满整个显示器，退出时恢复之前的几何与样式；`flash` / `flashUntilFocus` 闪烁任务栏按钮（后台任务完成或紧急通知）；`setEnabled(false)` 锁定窗口输入以模拟模态。`moved` / `moving` / `sizing` / `enabledChanged` 信号上报窗口状态变化。
-
-**会话结束。** `System::setSessionEndCallback` 在 OS 会话结束前（关机 / 重启 / 注销）于消息循环线程同步调用，供应用保存状态；返回非零可否决关机。
-
-### 4. WebView —— 核心：JS ↔ 原生桥接
-
-**这是库的核心。** `WebViewWindow` 是嵌入了 WebView2 浏览器的 `Window` 子类；`createWebView()` 负责挂载（初始化是异步的，期间的导航请求会被排队）。在它之上，**`bindJson`** 是主打特性：JS 调用的每个参数都被反序列化为对应的参数类型（Boost.JSON），处理器以分离的 `std::execution::task<Resp>` 协程运行，结果再序列化回去 resolve 对应的 JS `Promise`。参数类型**从处理器自身推导**，显式的 `bindJson<Args...>` 列表可以省略：
-
-```cpp
-#include <HeliosViewCore/HeliosView.h>
-#include <boost/describe.hpp>   // BOOST_DESCRIBE_STRUCT（DTO 注解）
-
-struct AddReq { int a; int b; };
-BOOST_DESCRIBE_STRUCT(AddReq, (), (a, b))
-
-int main()
-{
-    auto app    = std::make_shared<helios::App>();
-    auto window = std::make_shared<helios::WebViewWindow>(900, 640, "WebView Demo");
-    window->show();
-    window->createWebView();
-
-    window->bindJson("add", [](AddReq req) -> std::execution::task<int> {
-        co_return req.a + req.b;
-    });
-
-    window->bindJson<AddReq>("add2", [](AddReq req) -> std::execution::task<int> {  // 显式写法，等价
-        co_return req.a + req.b;
-    });
-
-    window->bindJson("sum", [](int a, int b) -> std::execution::task<int> {  // 多个参数
-        co_return a + b;
-    });
-
-    window->bindJson("ping", []() -> std::execution::task<bool> {  // 无参数
-        co_return true;
-    });
-
-    window->navigateHtml(
-        "<html><body>"
-        "<button onclick=\"go()\">add</button>"
-        "<script>"
-        "async function go() {"
-        "  const r = await window.helios.call('add', {a: 40, b: 2});"  // -> 42
-        "  alert(r);"
-        "}</script>"
-        "</body></html>");
-
-    return app->exec();
-}
-```
-
-**推导规则。** `bindJson` 直接读取处理器自身的签名（lambda / 仿函数取 `&Fn::operator()`，自由函数取函数类型，成员函数重载取成员指针），并把参数类型退化（decay）为值类型（`const Req` → `Req`），JS 参数按 `value_to<Req>` 反序列化。推导要求处理器有**唯一的非模板签名**：泛型 lambda（`[](auto req) { ... }`）、重载 / 模板化的 `operator()`、`std::function` 都没有唯一签名，这类情况必须显式写出 `bindJson<AddReq>(name, handler)`，否则会触发一条明确的 `static_assert` 报错。`subscribeJson` 同样能从 `(Req) -> void` 回调推导唯一的 `Req`（回调必须恰好有一个参数）。
-
-处理器参数请**按值接收**：处理器是**惰性**的 `std::execution::task`，协程体要等 sender 被 start 之后才运行，那时从 JS 参数反序列化出来的对象早已析构，引用参数会悬空。因此推导路径会用 `static_assert` 拒绝引用参数（提示改写为 `[](Req req)` 而不是 `[](const Req& req)`）；显式 `bindJson<Req>` 写法保留原有行为。而 `subscribeJson` 回调是同步调用，按值或按引用接收都可以。
-
-`bindJson` / `subscribeJson` 也接受**成员函数**（传入对象指针和成员指针；省略类型时从成员函数签名推导）。桥接 shim 暴露 `window.helios.call(name, ...)` → `Promise` 和**双向 `BroadcastChannel`**（`broadcast` 原生→JS，`subscribe` JS→原生）。所有桥接名字必须是 C 标识符 `[A-Za-z_][A-Za-z0-9_]*`；库的内置桥使用 **`__hv.` 前缀名**（`__hv.control` / `__hv.state` / `__hv.drag`，供注入的组件调用）——它们含有点号、**不是合法标识符**，应用无法绑定或订阅，永远遮蔽不了内置组件。
-
-**事件、本地资源与原生对话框**：
-
-- **导航事件** — `WebViewWindow` 上的四个信号，都在 UI 线程上触发：`navigationStarting`（配合 `navigationStartingGate` 否决用 std::function）、`urlChanged`、`titleChanged`、`navigationCompleted`。
-- **`mapLocalFolder(host, folder)`** + **`localUrl(host, path)`** — 服务前端之外的本地资源文件夹；URL 必须用 `localUrl()` 生成（Windows 是虚拟 `https://<host>/` 主机，其他引擎注册自定义 scheme，别把 URL 写死）。
-- **`helios::selectFolder`** 等 — 通过 `bindJson` 处理器暴露给页面的原生对话框。
-
-**WebView 设置** — 调整 WebView 自身的几个小开关，`WebViewWindow` 上都有对应方法（C++：`setContextMenuEnabled`、`setDevToolsEnabled`、`openDevTools`、`setLowFootprint`、`webviewSetBackgroundColor` / `webviewSetTransparentBackground`；C：`heliosview_webview_set_context_menu` 等）：
-
-- **右键** — **一个开关**决定引擎自带的菜单（复制/粘贴/图片另存/检查）弹不弹；拦截则有**两个互相独立的入口**：页面，或原生回调：
-
-  ```cpp
-  win.setContextMenuEnabled(false);   // 引擎菜单永不弹出（默认 true = 允许弹）
-
-  // 原生拦截：每次右键都会被询问；返回 true = 这一次拦截掉（引擎菜单不弹），
-  // false = 落到上面的开关。弹什么完全由应用决定，这里弹一个 helios::Menu（光标处）。
-  win.contextMenuGate = [&win, &menu](const helios::ContextMenuInfo& info) {
-      if (info.has(helios::ContextMenuTarget::Editable))
-          return false;               // 输入框里就让引擎给粘贴/拼写检查
-      // 回调运行在引擎的事件派发里，而弹出菜单会跑模态消息循环：
-      // 先拦截，下一个 UI 空闲轮再弹自己的。
-      helios::App::instance()->postTask([&] { menu.show(win.nativeHandle()); });
-      return true;
-  };
-  ```
-
-  另一个入口是页面：DOM 的 `contextmenu` 事件在任何模式下都会触发，`preventDefault()` + HTML 菜单是**最可移植**的做法 —— 而且在 macOS 上是**唯一**的做法，因为 WKWebView 只通过私有 SPI 暴露右键菜单。`ContextMenuInfo` 带目标标志（`Link` / `Image` / `Media` / `Selection` / `Editable` / `Page`）以及链接 URL/文本、选中文本、页面 URL 和请求坐标；哪些字段有值取决于引擎（空串 = 引擎报不出来），按“尽力而为”使用。引擎无法抑制自己的菜单时（WebView2 运行时低于 100，或 macOS），`setContextMenuEnabled(false)` 返回负数错误（`HELIOSVIEW_ERROR_UNSUPPORTED`），应用据此回退到页面自绘。
-- **DevTools** — 引擎自带的 DevTools；默认开启，用 `setDevToolsEnabled(false)` 关闭（关闭时会同时关掉已打开的 DevTools 窗口）。F12 等浏览器快捷键永远不可用（见下）。用 `openDevTools()`（C：`heliosview_webview_open_devtools`）从代码里打开 DevTools 窗口 —— 也就是“菜单项”那条路。
-- **低占用模式** — `setLowFootprint(true)` 让引擎在页面继续存活的前提下尽量把内存还回来（典型场景：窗口最小化一段时间），`setLowFootprint(false)` 恢复，`isLowFootprint()` 报告应用请求的模式。各平台内部实际做的事不同 —— 名字故意起得含糊，正是因为这个（见下表）。
-- **注入脚本** — `addInitScript(js)` 在每个文档里**先于页面自身的脚本**执行（桥接 shim、polyfill、全局的 `window.__CONFIG`）；它挂在 WebView 上，之后加载的页面同样生效，`clearInitScripts()` 全部移除。三平台**只有一个 world**（WebView2 没有隔离 world），别用它向页面隐藏任何东西。
-- **页面缩放** — `setZoom(1.25)` / `zoom()`，1.0 = 100%。
-- **Cookie** — `getCookies(url, cb)` / `setCookie(url, cookie, cb)` / `deleteCookie(name, url, cb)` / `clearCookies(cb)`：WebView 自己的 cookie 罐（页面登录留下的东西），全部异步、回调在 UI 线程。读回调里的数组**只在这次调用期间有效**。
-- **原生逃生舱** — `nativeHandle(kind)` 返回 WebView 背后的平台对象（见下表），用于覆盖 API 没提供的东西。
-
-每个开关在 WebView 初始化完成后立即生效；初始化期间调用则在其就绪时应用。
-
-**同一个调用，三种引擎。** 目前整库只有 Windows 后端（见文首），macOS / Linux 是移植契约。库不把各引擎的差异直接透出去，而是抹平：签名处处一致，只有一个引擎才有的能力，要么被强制关掉（引擎自带的浏览器快捷键），要么干脆不暴露。各平台的实际能力：
-
-| | Windows (WebView2) | macOS (WKWebView) | Linux (WebKitGTK) |
-| --- | --- | --- | --- |
-| DevTools 开关（`setDevToolsEnabled`） | `AreDevToolsEnabled` | `isInspectable`（macOS 13.3+）；更老 → -4 | `enable-developer-extras` |
-| DevTools **默认值** | 开启 | 开启（后端会设 `isInspectable`；WKWebView 自身默认 NO） | 开启（后端会设 `enable-developer-extras`；WebKitGTK 自身默认关） |
-| 从代码打开（`openDevTools`） | `OpenDevToolsWindow` | **-4**：没有公开 API —— 走 Safari 的“开发”菜单 | `WebKitWebInspector` 的 show |
-| 引擎自带的浏览器快捷键（F12、Ctrl+Shift+I、Ctrl+P、F5、缩放） | WebView2 自带 → **固定关闭** | 本来就不绑 | 本来就不绑 |
-| 低占用模式 | `TrySuspend` / `Resume`，立即尝试，引擎可能拒绝 | macOS 14+ 的 `inactiveSchedulingPolicy`：视图离开窗口且空闲后由引擎自己挂起；**更老 → -4** | **-4**（没有公开等价物） |
-| 透明背景 | alpha 0 有效 | **-4**：公开 API 做不到（`underPageBackgroundColor` 只能给不透明色，macOS 12+） | `GdkRGBA` 的 alpha 有效 |
-| 引擎自带的状态栏（悬停链接） | WebView2 有，**固定关闭**且不提供 API | 无 | 无 |
-| 引擎自绘的标题栏按钮（WebView2 WCO） | WebView2 有，**固定关闭**且不提供 API | 无 | 无 |
-| `engine_version` | WebView2 Runtime 版本 | 系统 WebKit 版本 | WebKitGTK 版本 |
-| 注入脚本（`addInitScript`） | `AddScriptToExecuteOnDocumentCreated`（只有主 world） | `WKUserScript`（有 `WKContentWorld`，但库里不暴露） | `WebKitUserContentManager` 脚本 |
-| 页面缩放（`setZoom` / `zoom`） | `ICoreWebView2Controller.ZoomFactor` | `pageZoom`（macOS 11+）；更老 → -4 | `webkit_web_view_set_zoom_level` |
-| Cookie 罐 | `ICoreWebView2CookieManager` | `WKHTTPCookieStore`；清空要 `WKWebsiteDataStore` | `WebKitCookieManager`；清空要 `website_data_manager_clear` |
-| 原生句柄（`nativeHandle`） | `HWND` / `ICoreWebView2Controller*` | `NSWindow*` / `NSView*` / `WKWebView*` | `GtkWindow*` / `GtkWidget*` / `WebKitWebView*` |
-
-几个需要知道的后果：
-
-- **哪个平台都没有快捷键能进 DevTools。** F12、Ctrl+Shift+I 一律无效，只能靠 `openDevTools()`（菜单项、JS 桥调用）—— macOS 上则是 Safari 的“开发”菜单。
-- Windows 上关掉加速键会**连带**去掉 Ctrl+F、Ctrl+P、Ctrl+R/F5 和缩放 —— WebView2 那个开关是全有全无的。编辑类快捷键（Ctrl+C/V/X/A/Z、Home/End 等）不受影响。后端在核心就绪时就会关掉（需要 WebView2 运行时 89+），并且**没有 API 能再打开**。
-- 引擎的状态栏和引擎自绘的标题栏按钮都只存在于 WebView2，所以库把它们固定关掉、也不提供开关：标题栏按钮在页面里画（`<helios-window-controls>`），模板就是这么做的。
-
-原始 C 风格桥接（`bind` / `resolve` / `reject` / `eval` / `evalAsync` / `broadcast` / `subscribe`）也可用；`resolve`/`reject`/`broadcast` 线程安全。
-
-> **生命周期：** 只在没有 `bindJson` task 或 `evalAsync` 调用仍在执行时销毁 `WebViewWindow`。WebView 必须在它的父窗口之前销毁。
-
-### 5. Async + HTTP 客户端（连接池）
-
-`helios::Async` 是一个接入 `std::execution` 的 asio 线程池：定时器、socket 和 HTTP 客户端都跑在同一批工作线程上。`helios::http::Client` 是轻量句柄（可拷贝、可作临时对象），按 origin 维护 **keep-alive 连接**并复用：
-
-```cpp
-helios::Async async;                       // app 级成员
-helios::http::Client client{async};        // 一个句柄，共享同一个连接池
-
-window->bindJson<Req>("api", [&client](Req r) -> std::execution::task<boost::json::value> {
-    auto resp = co_await client.get(r.url);          // 能复用就走池里的连接
-    co_return boost::json::value{{"status", resp.status}, {"body", resp.body}};
-});
-```
-
-连接池参数（都可选；默认空闲 60 秒、每个 origin 最多留 4 条、总共 16 条）：
-
-```cpp
-helios::http::PoolOptions opt;
-opt.idle_timeout = 30s;        // 空闲超过这个时间就丢弃
-opt.max_idle_per_origin = 2;
-opt.max_idle_total = 8;
-opt.dns_cache_ttl = 60s;       // 解析结果按 origin 缓存
-opt.keep_alive = false;        // 关闭池化：发 "Connection: close"，不缓存连接
-helios::http::Client client{async, 10s, "cacert.pem", opt};
-
-client.idle_connections();     // 诊断用
-client.close_idle();           // 立刻丢弃空闲连接
-client.clear_dns_cache();
-```
-
-空闲连接可能被服务端单方面关闭：此时**幂等**请求（GET/HEAD/OPTIONS/PUT/DELETE/TRACE）会在新连接上重试一次，而 POST/PATCH 直接报错，避免重复副作用。每一步（解析、连接、TLS 握手、收发）都受客户端超时约束。`https://` 会用 `cacert.pem`（或 OpenSSL 默认路径）校验证书，并且每个 client 只建一次 SSL context。
-
-### 6. 线程契约实战
-
-所有 UI API 运行在 `App::exec` 线程。后台工作在你自己管理的线程 / 线程池 / 任意异步库里进行 —— 通过 `App::postTask` 回到 UI 线程：
-
-```cpp
-helios::App app;
-helios::Window window(800, 600, "Demo");
-window.show();
-
-std::thread worker([app] {
-    // ... 在这个线程上做耗时工作 ...
-    app->postTask([app] {
-        // 回到 UI 线程：这里可以安全地操作窗口/webview
-        std::println("done");
+    do_heavy_computation();
+    app->postTask([] {
+        // 安全在 UI 主消息循环线程执行
+        update_window_ui();
     });
 });
 worker.detach();
@@ -442,164 +78,443 @@ worker.detach();
 return app.exec();
 ```
 
-### 7. 对话框与系统辅助
+---
 
-所有原生对话框都是模态的，必须在消息循环线程调用。选中的路径以 UTF-8 `std::string` 返回：
+## 功能特性全景
 
-```cpp
-// 消息框
-helios::MessageBoxResult r = helios::messageBox(
-    window.nativeHandle(), helios::MessageBoxType::Question,
-    helios::MessageBoxButtons::YesNo, "Question", "Continue?");
+| 领域 | C API | C++ Core API | 关键能力 |
+| --- | --- | --- | --- |
+| **窗口系统** | `heliosview_window_*` | `helios::Window` | 普通、无边框、完全自定义标题栏；Mica/Acrylic 亚克力材质；DWM 深色模式；标题栏拖拽区域；Per-Monitor v2 DPI 缩放；几何约束、最小/最大尺寸、模态禁用锁定、任务栏进度条 |
+| **子视口宿主** | `heliosview_host_*` | `helios::UIHost`, `helios::WebViewHost` | 宿主窗口内多视口无缝嵌入；自绘画布与 Web 视口同屏分屏混合应用；动态排版定位与显隐控制 |
+| **2D 矢量画布** | `heliosview_canvas_*` | `helios::Canvas`, `Painter`, `BufferPresenter` | Blend2D JIT 软件光栅化引擎；亚像素级高质量抗锯齿；路径变换、渐变填充、文字渲染；GDI 快速双缓冲直刷呈现 |
+| **保留模式 UI** | `heliosview_ui_*` | `helios::ui::Widget`, `VStack`, `HStack` | 内置 `Button`、`Slider`、`Switch`、`Checkbox`、`ProgressBar`、`SegmentedControl`、`Card`、`CustomWidget`；树状层次布局与鼠标命中分发 |
+| **现代 WebView2** | `heliosview_webview_*` | `helios::WebViewWindow`, `WebViewHost` | Chromium 内核；页面 DOM 完整支持；虚拟本地资源服务器映射（`localUrl`）；开发者工具、页面缩放、低资源占用模式 |
+| **RPC 桥接** | `heliosview_webview_bind` | `bindJson`, `subscribeJson`, `broadcast` | 基于 Boost.Describe 参数类型全自动推导；`std::execution::task` 协程处理器；双向发布订阅消息流 |
+| **异步与协程** | `heliosview_run` | `helios::Async`, `std::execution` | Boost.Asio 线程池；P2300 Senders/Receivers 标准流水线；C++23 协程原生支持（`co_await`, `co_return`） |
+| **HTTP 客户端** | — | `helios::http::Client` | Boost.Beast Keep-Alive 长连接池；幂等请求空闲断连自动重试；SSL/TLS 证书校验 |
+| **托盘与系统菜单** | `heliosview_tray_*`, `heliosview_menu_*` | `helios::Tray`, `Menu`, `MenuBar`, `Action` | 系统通知区托盘图标与气泡；上下文弹出右键菜单；跨平台窗口菜单栏；标准系统角色与快捷键加速器 |
+| **系统对话框与辅助** | `heliosview_dialog_*`, `heliosview_system_*` | `Dialogs.h`, `System.h` | 原生打开/保存文件选择（单选/多选/格式过滤）；文件夹选择；原生消息弹窗；剪贴板读写；系统浏览器打开；资源管理器定位；全局热键 |
+| **Toast 系统通知** | `heliosview_notification_*` | `Notification.h` | WinRT 现代横幅通知；点击事件回调；权限查询；任意线程可安全触发 |
 
-// 文件夹选择
-std::string folder;
-if (helios::selectFolder(window.nativeHandle(), "Pick a folder", folder))
-    std::println("folder: {}", folder);
+---
 
-// 文件选择（单选或多选；结构化过滤器：名称 + 扩展名规则）
-auto files = helios::openFiles(window.nativeHandle(), "Pick images",
-                               std::vector<helios::FileFilter>{
-                                   {"Images", "png;jpg;jpeg"},
-                                   {"All files", "*.*"}
-                               },
-                               /*multi=*/true);
+## 内存分配模型
 
-// 保存对话框
-std::string path;
-if (helios::saveFile(window.nativeHandle(), "Save as",
-                     std::vector<helios::FileFilter>{{"Text", "txt"}}, "out.txt", path))
-    std::println("saving to {}", path);
+HeliosView 内部所有的动态内存分配均统一路由到一个可配置的内存分配器中。这保证了跨 DLL 动态链接边界时的内存安全，并支持直接嵌入定制化内存池或游戏引擎 Arena：
 
-// 剪贴板
-helios::clipboardSetText("hello");
-std::string clip;
-if (helios::clipboardGetText(clip)) { /* ... */ }
-
-// 浏览器打开 / 资源管理器定位
-helios::openUrl("https://example.com");
-helios::showInFolder("C:\\path\\to\\file.txt");
-```
-
-### 8. 通知（toast）
-
-现代 OS toast。**与线程无关**：可从任意线程调用（回调运行在未指定的线程上，碰 UI 前先切回循环线程）。启动时初始化一次（注册应用标识：Windows 是 AppUserModelID + 开始菜单快捷方式，macOS 是 bundle id，Linux 是 desktop id）：
-
-```cpp
-helios::App::setAppId("com.example.myapp");           // 也可以直接传给 init
-helios::notificationInit();                           // 启动时一次
-helios::notificationRequestPermission([](helios::NotificationPermission p) {
-    // macOS：系统弹窗已答复；Windows/Linux：直接报告系统设置
-    std::println("permission = {}", static_cast<int>(p));
-});
-helios::notificationSetClickCallback([](const char* title, const char* body) {
-    /* 用户点击了通知 */
-});
-helios::notificationShow("Download", "Finished");     // 任意线程
-```
-
-macOS 在用户授权前会静默丢弃通知，所以启动时就申请权限。Windows 上全新应用标识的**首次运行**会返回 `NotificationPermission::Unknown`（系统异步注册），这不代表被拒绝。
-
-### 9. 托盘图标 + 弹出 / 右键菜单
-
-`helios::Tray` 在系统通知区显示一个图标；`helios::Menu` 是弹出 / 右键菜单。菜单是**独立对象**（构建时不需要窗口，`show(window)` 的 owner 可空），它显示的是 **action**：action 拥有命令本身（文本、启用/勾选状态、`triggered`），菜单只拥有布局。同一个 action 可以出现在多个菜单里：
-
-```cpp
-helios::Action copy("Copy");                 // 共享命令
-copy.triggered.connect(&onCopy, this);
-
-helios::Menu menu;                           // 不需要窗口
-helios::Menu::Item* show = menu.addItem("Show / Restore");   // 菜单拥有的 action
-helios::Menu::Item* quit = menu.addItem("Quit");
-helios::Menu::Item* top = menu.addCheckItem("Toggle Topmost"); // 可勾选
-menu.addAction(copy);                                // 共享的 action
-menu.addSeparator();
-menu.setDefaultAction(*show);                        // 加粗的默认项
-show->triggered.connect([&] { window.showNormal(); });
-quit->triggered.connect([&] { app.quit(); });
-editMenu->addAction(copy);                           // 同一个命令，另一个菜单
-copy.setEnabled(false);                              // 两个菜单同时变灰
-
-// 标准 role：文案/快捷键由平台提供，app 做不到的动作由库执行
-editMenu->addRole(helios::MenuRole::Cut);            // macOS ⌘X / Windows Ctrl+X
-editMenu->addRole(helios::MenuRole::Copy);
-editMenu->addRole(helios::MenuRole::Paste);
-windowMenu->addRole(helios::MenuRole::Minimize);
-appMenu->addRole(helios::MenuRole::Quit);            // macOS "Quit <App>" ⌘Q / Windows "Exit"
-
-helios::Action open("Open…", "Primary+O");           // 可移植快捷键字符串
-open.triggered.connect(&onOpen, this);
-fileMenu->addAction(open);
-
-// 应用菜单栏：macOS 装进唯一那条全局菜单栏（第一个菜单 = App 菜单）；
-// Windows 显示为每个窗口的菜单栏（包括之后创建的窗口）。
-// helios::MenuBar 是独立的横向菜单栏类（Win32 是 CreateMenu；macOS 是装成
-// NSApp.mainMenu 的那个 NSMenu；Linux 是 GtkMenuBar），里面横向排列一个个
-// 垂直的 Menu（通过 bar.addMenu() 添加）。
-helios::MenuBar bar;
-bar.addMenu("File")->addAction(open);
-bar.addMenu("Edit")->addRole(helios::MenuRole::Copy);
-bar.setAppMenu();
-
-// action 上的快捷键就是全局加速键：heliosview_run / heliosview_pump_events 会翻译；
-// 自带消息循环的 app 在 DispatchMessage 前调 heliosview_translate_accelerator(&msg)
-
-helios::Tray tray("Tray Demo");
-tray.setMenu(menu);                                    // 可移植的右键菜单
-tray.leftClicked.connect([] { /* ... */ });
-tray.notify("Tray", "Hello");                          // 气泡通知（无需配置）
-
-// 用 setMenu 挂菜单，而不是在 rightClicked 里自己弹：Linux 的菜单由桌面环境
-// 通过 DBus 导出（应用自己弹不出来），macOS 的 NSStatusItem 菜单任意点击都会
-// 打开 —— 所以挂了菜单后点击事件可能根本不会送达。用 tray.setMenu(nullptr) 解除。
-```
-
-窗口外观同样可移植：`WindowStyle` 定基线，`WindowFlag` 细化，同一份代码就能得到各平台惯用的样子：
-
-```cpp
-// macOS：真标题栏 + 隐藏标题 + 内容延伸到标题栏下，红绿灯浮在页面之上。
-// Windows：没有原生标题栏，应用自己画 chrome。
-helios::Window w(900, 600, "App", helios::WindowStyle::Normal,
-                 helios::WindowFlag::TitleBarHidden
-                     | helios::WindowFlag::TitleBarTransparent
-                     | helios::WindowFlag::FullSizeContent);
-w.scaleFactor();      // 1.0 / 2.0 —— 逻辑单位换算到物理像素
-w.flags();            // 创建时传入的 flags
-```
-
-### 10. C API
-
-每个 C++ 特性都是对 `include/HeliosView/heliosview.h` 的薄封装 —— 纯 C 头（`extern "C"`、POD 类型、ABI 上不跨 C++ 对象或异常）。它足够完整，可以**完全不写 C++** 就构建应用（见 C99 示例 `HeliosViewCDemo`）。所有字符串都是 UTF-8。
+- **C 接口**：在**创建任何对象之前**调用 `heliosview_set_allocator(&allocator)`。库向用户代码返回的字符串（如文件对话框返回的路径、剪贴板获取的文本）必须统一使用 **`heliosview_free`** 进行释放，切勿直接调用系统 CRT 的 `free()`。
+- **C++ 接口**：C++ 包装层自动管理底层内存；返回给用户的字符串均为标准 UTF-8 `std::string`，无需手动释放。
 
 ```c
-#include <heliosview.h>
-#include <stdio.h>
+char* selected_folder = NULL;
+if (heliosview_select_folder(NULL, "选择项目目录", &selected_folder) == 1) {
+    printf("用户选择: %s\n", selected_folder);
+    heliosview_free(selected_folder); // 必须使用 heliosview_free 释放库返回的字符串
+}
+```
 
-static int frame(void* userdata)
-{
-    (void)userdata;
-    heliosview_event_t ev;
-    while (heliosview_poll(&ev)) {
-        if (ev.type == HELIOSVIEW_EVENT_KEY_DOWN && ev.key == HELIOSVIEW_KEY_ESCAPE)
-            heliosview_window_close(heliosview_window_from_id(ev.window_id));
-        if (ev.type == HELIOSVIEW_EVENT_WINDOW_CLOSE)
-            heliosview_window_close(heliosview_window_from_id(ev.window_id));
-    }
-    return 0;
+---
+
+## 构建与依赖说明
+
+环境要求：**CMake ≥ 4.3** 与 **支持完整 C++23 的编译器**（如 MSVC 19.38+ / Visual Studio 2022+）。
+
+所有外部第三方依赖均已通过 Git Submodule 内置或配置时自动拉取 —— **无需 vcpkg、Conan 或安装任何全局第三方开发包**：
+
+| 依赖库 | 版本 | 来源方式 | 核心用途 |
+| --- | --- | --- | --- |
+| **WebView2 SDK** | 1.0.4129.50 | CMake 配置时自动从 NuGet 拉取 | Win32 Chromium WebView2 运行时加载器 |
+| **Blend2D** | v0.21.3 | Git submodule (`third_party/blend2d`) | 内建 JIT 2D 矢量光栅化画布引擎 |
+| **asmjit** | 固定 commit `dffd8b1` | Git submodule (`third_party/asmjit`) | Blend2D 的 x86/ARM JIT 汇编器后端 |
+| **stdexec** | 固定 commit `758f41f4` | Git submodule (`third_party/stdexec`) | P2300 Senders/Receivers 与 C++23 协程执行模型 |
+| **Boost** | 1.92.0 | Git submodule (`third_party/boost`) | Asio（线程池）、Beast（HTTP）、JSON（RPC 自动绑定） |
+
+### 源码克隆与构建
+
+```sh
+# 克隆仓库与子模块
+git clone --recurse-submodules https://github.com/CoplenSasbian/HeliosView.git
+cd HeliosView
+
+# 使用 Ninja 配置构建工程
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+# 一键编译 DLL、静态库、模块化示例与测试集
+cmake --build build
+```
+
+编译产出的动态库、示例与测试程序均统一输出在 `build/bin/` 目录下，直接双击或命令行即可运行，无需额外配置 `PATH`。
+
+---
+
+## 模块化 Showcase 示例与测试集
+
+工程在 `examples/` 目录下提供 6 个结构清晰的模块化演示程序，并在 `tests/` 目录下提供核心单元测试：
+
+| 目标名称 | 源码路径 | 核心展示内容 |
+| --- | --- | --- |
+| **`HeliosView_ConsoleCoreDemo`** | `examples/01_console_core/` | 纯控制台无窗口应用：展示 `helios::Async` 线程池、`stdexec` 协程流水线与 Boost.Asio HTTP Keep-Alive 本地客户端/服务端通信。 |
+| **`HeliosView_WindowShellDemo`** | `examples/02_window_shell/` | 原生 Win32 现代窗口外壳：自定义无边框窗口、Mica / Acrylic 材质、DWM 深色模式、原生菜单、系统托盘、文件对话框、Toast 通知与任务栏进度条。 |
+| **`HeliosView_WebViewBridgeDemo`** | `examples/03_webview_bridge/` | 现代 WebView2 桥接全特性：毛玻璃 HTML5 仪表盘、`bindJson` 自动推导强类型 DTO 协程通信、`broadcast`/`subscribe` 广播流与免端口虚拟本地资源映射。 |
+| **`HeliosView_CanvasUiDemo`** | `examples/04_canvas_ui/` | 高性能 2D 矢量直绘与保留模式 UI 画廊：4 选项卡包含 表单交互控件（Button, Slider, Switch, ProgressBar）、实时分析折线图与十字标尺、矢量贝塞尔路径与旋转齿轮组、半圆汽车仪表盘与 60FPS CRT 双通道示波器。 |
+| **`HeliosView_StudioHybridDemo`** | `examples/05_studio_hybrid/` | 旗舰双视口混合 Studio：单窗口内无缝集成顶部原生工具栏、左侧 DirectDraw 自绘侧边栏（`UIHost`）与右侧现代 WebView2 网页宿主（`WebViewHost`）。 |
+| **`HeliosView_CApiDemo`** | `examples/06_c_api/` | 纯 C99 ABI 接口巡览：无需任何 C++ 编译器，使用纯 C 完成窗口创建、事件循环分发、系统托盘、上下文菜单与原生对话框调用。 |
+| **`HeliosView_CanvasTest`** | `tests/canvas_test.cpp` | 无头 2D 矢量渲染单元测试：验证 Blend2D 矢量路径、矩阵变换、像素填充与图片编码解码正确性。 |
+| **`HeliosView_PresenterTest`** | `tests/presenter_test.cpp` | 图像呈现单元测试：验证 `PixelView` 内存切片与 `BufferPresenter` 像素呈现逻辑。 |
+
+直接启动任意演示程序：
+
+```sh
+./build/bin/HeliosView_StudioHybridDemo.exe
+```
+
+---
+
+## SDK 发布包使用指南
+
+HeliosView 每次版本发布均提供面向 Windows x64 的独立 **SDK 压缩包**（`HeliosView-<version>-win64-SDK.zip`）：
+
+```
+bin/        HeliosView.dll + WebView2Loader.dll + 预编译示例可执行程序
+lib/        HeliosView.lib + libboost_json.lib + CMake 导入配置文件
+include/    C API 头文件 (HeliosView/), C++ 封装 (HeliosViewCore/), stdexec, Boost
+examples/   独立可编译的示例代码
+```
+
+在第三方 CMake 项目中直接引入：
+
+```cmake
+find_package(HeliosView REQUIRED) # 指定 -DCMAKE_PREFIX_PATH=<SDK解压路径>
+target_link_libraries(my_desktop_app PRIVATE HeliosView::Core)
+```
+
+---
+
+## 核心教程与架构指南
+
+### 1. App 与消息循环调度
+
+`helios::App` 统管进程主 UI 线程、操作系统事件循环派发与异步任务投递：
+
+```cpp
+#include <HeliosViewCore/HeliosView.h>
+#include <print>
+
+int main() {
+    helios::App app;
+
+    // 向 UI 线程投递异步执行任务
+    app.postTask([] {
+        std::println("UI 线程正在执行投递的任务！");
+    });
+
+    // 运行操作系统消息循环（所有窗口关闭或调用 app.quit() 时退出）
+    return app.exec();
+}
+```
+
+`App` 同时也实现了 P2300 `std::execution::scheduler` 调度器接口：
+```cpp
+auto ui_sender = std::execution::schedule(app.get_scheduler())
+               | std::execution::then([] { std::println("已调度在 UI 循环执行"); });
+```
+
+---
+
+### 2. 信号与槽（Signals & Slots）
+
+框架提供现代轻量级 C++23 信号槽组件，原生支持 Lambda 表达式、成员函数指针与异步 Sender：
+
+```cpp
+helios::Signal<int, int> onWindowResized;
+
+// Lambda 槽函数
+auto slotId = onWindowResized.connect([](int w, int h) {
+    std::println("窗口尺寸变更: {}x{}", w, h);
+});
+
+// 成员函数槽
+onWindowResized.connect(&MyController::handleResize, this);
+
+// 触发信号
+onWindowResized(1280, 720);
+
+// 断开连接
+onWindowResized.disconnect(slotId);
+```
+
+---
+
+### 3. 原生现代窗口外壳
+
+`helios::Window` 封装了 Win32 顶层窗口，原生支持 Windows 11 现代视效：
+
+```cpp
+#include <HeliosViewCore/HeliosView.h>
+
+int main() {
+    helios::App app;
+
+    // 创建无边框窗口
+    helios::Window window(1024, 640, "HeliosView 外壳", helios::WindowStyle::Frameless);
+    
+    // 启用 Win11 Acrylic 亚克力或 Mica 云母材质
+    window.setBackdrop(helios::BackdropStyle::Acrylic);
+    window.setDarkMode(true);
+
+    // 注册自定义标题栏拖拽区域（顶部 40px）
+    window.addDragRegion(0, 0, 1024, 40);
+
+    // 监听窗口生命周期事件
+    window.resized.connect([](int w, int h) { /* 处理尺寸调整 */ });
+    window.closeRequested.connect(&helios::Window::close, &window);
+
+    window.show();
+    return app.exec();
+}
+```
+
+能力支持：
+- **外观风格**：`WindowStyle::Normal`（普通带边框）、`Borderless`（无边框）、`Frameless`（完全自定义客户区无原生标题栏）。
+- **DWM 材质**：`BackdropStyle::None`、`Mica`、`Acrylic`、`Tabbed`。
+- **高 DPI 适配**：Per-Monitor DPI aware v2（`enableDpiAwareness()`、`window.dpi()`）。
+- **任务栏进度**：`setProgress(state, value)`（正常、不确定动画、错误红条、暂停黄条）。
+
+---
+
+### 4. 现代 WebView2 与 RPC 桥
+
+`helios::WebViewWindow` 嵌入 Chromium WebView2，并提供基于 **`bindJson`** 的自动类型推导双向 RPC：
+
+```cpp
+#include <HeliosViewCore/HeliosView.h>
+#include <boost/describe.hpp>
+
+// 1. 定义强类型 DTO 结构体
+struct CalculateRequest {
+    int a;
+    int b;
+    std::string operation;
+};
+BOOST_DESCRIBE_STRUCT(CalculateRequest, (), (a, b, operation))
+
+int main() {
+    helios::App app;
+    auto window = std::make_shared<helios::WebViewWindow>(1000, 700, "WebView RPC 演示");
+    window->show();
+    window->createWebView();
+
+    // 2. 绑定 C++ 协程 RPC 处理器（入参类型自动推导，无需手动反序列化！）
+    window->bindJson("calculate", [](CalculateRequest req) -> std::execution::task<int> {
+        if (req.operation == "add") co_return req.a + req.b;
+        if (req.operation == "mul") co_return req.a * req.b;
+        co_return 0;
+    });
+
+    // 3. 前端交互
+    window->navigateHtml(R"html(
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <button onclick="run()">点击调用原生 C++</button>
+            <script>
+                async function run() {
+                    const res = await window.helios.call('calculate', {
+                        a: 21, b: 2, operation: 'mul'
+                    });
+                    alert('原生执行结果: ' + res); // 42
+                }
+            </script>
+        </body>
+        </html>
+    )html");
+
+    return app.exec();
+}
+```
+
+特性支持：
+- **参数类型自动推导**：自动将前端传入的 JSON 数据反序列化为 Boost.Describe 标注的结构体。
+- **双向广播机制**：`window->broadcast("event_name", payload)` 原生向 Web 广播，以及 `window->subscribeJson(...)` 监听 Web 消息。
+- **免端口虚拟本地资源目录**：通过 `mapLocalFolder("assets", "D:/app/dist")`，前端可直接通过 `https://assets/...` 访问本地静态页面与静态资源，无本地端口占用或跨域困扰。
+
+---
+
+### 5. 2D 矢量画布与直接绘制
+
+HeliosView 核心直接集成了 **Blend2D** 矢量渲染引擎，提供毫秒级高性能纯 CPU/JIT 2D 矢量图形渲染：
+
+```cpp
+#include <HeliosViewCore/Canvas.h>
+
+// 创建 800x600 的 32 位 RGBA 离屏画布
+helios::Canvas canvas(800, 600);
+helios::Painter painter(canvas);
+
+// 清空背景色
+painter.clear(helios::Rgba32(24, 26, 32));
+
+// 绘制抗锯齿圆角矩形与带边框的圆形
+painter.fillRoundRect(50, 50, 200, 100, 16, 16, helios::Rgba32(64, 128, 255));
+painter.strokeCircle(400, 300, 80, helios::Rgba32(255, 180, 0), 4.0);
+
+// 绘制复杂贝塞尔矢量轮廓
+helios::Path path;
+path.moveTo(300, 100);
+path.cubicTo(350, 50, 450, 50, 500, 100);
+path.lineTo(400, 200);
+path.close();
+painter.fillPath(path, helios::Rgba32(46, 204, 113));
+
+// 直接编码保存为本地 PNG/JPEG 图片，或快速直刷到窗口呈现
+canvas.writeToFile("render.png");
+```
+
+---
+
+### 6. 保留模式 UI 组件体系与布局
+
+`HeliosViewCore/UI/Widget.h` 提供了基于 2D 画布的保留模式组件系统：
+
+```cpp
+#include <HeliosViewCore/UI/Widget.h>
+
+// 1. 创建自动布局容器
+auto root = std::make_shared<helios::ui::VStack>(20 /*内边距*/, 12 /*间距*/);
+root->setBounds(0, 0, 400, 600);
+
+// 2. 添加内置交互控件
+auto title = std::make_shared<helios::ui::Label>("参数设置面板", 20.0f, helios::Rgba32(240, 240, 245), true);
+root->addChild(title);
+
+auto slider = std::make_shared<helios::ui::Slider>(0.0f, 100.0f, 45.0f, 260, 24);
+slider->onValueChanged = [](float val) {
+    std::println("滑块数值: {:.1f}", val);
+};
+root->addChild(slider);
+
+auto toggle = std::make_shared<helios::ui::Switch>(true);
+toggle->onToggled = [](bool checked) {
+    std::println("开关状态: {}", checked);
+};
+root->addChild(toggle);
+
+auto button = std::make_shared<helios::ui::Button>("应用配置", 140, 36, helios::ui::ButtonStyle::Primary);
+button->onClick = [] {
+    std::println("按钮已点击！");
+};
+root->addChild(button);
+```
+
+内置组件列表：
+- `Button`（Primary 主按钮 / Normal 常规样式，悬停与按下态反馈）
+- `Slider`（平滑浮点范围滑动条）
+- `Switch`（现代 iOS / WinUI 风格平滑切换开关）
+- `Checkbox`（复选框与文字标签）
+- `ProgressBar`（0.0 ~ 1.0 范围进度条）
+- `SegmentedControl`（多段分段选项卡栏）
+- `Card`（带边框与圆角背景的卡片容器）
+- `Label`（高清晰抗锯齿文本）
+- `VStack` 与 `HStack`（垂直与水平自适应布局容器）
+- `CustomWidget`（支持任意自定义绘制与事件分发的通用扩展组件）
+
+---
+
+### 7. 子视口宿主与混合架构应用
+
+基于 HeliosView 的**子视口宿主架构（Child Viewport Host Architecture）**，开发者可在同一个窗口中同时嵌入原生 2D 自绘画布组件与 Chromium WebView2 页面：
+
+```cpp
+#include <HeliosViewCore/HeliosView.h>
+#include <HeliosViewCore/UI/Widget.h>
+
+int main() {
+    helios::App app;
+    helios::Window window(1280, 720, "混合桌面应用", helios::WindowStyle::Normal);
+
+    // 左侧视口：原生 2D 自绘 UI 宿主（宽度 320）
+    auto uiHost = window.createUIHost(0, 0, 320, 720);
+    auto sidePanel = std::make_shared<helios::ui::VStack>(16, 12);
+    sidePanel->addChild(std::make_shared<helios::ui::Button>("原生侧边栏", 200, 36));
+    uiHost->setRootWidget(sidePanel);
+
+    // 右侧视口：现代 WebView2 网页宿主（宽度 960）
+    auto webHost = window.createWebViewHost(320, 0, 960, 720);
+    webHost->navigate("https://github.com");
+
+    // 监听窗口尺寸变化，动态重排两个视口
+    window.resized.connect([&](int w, int h) {
+        uiHost->setBounds(0, 0, 320, h);
+        webHost->setBounds(320, 0, w - 320, h);
+    });
+
+    window.show();
+    return app.exec();
+}
+```
+
+---
+
+### 8. 异步线程池与 HTTP 客户端（长连接复用）
+
+HeliosView 内建多工作线程池（`helios::Async`）与高性能 HTTP 客户端（`helios::http::Client`），支持 HTTP/1.1 Keep-Alive 连接池与 SSL/TLS 加密：
+
+```cpp
+#include <HeliosViewCore/Async.h>
+#include <HeliosViewCore/Http.h>
+
+helios::Async async(4); // 4 个后台工作线程
+helios::http::Client client(async);
+
+// 在 stdexec 协程内发起异步 HTTP GET 请求
+auto task = [] (helios::http::Client& cli) -> std::execution::task<void> {
+    auto res = co_await cli.get("https://api.github.com/zen");
+    std::println("HTTP 状态码: {}, 返回内容: {}", res.status, res.body);
+};
+```
+
+---
+
+### 9. 桌面系统能力集成
+
+```cpp
+// 1. 系统托盘图标
+helios::Tray tray("我的桌面应用");
+helios::Menu trayMenu;
+trayMenu.addItem("显示主窗口")->triggered.connect([&] { window.showNormal(); });
+trayMenu.addItem("退出程序")->triggered.connect([&] { app.quit(); });
+tray.setMenu(trayMenu);
+
+// 2. 原生文件夹选择
+std::string selectedDir;
+if (helios::selectFolder(window.nativeHandle(), "选择存储目录", selectedDir)) {
+    std::println("目录路径: {}", selectedDir);
 }
 
-int main(void)
-{
-    heliosview_window_t* win = heliosview_window_create(800, 600, "C demo");
+// 3. 系统原生 Toast 通知
+helios::notificationShow("同步完成", "所有文件已成功上传。");
+```
+
+---
+
+### 10. 纯 C99 ABI 与跨语言绑定
+
+HeliosView 的所有底层能力均可通过纯 C 接口直接调用：
+
+```c
+#include <HeliosView/heliosview.h>
+
+int main(void) {
+    // 创建原生窗口
+    heliosview_window_t* win = heliosview_window_create(800, 600, "纯 C 窗口");
     heliosview_window_show(win);
 
-    heliosview_tray_t* tray = heliosview_tray_create(win, "C tray", NULL, NULL);
-    heliosview_tray_notify(tray, "Tray", "hello", HELIOSVIEW_TRAY_NOTIFY_INFO, 3000);
+    // 创建托盘图标并弹出通知
+    heliosview_tray_t* tray = heliosview_tray_create(win, "托盘图标", NULL, NULL);
+    heliosview_tray_notify(tray, "HeliosView", "正在通过 C99 运行", HELIOSVIEW_TRAY_NOTIFY_INFO, 3000);
 
-    heliosview_message_box(win, HELIOSVIEW_MESSAGE_INFO, HELIOSVIEW_MESSAGE_OK,
-                           "Info", "Hello from C");
-
-    heliosview_run(frame, NULL);   /* 消息循环；NULL 回调 = 空转 */
+    // 运行主事件循环
+    heliosview_run(NULL, NULL);
 
     heliosview_tray_destroy(tray);
     heliosview_window_destroy(win);
@@ -607,40 +522,66 @@ int main(void)
 }
 ```
 
-库返回的字符串（对话框路径、剪贴板文本）用 `heliosview_free` 释放。C 面完整镜像 C++ 特性：窗口 + 事件、托盘/菜单、WebView 桥接、对话框、系统辅助、通知 —— 详见 `heliosview.h` 中记录的契约（线程、生命周期、错误码）。
+---
+
+## 仓库目录结构
+
+```
+HeliosView/
+├── include/
+│   ├── HeliosView/                   # 纯 C99 ABI 头文件（动态库导出接口）
+│   │   ├── heliosview.h              # C 总头文件
+│   │   ├── heliosview_canvas.h       # 2D 画布与 Blend2D 纯 C 接口
+│   │   ├── heliosview_host.h         # 子视口宿主接口（UIHost, WebViewHost）
+│   │   ├── heliosview_ui.h           # 保留模式 UI 控件 ABI 与调度
+│   │   └── ...                       # 窗口、托盘、菜单、对话框、系统、通知
+│   └── HeliosViewCore/               # 纯头文件 C++23 框架封装
+│       ├── HeliosView.h              # C++ 总头文件
+│       ├── App.h                     # App 单例与 UI 线程调度器
+│       ├── Window.h                  # 顶层窗口封装
+│       ├── WebViewWindow.h           # WebView2 窗口与视口宿主（UIHost, WebViewHost）
+│       ├── Canvas.h                  # C++ Canvas, Painter, Path, Matrix RAII
+│       ├── BufferPresenter.h         # 像素双缓冲呈现器
+│       ├── UI/
+│       │   └── Widget.h              # 保留模式 UI 组件（Button, Slider, Switch 等）
+│       ├── WebViewJson.h             # 自动类型推导 bindJson 与序列化
+│       ├── Async.h                   # Boost.Asio 线程池与 execution 集成
+│       └── Http.h                    # Beast 驱动的 Keep-Alive HTTP 客户端
+├── src/
+│   ├── heliosview.cpp                # C ABI 核心实现与分发
+│   ├── heliosview_canvas_blend2d.cpp # Blend2D JIT 画布后端实现
+│   └── win32/                        # 平台特定后端（Win32 窗口、WebView2、DWM）
+├── examples/                         # 结构化模块演示程序
+│   ├── 01_console_core/              # 异步核心、stdexec 与 HTTP 演示
+│   ├── 02_window_shell/              # Win32 窗口壳、无边框、Mica/Acrylic、深色模式
+│   ├── 03_webview_bridge/            # WebView2 毛玻璃 UI 与双向 RPC 桥
+│   ├── 04_canvas_ui/                 # 2D 自绘画布与 UI 控件画廊
+│   ├── 05_studio_hybrid/             # 旗舰双视口混合桌面 Studio
+│   └── 06_c_api/                     # 纯 C99 ABI 接口演示
+├── tests/                            # 自动化单元测试集
+│   ├── canvas_test.cpp               # 无头 2D 矢量画布测试
+│   └── presenter_test.cpp            # PixelView 与 BufferPresenter 渲染呈现测试
+└── third_party/                      # 内置第三方依赖
+    ├── blend2d/                      # Blend2D 矢量光栅化引擎
+    ├── asmjit/                       # AsmJit x86/ARM JIT 汇编器
+    ├── stdexec/                      # P2300 Senders/Receivers 参考实现
+    └── boost/                        # Boost（Asio, Beast, Describe, JSON）
+```
 
 ---
 
-## 仓库结构
-
-```
-include/HeliosView/heliosview.h       C API（唯一的外部 ABI）
-include/HeliosViewCore/               纯头文件 C++ 封装
-  HeliosView.h                        汇总头文件
-  Signal.h                            信号/槽（同步 + 异步槽）
-  Types.h                             事件类型（与 C API 一一对应）
-  App.h                               消息循环 + UI 线程 scheduler
-  Window.h                            顶层窗口 + 状态/拖拽/DPI/任务栏/背景材质 API
-  Dialogs.h                           原生对话框 + 消息框
-  System.h                            剪贴板 / 打开 URL / 资源管理器定位
-  Notification.h                      OS toast 通知（线程安全）
-  Tray.h                              系统通知区（托盘）图标 + 信号
-  Menu.h                              弹出 / 右键菜单 + 信号
-  Canvas.h                            画布 / 画笔 / 路径 / 图像（无窗口，纯内存）
-  Execution.h                         scheduler/sender（stdexec，P2300）
-  WebViewWindow.h                     内嵌 WebView 的窗口
-  WebViewJson.h                       bindJson / subscribeJson（Boost.JSON 自动绑定）
-src/heliosview.cpp                    平台无关核心
-src/heliosview_internal.h             实现文件间共享的状态
-src/win32/                            win32 后端（窗口、WebView2、对话框、toast）
-third_party/stdexec/                  内置 stdexec（固定 commit，纯头文件）
-third_party/blend2d/                  内置 Blend2D（固定 v0.21.3；BUILTIN 画布引擎）
-third_party/asmjit/                   内置 asmjit（固定 commit；Blend2D 的 JIT 后端）
-examples/                             演示程序
-```
-
 ## 路线图
 
-- 在 C ABI 之后支持更多平台（Linux/macOS 后端）。
-- 更多 WebView 事件（历史（前进/后退）、页面加载发起的对话框 / 打印 / 右键菜单事件）。
-- 多选任务栏角标、颜色/字体选择器。
+- [x] 高性能 Blend2D 2D 矢量自绘画布引擎。
+- [x] 子视口宿主架构（`UIHost` + `WebViewHost` 混编支持）。
+- [x] 保留模式 UI 组件体系（`Button`、`Slider`、`Switch`、`Card`、`VStack`、`HStack`）。
+- [x] 模块化示例工程群（`01_console_core` 至 `06_c_api`）。
+- [ ] 硬件加速 GPU 渲染后端接入（Direct2D / Vulkan / WebGPU）。
+- [ ] 跨平台平台层实现（macOS Cocoa + WKWebView，Linux GTK4 + WebKitGTK）。
+- [ ] 无障碍访问支持（UI Automation / 屏幕阅读器树节点集成）。
+
+---
+
+## 开源协议
+
+HeliosView 基于 Apache License 2.0 协议开源。内置第三方子模块保持各自的宽松开源许可证（Blend2D: Zlib, asmjit: Zlib, stdexec: Apache 2.0, Boost: BSL-1.0）。
