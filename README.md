@@ -284,7 +284,7 @@ Capabilities:
 
 ### 4. Modern WebView2 & RPC Bridge
 
-`helios::WebViewWindow` embeds Chromium WebView2 and provides type-deduced C++ ↔ JavaScript RPC via **`bindJson`**:
+`helios::Window` natively embeds Chromium WebView2 and provides type-deduced C++ ↔ JavaScript RPC via **`bindJson`** (with `helios::WebViewWindow` available as a backwards-compatible alias):
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
@@ -300,7 +300,7 @@ BOOST_DESCRIBE_STRUCT(CalculateRequest, (), (a, b, operation))
 
 int main() {
     helios::App app;
-    auto window = std::make_shared<helios::WebViewWindow>(1000, 700, "WebView Bridge");
+    auto window = std::make_shared<helios::Window>(1000, 700, "WebView Bridge");
     window->show();
     window->createWebView();
 

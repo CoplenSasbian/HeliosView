@@ -211,10 +211,11 @@ int main() {
     auto app = std::make_shared<helios::App>();
     helios::Async async;
 
-    // 1. Create WebViewWindow (1024 x 680)
-    auto win = std::make_unique<helios::WebViewWindow>(
+    // 1. Create Window (1024 x 680) and initialize embedded WebView2
+    auto win = std::make_unique<helios::Window>(
         1024, 680, "HeliosView Modern WebView Bridge Showcase"
     );
+    win->createWebView();
 
     static int g_uptime = 0;
 

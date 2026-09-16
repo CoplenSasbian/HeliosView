@@ -284,7 +284,7 @@ int main() {
 
 ### 4. 现代 WebView2 与 RPC 桥
 
-`helios::WebViewWindow` 嵌入 Chromium WebView2，并提供基于 **`bindJson`** 的自动类型推导双向 RPC：
+`helios::Window` 原生直接内嵌 Chromium WebView2，并提供基于 **`bindJson`** 的自动类型推导双向 RPC（同时保留 `helios::WebViewWindow` 作为向后兼容别名）：
 
 ```cpp
 #include <HeliosViewCore/HeliosView.h>
@@ -300,7 +300,7 @@ BOOST_DESCRIBE_STRUCT(CalculateRequest, (), (a, b, operation))
 
 int main() {
     helios::App app;
-    auto window = std::make_shared<helios::WebViewWindow>(1000, 700, "WebView RPC 演示");
+    auto window = std::make_shared<helios::Window>(1000, 700, "WebView RPC 演示");
     window->show();
     window->createWebView();
 

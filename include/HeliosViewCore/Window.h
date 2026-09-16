@@ -1,23 +1,72 @@
 #pragma once
 
 /**
- * HeliosView.Core -- Window: top-level window.
+ * HeliosView.Core -- Window: unified top-level window.
+ *
+ * Encapsulates the native desktop window shell, embedded WebView2,
+ * and child viewport host management (UIHost & WebViewHost) in a single unified class.
  *
  * Depends on: Signal.h, Types.h, App.h (window registry).
  * Events are dispatched to signals via event(); connect via window.keyPressed.connect(...).
  */
 
+#include <HeliosView/heliosview.h>
 #include <HeliosViewCore/App.h>
 #include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Signal.h>
 #include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace helios {
+
+/* Web engine version used by the WebView backend (UTF-8, e.g. "131.0.2903.86"). */
+inline std::string webViewEngineVersion()
+{
+    char buf[64] = {};
+    heliosview_webview_engine_version(buf, sizeof buf);
+    return buf;
+}
+
+/* ---------- Right-click context menu targets and info ---------- */
+
+enum class ContextMenuTarget : uint32_t {
+    Page = HELIOSVIEW_CONTEXT_MENU_TARGET_PAGE,
+    Selection = HELIOSVIEW_CONTEXT_MENU_TARGET_SELECTION,
+    Link = HELIOSVIEW_CONTEXT_MENU_TARGET_LINK,
+    Image = HELIOSVIEW_CONTEXT_MENU_TARGET_IMAGE,
+    Media = HELIOSVIEW_CONTEXT_MENU_TARGET_MEDIA,
+    Editable = HELIOSVIEW_CONTEXT_MENU_TARGET_EDITABLE,
+};
+
+inline constexpr ContextMenuTarget operator|(ContextMenuTarget a, ContextMenuTarget b)
+{
+    return static_cast<ContextMenuTarget>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline constexpr uint32_t toUint(ContextMenuTarget flags)
+{
+    return static_cast<uint32_t>(flags);
+}
+
+struct ContextMenuInfo {
+    ContextMenuTarget target{};
+    int32_t x = 0;
+    int32_t y = 0;
+    std::string linkUrl;
+    std::string linkText;
+    std::string selectionText;
+    std::string pageUrl;
+
+    bool has(ContextMenuTarget flag) const { return (toUint(target) & toUint(flag)) != 0; }
+};
 
 /* Window taskbar progress state (mirrors heliosview_progress_state_t) */
 enum class ProgressState : int32_t {
@@ -37,42 +86,40 @@ enum class Backdrop : int32_t {
 
 class Window {
 public:
-    // Construct a window with the given client size, title (UTF-8) and preset
-    // style. The native window is created synchronously here (message-loop
-    // thread), so id()/nativeHandle() are valid immediately; show() only makes
-    // it visible. Throws std::runtime_error if the native window cannot be
-    // created. This object is stored as userdata on the C-layer window, which
-    // dispatches events through it.
+    // Construct a window with the given client size, title (UTF-8) and preset style.
     Window(int width, int height, const char* title,
            WindowStyle style = WindowStyle::Normal)
         : Window(width, height, title, style, WindowFlag::None)
     {
     }
 
-    // Same, with style flags (WindowFlag). Use the macOS-idiomatic combination
-    // TitleBarHidden | TitleBarTransparent | FullSizeContent for a native title
-    // bar with the page underneath, and Frameless for a fully custom one.
+    // Same, with style flags (WindowFlag).
     Window(int width, int height, const char* title, WindowStyle style, WindowFlag flags)
         : m_window(heliosview_window_create_ex2(width, height, title,
                                                 static_cast<heliosview_window_style_t>(style),
                                                 toUint(flags), this))
     {
         if (!m_window)
-            throwLastError("window creation failed"); /* the C layer recorded the reason (null title / CreateWindowExW error) */
+            throwLastError("window creation failed");
     }
 
-    // Destroy the window (closes the native window if it was shown)
+    // Destroy the window; ensures child hosts and webviews are cleanly destroyed first
     virtual ~Window() { close(); }
 
-    // Non-copyable: a Window uniquely owns its native window
+    // Non-copyable: a Window uniquely owns its native window and resources
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    // Move: transfers the native window; event dispatch continues to follow the new object
-    Window(Window&& other) noexcept : m_window(other.m_window)
+    // Move: transfers native window, webview, and child hosts
+    Window(Window&& other) noexcept
+        : m_window(other.m_window)
+        , m_webview(other.m_webview)
+        , m_hosts(std::move(other.m_hosts))
     {
         other.m_window = nullptr;
-        heliosview_window_set_userdata(m_window, this); /* after move, userdata points to the new object (null check lives in C layer) */
+        other.m_webview = nullptr;
+        heliosview_window_set_userdata(m_window, this);
+        wireWebViewEvents();
     }
 
     Window& operator=(Window&& other) noexcept
@@ -80,30 +127,27 @@ public:
         if (this != &other) {
             close();
             m_window = other.m_window;
+            m_webview = other.m_webview;
+            m_hosts = std::move(other.m_hosts);
             other.m_window = nullptr;
+            other.m_webview = nullptr;
             heliosview_window_set_userdata(m_window, this);
+            wireWebViewEvents();
         }
         return *this;
     }
 
-    // Show the native window (created in the constructor; this only makes it
-    // visible). The underlying C call reports errors as a return code (0 =
-    // success); use heliosview_window_show directly if you need to inspect it.
-    // The first show fires the firstShown signal (once, from the message
-    // pipeline) — connect before show().
+    // Show the native window
     void show() { heliosview_window_show(m_window); }
 
-    // Hide the native window (keeps it alive; show()/showState() bring it back).
+    // Hide the native window
     void hide() { heliosview_window_hide(m_window); }
-
-    // ---- window operations ----
 
     // Show the window in the given state
     void showState(ShowState state)
     {
         heliosview_window_show_state(m_window, static_cast<heliosview_show_state_t>(state));
     }
-    // Show normally / minimized / maximized (convenience for showState)
     void showNormal() { showState(ShowState::Normal); }
     void showMinimized() { showState(ShowState::Minimized); }
     void showMaximized() { showState(ShowState::Maximized); }
@@ -114,63 +158,29 @@ public:
         return static_cast<ShowState>(heliosview_window_state(m_window));
     }
 
-    // Minimize / maximize / restore the window (convenience over showState)
+    // Minimize / maximize / restore
     void minimize() { heliosview_window_minimize(m_window); }
     void maximize() { heliosview_window_maximize(m_window); }
     void restore() { heliosview_window_restore(m_window); }
-
-    // Toggle between normal and maximized (e.g. for a title-bar maximize button)
     void toggleMaximize() { heliosview_window_toggle_maximize(m_window); }
 
-    // Enable/disable user resizing (and the maximize box). Applied immediately
-    // on a shown window; honored at creation otherwise.
+    // Enable/disable user resizing
     void setResizable(bool resizable) { heliosview_window_set_resizable(m_window, resizable ? 1 : 0); }
 
-    // ---- frameless dragging ----
-
-    // Register a client-area drag region: mouse-down + drag inside it moves the
-    // window like a title bar (WM_NCHITTEST -> HTCAPTION). Call this for each
-    // custom title-bar strip of a frameless/borderless window.
-    //
-    // WebView caveat: drag regions rely on the host window's WM_NCHITTEST. A
-    // full-bleed WebView is a child window covering the whole client area, so
-    // hit-testing over it is answered by the WebView itself and these regions
-    // never fire. On a WebViewWindow, drag from the page instead — the injected
-    // <helios-window-title-bar> component uses WebView2's native app-region:drag
-    // support (enabled by the library), or call startDrag() via a bridge binding
-    // for a fully custom area.
+    // ---- Frameless dragging ----
     void addDragRegion(int32_t x, int32_t y, int32_t width, int32_t height)
     {
         heliosview_window_add_drag_region(m_window, x, y, width, height);
     }
-
-    // Remove all registered drag regions
     void clearDragRegions() { heliosview_window_clear_drag_regions(m_window); }
-
-    // Start a window drag (move loop). Use it when a full-bleed WebView covers
-    // the window (WM_NCHITTEST never fires there): have the page call this on
-    // mousedown over its own title bar to move the window like a native one.
     void startDrag() { heliosview_window_start_drag(m_window); }
 
-    // The window's DPI (per-monitor; 0 if not created)
+    // DPI & scale
     uint32_t dpi() const { return heliosview_window_dpi(m_window); }
-
-    // The display scale: 1.0 at 96 DPI / non-Retina, 2.0 on a Retina or 200%
-    // display. Multiply logical coordinates by this to get device pixels.
     float scaleFactor() const { return heliosview_window_scale_factor(m_window); }
-
-    // The style flags the window was created with
     WindowFlag flags() const { return static_cast<WindowFlag>(heliosview_window_flags(m_window)); }
-
-    // Height (client pixels, DPI-scaled) of the title-bar strip a Frameless
-    // window reserves at the top (the drag area / where the page puts its
-    // title-bar buttons); 0 for other styles / before the window is created.
-    // Useful to keep page content clear of the strip (e.g. keep the top-right
-    // free for the buttons).
     int32_t titleBarHeight() const { return heliosview_window_title_bar_height(m_window); }
 
-    // Work area (excluding taskbar) of the monitor the window is on.
-    // Returns false if the window is not created.
     bool workArea(Rect& out) const
     {
         heliosview_rect_t r{};
@@ -180,190 +190,432 @@ public:
         return true;
     }
 
-    // ---- size constraints ----
-
-    // Enforce a minimum client size (so the UI is not crushed). 0 = unconstrained.
+    // Size constraints
     void setMinimumSize(int32_t w, int32_t h) { heliosview_window_set_min_size(m_window, w, h); }
-
-    // Enforce a maximum client size. (0, 0) = no maximum.
     void setMaximumSize(int32_t w, int32_t h) { heliosview_window_set_max_size(m_window, w, h); }
 
-    // ---- taskbar flash ----
-
-    // Flash the taskbar button a few times (background task finished).
+    // Flash & Fullscreen
     void flash() { heliosview_window_flash(m_window); }
-
-    // Flash the taskbar button until the window is focused (urgent notification).
     void flashUntilFocus() { heliosview_window_flash_until_focus(m_window); }
-
-    // ---- fullscreen ----
-
-    // Enter (true) or leave (false) fullscreen. The previous geometry/style are
-    // restored on exit. A fullscreen window covers the whole monitor.
     void setFullscreen(bool on) { heliosview_window_set_fullscreen(m_window, on ? 1 : 0); }
-
-    // Whether the window is currently fullscreen.
     bool isFullscreen() const { return heliosview_window_is_fullscreen(m_window) != 0; }
 
-    // ---- enabled / modal ----
-
-    // Enable or disable the window (a disabled window is locked against input;
-    // used for modal states). Fires enabledChanged.
+    // Enable & Focus
     void setEnabled(bool on) { heliosview_window_set_enabled(m_window, on ? 1 : 0); }
-
-    // Whether the window is enabled.
-    bool isEnabled() const
-    {
-        return heliosview_window_is_enabled(m_window) != 0;
-    }
-
-    // Request to close the window; goes through the event pipeline
-    // (WINDOW_CLOSE -> event()), so it can be vetoed by overriding event().
+    bool isEnabled() const { return heliosview_window_is_enabled(m_window) != 0; }
     void requestClose() { heliosview_window_close(m_window); }
-
-    // Give the window focus (foreground activation + keyboard focus)
     void focus() { heliosview_window_focus(m_window); }
-
-    // Keep the window always on top (or restore normal z-order)
     void setTopmost(bool on) { heliosview_window_set_topmost(m_window, on ? 1 : 0); }
-
-    // True if the window is currently visible (false when not shown / not created)
     bool isVisible() const { return heliosview_window_is_visible(m_window) != 0; }
 
-    // ---- position and size ----
-
-    // Move the window so its top-left corner is at screen coordinates (x, y)
+    // Position & Size
     void move(int32_t x, int32_t y) { heliosview_window_set_position(m_window, x, y); }
-
-    // Query the window position in screen coordinates (top-left corner).
-    // Returns true on success, false on failure (x/y unchanged).
     bool position(int32_t& x, int32_t& y) const
     {
         return heliosview_window_position(m_window, &x, &y) == 0;
     }
-
-    // Resize the window's client area
     void resize(int32_t width, int32_t height) { heliosview_window_set_size(m_window, width, height); }
-
-    // Query the window client size. Returns true on success, false on failure (width/height unchanged).
     bool size(int32_t& width, int32_t& height) const
     {
         return heliosview_window_size(m_window, &width, &height) == 0;
     }
-
-    // Set position and size in one call
     void setGeometry(int32_t x, int32_t y, int32_t width, int32_t height)
     {
         move(x, y);
         resize(width, height);
     }
-
-    // Query position and size. Returns true only if both queries succeed.
     bool geometry(int32_t& x, int32_t& y, int32_t& width, int32_t& height) const
     {
         return position(x, y) && size(width, height);
     }
 
-    // ---- other window operations ----
-
-    // Set the window title (UTF-8).
+    // Title, Center, Opacity, Icon
     void setTitle(const char* title) { heliosview_window_set_title(m_window, title); }
     void setTitle(const std::string& title) { heliosview_window_set_title(m_window, title.c_str()); }
-
-    // Center the window on the current monitor's work area
     void center() { heliosview_window_center(m_window); }
-
-    // Set the window opacity (0.0 fully transparent to 1.0 opaque)
     void setOpacity(float opacity) { heliosview_window_set_opacity(m_window, opacity); }
-
-    // Replace the window icon (an icon file path, UTF-8; nullptr = default).
-    // [Windows only] — macOS/Linux take the application icon from the bundle or
-    // the .desktop file and return an error here.
     void setIcon(const char* icon_path) { heliosview_window_set_icon(m_window, icon_path); }
-
-    // Same, with icon flags (e.g. IconFlag::Template on macOS).
     void setIcon(const char* icon_path, IconFlag flags)
     {
         heliosview_window_set_icon_ex(m_window, icon_path, toUint(flags));
     }
 
-    // ---- taskbar progress ----
-
-    // Show a determinate taskbar progress indicator (value of max; clamped)
+    // Taskbar progress
     void setProgress(uint32_t value, uint32_t max) { heliosview_window_set_progress(m_window, value, max); }
-
-    // Change only the progress visual state (indeterminate / paused / error / ...)
     void setProgressState(ProgressState state)
     {
         heliosview_window_set_progress_state(m_window, static_cast<heliosview_progress_state_t>(state));
     }
-
-    // Remove the taskbar progress indicator
     void clearProgress() { heliosview_window_clear_progress(m_window); }
 
-    // ---- backdrop & dark mode (Win11 DWM; returns 0 on success) ----
-
-    // Apply a system backdrop (Mica / Acrylic); negative on unsupported systems.
+    // Win11 Backdrop & Dark mode
     int setBackdrop(Backdrop backdrop)
     {
         return heliosview_window_set_backdrop(m_window, static_cast<heliosview_backdrop_t>(backdrop));
     }
-
-    // Toggle the immersive dark-mode title bar.
     int setDarkMode(bool on) { return heliosview_window_set_dark_mode(m_window, on ? 1 : 0); }
 
-    // Close and destroy the native window. If it was the last window, the message
-    // loop exits (null check lives in the C layer). Idempotent (also called by the destructor).
+    // Close and destroy the native window and all attached resources
     void close()
     {
-        heliosview_window_destroy(m_window);
-        m_window = nullptr;
+        for (auto* host : m_hosts) {
+            if (host) heliosview_host_destroy(host);
+        }
+        m_hosts.clear();
+
+        if (m_webview) {
+            heliosview_webview_destroy(m_webview);
+            m_webview = nullptr;
+        }
+
+        if (m_window) {
+            heliosview_window_destroy(m_window);
+            m_window = nullptr;
+        }
     }
 
-    // The window's native handle (HWND on Windows) — the windowId field of
-    // events targeting this window; 0 until the native window is created
+    // Native handles
     uintptr_t id() const { return heliosview_window_id(m_window); }
-
-    // The raw C window handle (nullptr if not created/closed). Exposed so the
-    // low-level API (e.g. helios::Tray) can be used directly on the native handle.
     heliosview_window_t* nativeHandle() const { return m_window; }
+    void* nativeHandle(heliosview_webview_handle_kind_t kind) const
+    {
+        return heliosview_webview_native_handle(m_webview, kind);
+    }
+    heliosview_webview_t* webview() const { return m_webview; }
 
-    /* ===== signals (window.keyPressed.connect(...)) ===== */
+    /* =========================================================================
+     * Child Viewport Host Management (UIHost & WebViewHost)
+     * ========================================================================= */
 
-    Signal<> firstShown;                                   // first show: fires once, from the message pipeline, when the OS first displays the window (the first WM_SHOWWINDOW); connect before the first show
-    Signal<> closeRequested;                                // close requested (user clicked X / Alt+F4); the window does NOT close
-                                                           // automatically — connect to this signal and call close() to actually close.
-    Signal<int32_t, int32_t> resized;                      // size changed (w, h)
-    Signal<int32_t, int32_t> moved;                        // moved; final position (x, y)
-    Signal<int32_t, int32_t> moving;                       // move drag in progress (x, y)
-    Signal<int32_t, int32_t> sizing;                       // resize drag in progress (w, h)
-    Signal<> minimized;                                    // window was minimized (no resized event is emitted for it)
-    Signal<> maximized;                                    // window was maximized (resized fires too, with the new size)
-    Signal<> restored;                                     // window restored to normal from minimized/maximized (resized fires too); plain resizing / fullscreen toggles don't fire it
-    Signal<> shown;                                        // window became visible again (after firstShown; show/hide only)
-    Signal<> hidden;                                       // window became hidden (minimize is NOT a hide)
-    Signal<> focused;                                      // window gained focus (activated)
-    Signal<> blurred;                                      // window lost focus (deactivated)
-    Signal<bool> enabledChanged;                           // enabled (true) / disabled (false)
-    Signal<KeyCode> keyPressed;                            // key pressed (auto-repeat filtered; use keyEvent for repeat)
-    Signal<KeyCode> keyReleased;                           // key released
-    Signal<KeyCode> keyRepeated;                           // OS auto-repeat of a held key (keyPressed does NOT fire for these)
-    Signal<const KeyEvent&> keyEvent;                      // every key down/up with modifiers + repeat flag
-    Signal<const std::string&> textInput;                  // UTF-8 text entered (keyboard or IME commit); long input arrives as consecutive events
-    Signal<int32_t, int32_t> mouseMoved;                   // mouse moved (x, y)
-    Signal<int32_t, int32_t, MouseButton> mouseButtonPressed;  // pressed (x, y, button)
-    Signal<int32_t, int32_t, MouseButton> mouseButtonReleased; // released (x, y, button)
+    heliosview_host_t* createUIHost(int x, int y, int width, int height,
+                                    heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D)
+    {
+        heliosview_host_t* h = heliosview_host_create_ui(m_window, x, y, width, height, engine);
+        if (h) m_hosts.push_back(h);
+        return h;
+    }
 
-    // Window event handler. The default implementation emits signals from events.
-    // Return true if handled; unhandled events go to App::event().
-    // Closing: when the user clicks the close button (X) or presses Alt+F4,
-    // WindowClose is dispatched and the closeRequested signal is emitted, but
-    // the window is NOT destroyed. Connect to closeRequested and call close()
-    // to actually close:
-    //   window.closeRequested.connect(&Window::close, &window);
+    heliosview_host_t* createWebViewHost(int x, int y, int width, int height)
+    {
+        heliosview_host_t* h = heliosview_host_create_webview(m_window, x, y, width, height);
+        if (h) m_hosts.push_back(h);
+        return h;
+    }
+
+    void destroyHost(heliosview_host_t* host)
+    {
+        if (!host) return;
+        auto it = std::find(m_hosts.begin(), m_hosts.end(), host);
+        if (it != m_hosts.end()) {
+            m_hosts.erase(it);
+        }
+        heliosview_host_destroy(host);
+    }
+
+    /* =========================================================================
+     * Embedded WebView Management & RPC Bridge
+     * ========================================================================= */
+
+    void createWebView(const heliosview_webview_env_opts_t& opts)
+    {
+        if (!m_webview) {
+            m_webview = heliosview_webview_create_ex(m_window, &opts);
+            wireWebViewEvents();
+        }
+    }
+
+    void createWebView(const char* user_data_folder = nullptr)
+    {
+        heliosview_webview_env_opts_t opts{};
+        opts.user_data_folder = user_data_folder;
+        createWebView(opts);
+    }
+
+    void ensureWebView()
+    {
+        if (!m_webview) {
+            createWebView();
+        }
+    }
+
+    void destroyWebView()
+    {
+        if (m_webview) {
+            heliosview_webview_destroy(m_webview);
+            m_webview = nullptr;
+        }
+    }
+
+    void navigate(const char* url)
+    {
+        ensureWebView();
+        heliosview_webview_navigate(m_webview, url);
+    }
+
+    void navigateHtml(const char* html)
+    {
+        ensureWebView();
+        heliosview_webview_navigate_html(m_webview, html);
+    }
+
+    void setWebViewInsets(int32_t top, int32_t right, int32_t bottom, int32_t left)
+    {
+        if (m_webview)
+            heliosview_webview_set_insets(m_webview, top, right, bottom, left);
+    }
+
+    int setLowFootprint(bool enabled, heliosview_webview_low_footprint_cb callback = nullptr,
+                        void* userdata = nullptr)
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        return heliosview_webview_set_low_footprint(m_webview, enabled ? 1 : 0, callback, userdata);
+    }
+
+    bool isLowFootprint() const
+    {
+        if (!m_webview) return false;
+        int on = 0;
+        heliosview_webview_is_low_footprint(m_webview, &on);
+        return on != 0;
+    }
+
+    int webviewSetBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        ensureWebView();
+        return heliosview_webview_set_background_color(m_webview, r, g, b, a);
+    }
+
+    int webviewSetTransparentBackground(bool transparent)
+    {
+        ensureWebView();
+        return heliosview_webview_set_transparent_background(m_webview, transparent ? 1 : 0);
+    }
+
+    int addInitScript(const char* script)
+    {
+        ensureWebView();
+        return heliosview_webview_add_init_script(m_webview, script);
+    }
+
+    int clearInitScripts()
+    {
+        if (!m_webview) return 0;
+        return heliosview_webview_clear_init_scripts(m_webview);
+    }
+
+    int setZoom(double factor)
+    {
+        ensureWebView();
+        return heliosview_webview_set_zoom(m_webview, factor);
+    }
+
+    double zoom() const
+    {
+        if (!m_webview) return 1.0;
+        double factor = 1.0;
+        heliosview_webview_zoom(m_webview, &factor);
+        return factor;
+    }
+
+    using CookiesFn = std::function<void(int error, const heliosview_webview_cookie_t* cookies, size_t count)>;
+    using CookieOpFn = std::function<void(int error)>;
+
+    int getCookies(const char* url, CookiesFn callback)
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        auto* fn = new CookiesFn(std::move(callback));
+        const int rc = heliosview_webview_get_cookies(m_webview, url, &cookiesTrampoline, fn);
+        if (rc != 0) delete fn;
+        return rc;
+    }
+
+    int setCookie(const char* url, const heliosview_webview_cookie_t* cookie, CookieOpFn callback = {})
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_set_cookie(m_webview, url, cookie, &cookieOpTrampoline, fn);
+        if (rc != 0) delete fn;
+        return rc;
+    }
+
+    int deleteCookie(const char* name, const char* url, CookieOpFn callback = {})
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_delete_cookie(m_webview, name, url, &cookieOpTrampoline, fn);
+        if (rc != 0) delete fn;
+        return rc;
+    }
+
+    int clearCookies(CookieOpFn callback = {})
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        auto* fn = new CookieOpFn(std::move(callback));
+        const int rc = heliosview_webview_clear_cookies(m_webview, &cookieOpTrampoline, fn);
+        if (rc != 0) delete fn;
+        return rc;
+    }
+
+    int setContextMenuEnabled(bool enabled)
+    {
+        ensureWebView();
+        return heliosview_webview_set_context_menu(m_webview, enabled ? 1 : 0);
+    }
+
+    std::function<bool(const ContextMenuInfo&)> contextMenuGate;
+
+    int setDevToolsEnabled(bool enabled)
+    {
+        ensureWebView();
+        return heliosview_webview_set_devtools(m_webview, enabled ? 1 : 0);
+    }
+
+    int openDevTools()
+    {
+        if (!m_webview) return HELIOSVIEW_ERROR_UNSUPPORTED;
+        return heliosview_webview_open_devtools(m_webview);
+    }
+
+    int mapLocalFolder(const char* host_name, const char* folder_path)
+    {
+        ensureWebView();
+        return heliosview_webview_map_local_folder(m_webview, host_name, folder_path);
+    }
+
+    std::string localUrl(const char* host_name, const char* path)
+    {
+        if (!m_webview) return {};
+        char buf[1024] = {};
+        if (heliosview_webview_local_url(m_webview, host_name, path, buf, sizeof buf) != 0)
+            return {};
+        return buf;
+    }
+
+    int lastNativeError() const
+    {
+        if (!m_webview) return 0;
+        return heliosview_webview_last_native_error(m_webview);
+    }
+
+    // JS <-> native RPC bindings
+    void bind(const char* name, heliosview_webview_bind_cb callback, void* userdata = nullptr,
+              heliosview_webview_userdata_dtor userdata_dtor = nullptr)
+    {
+        ensureWebView();
+        const int rc = heliosview_webview_bind(m_webview, name, callback, userdata, userdata_dtor);
+        if (rc != 0)
+            throwLastError<std::invalid_argument>("heliosview bind");
+    }
+
+    template <class... Args, class Fn>
+    void bindJson(const char* name, Fn&& handler);
+
+    template <class... Args, class Obj, class MFPtr>
+    void bindJson(const char* name, Obj* obj, MFPtr method);
+
+    void resolve(uint64_t call_id, const char* result_json)
+    {
+        if (m_webview)
+            heliosview_webview_resolve(m_webview, call_id, result_json);
+    }
+
+    void reject(uint64_t call_id, const char* error_json)
+    {
+        if (m_webview)
+            heliosview_webview_reject(m_webview, call_id, error_json);
+    }
+
+    void eval(const char* script)
+    {
+        if (m_webview)
+            heliosview_webview_eval(m_webview, script);
+    }
+
+    void evalAsync(const char* script, heliosview_webview_eval_cb callback, void* userdata = nullptr)
+    {
+        if (m_webview)
+            heliosview_webview_eval_async(m_webview, script, callback, userdata);
+    }
+
+    void broadcast(const char* name, const char* data_json)
+    {
+        if (m_webview)
+            heliosview_webview_broadcast(m_webview, name, data_json);
+    }
+
+    void subscribe(const char* name, heliosview_webview_subscribe_cb callback,
+                   void* userdata = nullptr, heliosview_webview_userdata_dtor userdata_dtor = nullptr)
+    {
+        ensureWebView();
+        const int rc = heliosview_webview_subscribe(m_webview, name, callback, userdata, userdata_dtor);
+        if (rc != 0)
+            throwLastError<std::invalid_argument>("heliosview subscribe");
+    }
+
+    template <class Req = void, class Fn>
+    void subscribeJson(const char* name, Fn&& callback);
+
+    template <class Req = void, class Obj, class MFPtr>
+    void subscribeJson(const char* name, Obj* obj, MFPtr method);
+
+    void unsubscribe(const char* name)
+    {
+        if (m_webview)
+            heliosview_webview_unsubscribe(m_webview, name);
+    }
+
+    /* ===== Signals ===== */
+
+    // Window signals
+    Signal<> firstShown;
+    Signal<> closeRequested;
+    Signal<int32_t, int32_t> resized;
+    Signal<int32_t, int32_t> moved;
+    Signal<int32_t, int32_t> moving;
+    Signal<int32_t, int32_t> sizing;
+    Signal<> minimized;
+    Signal<> maximized;
+    Signal<> restored;
+    Signal<> shown;
+    Signal<> hidden;
+    Signal<> focused;
+    Signal<> blurred;
+    Signal<bool> enabledChanged;
+    Signal<KeyCode> keyPressed;
+    Signal<KeyCode> keyReleased;
+    Signal<KeyCode> keyRepeated;
+    Signal<const KeyEvent&> keyEvent;
+    Signal<const std::string&> textInput;
+    Signal<int32_t, int32_t> mouseMoved;
+    Signal<int32_t, int32_t, MouseButton> mouseButtonPressed;
+    Signal<int32_t, int32_t, MouseButton> mouseButtonReleased;
+
+    // WebView navigation signals
+    Signal<std::string, bool, bool> navigationStarting;
+    Signal<std::string, bool> urlChanged;
+    Signal<std::string> titleChanged;
+    Signal<int> navigationCompleted;
+    std::function<bool(const std::string&, bool, bool)> navigationStartingGate;
+
+    template <class Obj, class Ret>
+    void connectNavigation(Ret Obj::* member, Obj* obj)
+    {
+        navigationCompleted.connect(member, obj);
+    }
+
+    template <class Obj, class Ret>
+    void connectStarting(Ret Obj::* member, Obj* obj)
+    {
+        navigationStarting.connect(member, obj);
+    }
+
+    // Event dispatch
     virtual bool event(const Event& e)
     {
         switch (e.type) {
+        case EventType::WindowFirstShown:
+            firstShown();   /* the native window was displayed for the first time */
+            return true;
         case EventType::WindowResize:
             resized(e.width, e.height);
             return true;
@@ -387,9 +639,6 @@ public:
             return true;
         case EventType::WindowDisabled:
             enabledChanged(false);
-            return true;
-        case EventType::WindowFirstShown:
-            firstShown();   /* the native window was displayed for the first time */
             return true;
         case EventType::WindowMinimized:
             minimized();
@@ -440,25 +689,101 @@ public:
     }
 
 private:
+    static void cookiesTrampoline(int error, const heliosview_webview_cookie_t* cookies,
+                                  size_t count, void* userdata)
+    {
+        std::unique_ptr<CookiesFn> fn(static_cast<CookiesFn*>(userdata));
+        if (*fn) (*fn)(error, cookies, count);
+    }
+
+    static void cookieOpTrampoline(int error, void* userdata)
+    {
+        std::unique_ptr<CookieOpFn> fn(static_cast<CookieOpFn*>(userdata));
+        if (*fn) (*fn)(error);
+    }
+
+    void wireWebViewEvents()
+    {
+        if (!m_webview) return;
+
+        heliosview_webview_set_navigation_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, int error, void* userdata) {
+                static_cast<Window*>(userdata)->navigationCompleted(error);
+            },
+            this, nullptr);
+
+        heliosview_webview_set_navigation_starting_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* uri, int is_redirected,
+               int is_user_initiated, void* userdata) -> int {
+                auto* self = static_cast<Window*>(userdata);
+                std::string u = uri ? uri : "";
+                const bool redirect = is_redirected != 0;
+                const bool user_init = is_user_initiated != 0;
+                self->navigationStarting(u, redirect, user_init);
+                if (self->navigationStartingGate)
+                    return self->navigationStartingGate(u, redirect, user_init) ? 1 : 0;
+                return 0;
+            },
+            this, nullptr);
+
+        heliosview_webview_set_source_changed_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* uri, int is_new_document, void* userdata) {
+                auto* self = static_cast<Window*>(userdata);
+                self->urlChanged(uri ? uri : "", is_new_document != 0);
+            },
+            this, nullptr);
+
+        heliosview_webview_set_title_changed_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const char* title, void* userdata) {
+                static_cast<Window*>(userdata)->titleChanged(title ? title : "");
+            },
+            this, nullptr);
+
+        heliosview_webview_set_context_menu_callback(
+            m_webview,
+            [](heliosview_webview_t* wv, const heliosview_context_menu_info_t* info,
+               void* userdata) -> int {
+                auto* self = static_cast<Window*>(userdata);
+                if (!self->contextMenuGate || !info)
+                    return 0;
+                ContextMenuInfo ci;
+                ci.target = static_cast<ContextMenuTarget>(info->target);
+                ci.x = info->x;
+                ci.y = info->y;
+                ci.linkUrl = info->link_url ? info->link_url : "";
+                ci.linkText = info->link_text ? info->link_text : "";
+                ci.selectionText = info->selection_text ? info->selection_text : "";
+                ci.pageUrl = info->page_url ? info->page_url : "";
+                try {
+                    return self->contextMenuGate(ci) ? 1 : 0;
+                } catch (...) {
+                    return 0;
+                }
+            },
+            this, nullptr);
+    }
+
     heliosview_window_t* m_window = nullptr;
+    heliosview_webview_t* m_webview = nullptr;
+    std::vector<heliosview_host_t*> m_hosts;
 };
 
-/* ---------- App message-loop callback (defined here: needs the complete Window type) ----------
- * Events are dispatched via the C-layer window userdata (a Window object pointer); no C++-side registry */
+/* ---------- App message-loop callback ---------- */
 
 inline int App::loopCallback(void* userdata)
 {
     auto* self = static_cast<App*>(userdata);
 
-    // Pump queued events to their target windows; unhandled ones go to App::event()
     Event ev;
     while (self->pollEvent(ev)) {
         if (ev.type == EventType::Quit) {
             self->quit();
             break;
         }
-        /* app-level extension sinks first: decoupled objects (a Tray attached to a
-         * raw window handle, without a C++ Window) handle events here. */
         bool handled = false;
         for (const auto& [id, sink] : self->m_sinks)
             if (sink && sink(ev)) { handled = true; break; }
@@ -474,10 +799,8 @@ inline int App::loopCallback(void* userdata)
         self->event(ev);
     }
 
-    // Idle: run scheduled tasks (the path for background tasks to return to the UI thread)
     self->drainTasks();
 
-    // All windows closed -> exit the loop
     if (heliosview_window_count() == 0) {
         self->quit();
         return 1;

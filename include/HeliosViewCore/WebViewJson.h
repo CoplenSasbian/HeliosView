@@ -58,7 +58,7 @@
 
 #include <HeliosViewCore/Error.h>
 #include <HeliosViewCore/Execution.h>
-#include <HeliosViewCore/WebViewWindow.h>
+#include <HeliosViewCore/Window.h>
 
 #include <concepts>
 #include <exception>
@@ -658,8 +658,9 @@ struct MemberSubscribeJson<type_list<Req>> {
 // explicit <Args...>.
 // ---------------------------------------------------------------------------
 template <class... Args, class Fn>
-void WebViewWindow::bindJson(const char* name, Fn&& handler)
+void Window::bindJson(const char* name, Fn&& handler)
 {
+    ensureWebView();
     using List = typename detail::bind_args<std::decay_t<Fn>, Args...>::type;
     detail::BindJsonInvoker<List, Fn>::apply(m_webview, name, std::forward<Fn>(handler));
 }
@@ -668,8 +669,9 @@ void WebViewWindow::bindJson(const char* name, Fn&& handler)
 // is `Sender (Obj::*)(Args...)`. The parameter types are deduced from the member pointer
 // unless the caller spells them out.
 template <class... Args, class Obj, class MFPtr>
-void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
+void Window::bindJson(const char* name, Obj* obj, MFPtr method)
 {
+    ensureWebView();
     static_assert(std::is_member_function_pointer_v<MFPtr>,
                   "bindJson member overload expects a member function pointer");
     using List = typename detail::bind_args<MFPtr, Args...>::type;
@@ -677,15 +679,16 @@ void WebViewWindow::bindJson(const char* name, Obj* obj, MFPtr method)
 }
 
 // ---------------------------------------------------------------------------
-// WebViewWindow::subscribeJson implementation (declared in WebViewWindow.h).
+// Window::subscribeJson implementation (declared in Window.h).
 //
 // Req is optional in the same way: subscribeJson<MsgReq>("status", cb) uses that type,
 // subscribeJson("status", [](MsgReq req) { ... }) deduces it from the callback, which
 // must take exactly one parameter (the deserialized broadcast value).
 // ---------------------------------------------------------------------------
 template <class Req, class Fn>
-void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
+void Window::subscribeJson(const char* name, Fn&& callback)
 {
+    ensureWebView();
     using R = typename detail::subscribe_arg<std::decay_t<Fn>, Req>::type;
     detail::SubscribeJsonInvoker<detail::type_list<R>, Fn>::apply(m_webview, name,
                                                                   std::forward<Fn>(callback));
@@ -695,8 +698,9 @@ void WebViewWindow::subscribeJson(const char* name, Fn&& callback)
 // signature `void (Obj::*)(Req)`. Req is deduced from the member pointer unless the
 // caller spells it out.
 template <class Req, class Obj, class MFPtr>
-void WebViewWindow::subscribeJson(const char* name, Obj* obj, MFPtr method)
+void Window::subscribeJson(const char* name, Obj* obj, MFPtr method)
 {
+    ensureWebView();
     static_assert(std::is_member_function_pointer_v<MFPtr>,
                   "subscribeJson member overload expects a member function pointer");
     using R = typename detail::subscribe_arg<MFPtr, Req>::type;
