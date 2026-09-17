@@ -850,6 +850,7 @@ public:
         m_cursor = m_text.size();
         m_anchor = m_cursor;
         m_composition.clear();
+        trace("setText", m_text);
         sync();
         return this;
     }
@@ -974,30 +975,44 @@ public:
 
     bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
         if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
-            if (!hasFocus()) {
+            /* Focus is already set by the host before this callback, so the branch below
+             * only runs when the click lands on an unfocused field (a tree without the
+             * host's focus handling). Either way the caret goes where the click was. */
+            const bool wasFocused = hasFocus();
+            if (!wasFocused) {
                 const bool selectAll = m_selectAllOnFocus;
                 focusWidget();
                 if (selectAll) {
                     m_anchor = 0;
                     m_cursor = m_text.size();
-                    m_dragging = true;
+                    m_dragging = true; /* the drag may extend this selection */
+                    trace("mouseDown/selectAll", {});
                     requestRepaint();
                     return true;
                 }
             }
             m_dragging = true;
             setCursorFromX(e->x, false);
+            trace("mouseDown/caret", {});
             return true;
         }
         if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE && m_dragging) {
             setCursorFromX(e->x, true);
+            trace("mouseMove/select", {});
             return true;
         }
         if (e->action == HELIOSVIEW_HOST_MOUSE_UP) {
+            /* Always end the drag, wherever the release lands: a drag that stays "on"
+             * turns every later mouse move into a selection extension, and the next
+             * keystroke then replaces that selection -- text disappears. */
             m_dragging = false;
+            trace("mouseUp", {});
             return true;
         }
         if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            /* Leaving the widget is not a release, but it must not leave a live drag
+             * either: the release may never reach this widget. */
+            m_dragging = false;
             return true;
         }
         return false;
@@ -1031,6 +1046,7 @@ public:
                 m_text.erase(from, m_cursor - from);
                 m_cursor = from;
                 m_anchor = from;
+                trace("key/backspace", {});
                 notifyChanged();
             }
             return true;
@@ -1039,6 +1055,7 @@ public:
             if (m_cursor < m_text.size()) {
                 m_text.erase(m_cursor, detail::utf8Next(m_text, m_cursor) - m_cursor);
                 m_anchor = m_cursor;
+                trace("key/delete", {});
                 notifyChanged();
             }
             return true;
@@ -1254,7 +1271,6 @@ private:
                 i = next;
             }
         }
-        m_dragging = true;
         moveCursor(best, extendSelection);
     }
 
