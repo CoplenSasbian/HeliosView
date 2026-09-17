@@ -209,7 +209,9 @@ public:
 
 	// Attach a widget tree as this host's root. The host keeps the shared_ptr alive
 	// until it is replaced, cleared, or the host is destroyed, so a tree built inline
-	// stays valid: pass the shared_ptr, not a temporary raw handle.
+	// stays valid: pass the shared_ptr, not a temporary raw handle. The tree also
+	// learns which host it belongs to, which is what lets a widget ask for focus and
+	// report its IME caret position.
 	//
 	// Deliberately a template: UIHost and the widget classes are peers that both layer
 	// on Window, so this header cannot name Widget beyond the forward declaration
@@ -217,11 +219,18 @@ public:
 	template <class WidgetT>
 	void setRootWidget(const std::shared_ptr<WidgetT>& root)
 	{
+		if (m_root && m_root != root)
+			heliosview_host_ui_set_root(m_host, nullptr);
+
 		m_root = root;
 		heliosview_host_ui_set_root(m_host, root ? root->handle() : nullptr);
+		if (root)
+			root->attachHost(m_host);
 	}
 
-	// Detach the root widget. The tree itself lives on in the caller's shared_ptr.
+	// Detach the root widget. The tree itself lives on in the caller's shared_ptr, and
+	// the C layer drops the app-attached marker of the whole detached subtree for us
+	// (it owns the widget type, so it can walk it).
 	void clearRoot()
 	{
 		m_root.reset();

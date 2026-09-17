@@ -269,6 +269,7 @@ public:
             detachHost(host);
         }
         m_hosts.clear();
+        m_uiHosts.clear();
 
         if (m_webview) {
             heliosview_webview_destroy(m_webview);
@@ -303,7 +304,9 @@ public:
     UIHost createUIHost(int x, int y, int width, int height,
                         heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D)
     {
-        return UIHost(ownHost(heliosview_host_create_ui(m_window, x, y, width, height, engine)));
+        heliosview_host_t* raw = ownHost(heliosview_host_create_ui(m_window, x, y, width, height, engine));
+        if (raw) m_uiHosts.push_back(raw);
+        return UIHost(raw);
     }
 
     // Same, for an embedded web viewport. Get the WebView itself with
@@ -629,6 +632,18 @@ public:
     // Event dispatch
     virtual bool event(const Event& e)
     {
+        /* Keyboard events reach the window, not the focused child viewport, so a window
+         * that hosts a widget tree forwards them to its UI hosts here. Only the host
+         * whose widget holds focus consumes the event; the text itself arrives through
+         * WM_CHAR directly at the host, which is why only key events are routed. */
+        if (e.type == EventType::KeyDown || e.type == EventType::KeyUp) {
+            const bool isDown = (e.type == EventType::KeyDown);
+            for (heliosview_host_t* host : m_uiHosts) {
+                if (heliosview_host_ui_dispatch_key(host, static_cast<int>(e.key), e.modifiers, isDown ? 1 : 0))
+                    return true;
+            }
+        }
+
         switch (e.type) {
         case EventType::WindowFirstShown:
             firstShown();   /* the native window was displayed for the first time */
@@ -713,6 +728,9 @@ private:
         auto it = std::find(m_hosts.begin(), m_hosts.end(), host);
         if (it != m_hosts.end())
             m_hosts.erase(it);
+        auto uit = std::find(m_uiHosts.begin(), m_uiHosts.end(), host);
+        if (uit != m_uiHosts.end())
+            m_uiHosts.erase(uit);
         heliosview_host_destroy(host);
     }
 
@@ -800,6 +818,7 @@ private:
     heliosview_window_t* m_window = nullptr;
     heliosview_webview_t* m_webview = nullptr;
     std::vector<heliosview_host_t*> m_hosts;
+    std::vector<heliosview_host_t*> m_uiHosts; /* the subset carrying a widget tree */
 };
 
 /* ---------- App message-loop callback ---------- */

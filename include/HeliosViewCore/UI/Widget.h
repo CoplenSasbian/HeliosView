@@ -41,6 +41,7 @@ class Widget;
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -55,6 +56,13 @@ public:
         desc.destroy = StaticDestroy;
 
         m_handle = heliosview_ui_widget_create(&desc, this);
+
+        /* Keyboard input is installed through setters rather than the descriptor, so
+         * the public heliosview_ui_widget_desc_t keeps its layout. Having them is what
+         * makes the widget focusable to the host. */
+        heliosview_ui_widget_set_text_callback(m_handle, StaticText);
+        heliosview_ui_widget_set_key_callback(m_handle, StaticKey);
+        heliosview_ui_widget_set_composition_callback(m_handle, StaticComposition);
     }
 
     explicit Widget(heliosview_ui_widget_t* rawHandle) : m_handle(rawHandle), m_isBorrowed(true) {}
@@ -122,10 +130,66 @@ public:
     virtual void onPaint(helios::Painter& painter) {}
     virtual bool onMouseEvent(const heliosview_host_mouse_event_t* event) { return false; }
 
+    /* ---- keyboard input ----
+     * A widget takes part in keyboard input by overriding one of these; the host
+     * routes an event here only while this widget has focus (see focusWidget()).
+     * The C layer learns that the widget is focusable by the existence of the
+     * callbacks, which Widget installs for every instance. */
+
+    // Committed text (typed keys and IME commits alike), UTF-8. Return true when the
+    // text was consumed. Do not leave the caret stale: repaint and report it.
+    virtual bool onTextInput(std::string_view /*utf8*/) { return false; }
+
+    // A key press or release, with the HELIOSVIEW_MOD_* bits that were held.
+    virtual bool onKeyEvent(heliosview_keycode_t /*key*/, uint32_t /*modifiers*/, bool /*isDown*/) { return false; }
+
+    // IME composition (pre-edit) text, empty when composition ended. Draw it as "not
+    // yet committed"; the committed characters arrive later through onTextInput.
+    virtual bool onComposition(std::string_view /*utf8*/) { return false; }
+
+    /* ---- focus ---- */
+
+    // Ask this widget's host to focus it (no-op when the tree is detached)
+    void focusWidget() {
+        if (!m_handle) return;
+        if (heliosview_host_t* host = findHost())
+            heliosview_host_ui_set_focus(host, m_handle);
+    }
+
+    // Whether this widget holds the keyboard focus of its host
+    bool hasFocus() const {
+        heliosview_host_t* host = findHost();
+        return host != nullptr && heliosview_host_ui_get_focus(host) == m_handle;
+    }
+
 protected:
     heliosview_ui_widget_t* m_handle = nullptr;
     bool m_isBorrowed = false;
     std::vector<std::shared_ptr<Widget>> m_children;
+
+    // Set by UIHost when this widget becomes its root, and inherited by descendants.
+    // The C layer owns the real parent chain; this is only what the C++ helpers need
+    // to reach the host and its focus.
+    void attachHost(heliosview_host_t* host) {
+        m_host = host;
+        for (auto& child : m_children) {
+            if (child) child->attachHost(host);
+        }
+    }
+
+    void detachHost() {
+        m_host = nullptr;
+        for (auto& child : m_children) {
+            if (child) child->detachHost();
+        }
+    }
+
+    heliosview_host_t* findHost() const { return m_host; }
+
+    friend class helios::UIHost;
+
+private:
+    heliosview_host_t* m_host = nullptr;
 
 private:
     static void StaticPaint(heliosview_ui_widget_t*, heliosview_painter_t* p, void* udata) {
@@ -143,6 +207,30 @@ private:
 
     static void StaticDestroy(void*) {
         // C++ unique/shared ownership handles destruction
+    }
+
+    static int StaticText(heliosview_ui_widget_t*, const char* utf8, void* udata) {
+        auto* self = static_cast<Widget*>(udata);
+        if (!self || !utf8) return 0;
+        const bool handled = self->onTextInput(std::string_view(utf8));
+        if (handled) self->requestRepaint();
+        return handled ? 1 : 0;
+    }
+
+    static int StaticKey(heliosview_ui_widget_t*, int key, uint32_t modifiers, int isDown, void* udata) {
+        auto* self = static_cast<Widget*>(udata);
+        if (!self) return 0;
+        const bool handled = self->onKeyEvent(static_cast<heliosview_keycode_t>(key), modifiers, isDown != 0);
+        if (handled) self->requestRepaint();
+        return handled ? 1 : 0;
+    }
+
+    static int StaticComposition(heliosview_ui_widget_t*, const char* utf8, void* udata) {
+        auto* self = static_cast<Widget*>(udata);
+        if (!self) return 0;
+        const bool handled = self->onComposition(std::string_view(utf8 ? utf8 : ""));
+        if (handled) self->requestRepaint();
+        return handled ? 1 : 0;
     }
 };
 
@@ -688,6 +776,499 @@ private:
     int m_selectedIndex = 0;
     int m_hoveredIndex = -1;
     std::function<void(int)> m_onChange;
+};
+
+/* ================= UTF-8 helpers =================
+ * The widget text buffer is UTF-8 because that is what the platform hands us (typed
+ * keys and IME commits both arrive as UTF-8) and what the painter draws. The editing
+ * primitives therefore walk code points, never bytes: splitting a multi-byte sequence
+ * would corrupt the string and make the painter draw a replacement box where a
+ * Chinese character should be.
+ */
+namespace detail {
+
+// Byte index of the code point after `index`
+inline size_t utf8Next(std::string_view s, size_t index) {
+    if (index >= s.size()) return s.size();
+    size_t i = index + 1;
+    while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) ++i;
+    return i;
+}
+
+// Byte index of the code point before `index`
+inline size_t utf8Prev(std::string_view s, size_t index) {
+    if (index == 0) return 0;
+    size_t i = index - 1;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;
+    return i;
+}
+
+inline size_t utf8ClampToBoundary(std::string_view s, size_t index) {
+    if (index >= s.size()) return s.size();
+    while (index > 0 && (static_cast<unsigned char>(s[index]) & 0xC0) == 0x80) --index;
+    return index;
+}
+
+// How many code points the range holds (for count-based limits, not byte limits)
+inline size_t utf8Count(std::string_view s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size(); i = utf8Next(s, i)) ++n;
+    return n;
+}
+
+// Byte index at most `budget` code points into the string
+inline size_t utf8Advance(std::string_view s, size_t from, size_t budget) {
+    size_t i = from;
+    while (budget-- > 0 && i < s.size()) i = utf8Next(s, i);
+    return i;
+}
+
+} // namespace detail
+
+/* ================= Built-in TextField =================
+ * A single-line editable text field drawn with the painter, with real Chinese input:
+ * the IME's composition (pre-edit) string is drawn in place, underlined, and the
+ * candidate window is kept next to the caret through
+ * heliosview_ui_widget_report_ime_caret. Committed text arrives as ordinary
+ * onTextInput, so ASCII typing, pasted text and an IME commit all take the same path.
+ *
+ * Keys handled: Left/Right (with Shift to extend), Home/End, Backspace, Delete,
+ * Ctrl+A/C/X/V, Return (fires onSubmit). Clicking places the caret; dragging selects.
+ */
+class TextField : public Widget {
+public:
+    static std::shared_ptr<TextField> create(int width = 320, int height = 34) {
+        auto field = std::shared_ptr<TextField>(new TextField());
+        field->setSize(width, height);
+        return field;
+    }
+
+    // ---- content ----
+
+    TextField* setText(std::string text) {
+        m_text = std::move(text);
+        m_cursor = m_text.size();
+        m_anchor = m_cursor;
+        m_composition.clear();
+        sync();
+        return this;
+    }
+
+    const std::string& text() const noexcept { return m_text; }
+
+    TextField* setPlaceholder(std::string ph) {
+        m_placeholder = std::move(ph);
+        requestRepaint();
+        return this;
+    }
+
+    // Text drawn before the editable run, inside the frame (a form's label)
+    TextField* setPrefix(std::string prefix) {
+        m_prefix = std::move(prefix);
+        requestRepaint();
+        return this;
+    }
+
+    TextField* setMaxLength(size_t codePoints) {
+        m_maxLength = codePoints;
+        requestRepaint();
+        return this;
+    }
+
+    TextField* setFont(const helios::FontDesc& font) {
+        m_font = font;
+        sync();
+        return this;
+    }
+
+    // Fires on every edit, with the field's current text
+    TextField* onChange(std::function<void(const std::string&)> cb) {
+        m_onChange = std::move(cb);
+        return this;
+    }
+
+    // Fires on Return, with the field's current text
+    TextField* onSubmit(std::function<void(const std::string&)> cb) {
+        m_onSubmit = std::move(cb);
+        return this;
+    }
+
+    // Whether focusing selects the whole value (browser-like). On by default.
+    TextField* setSelectAllOnFocus(bool on) {
+        m_selectAllOnFocus = on;
+        return this;
+    }
+
+    // ---- painting ----
+
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect r = bounds();
+        const float w = (float)r.width;
+        const float h = (float)r.height;
+        const bool isFocused = hasFocus();
+
+        refreshMetrics(p);
+
+        // Frame
+        p.setFill(0xFF181926);
+        p.setStroke(isFocused ? 0xFF8AADF4 : 0xFF45475A, isFocused ? 1.6f : 1.0f);
+        p.drawRoundRect(0, 0, w, h, 6.0f);
+
+        p.setFont(m_font);
+        const float textX = textOrigin();
+        const float textY = (h - m_lineHeight) / 2.0f;
+        const float caretHeight = m_lineHeight;
+
+        // Prefix label
+        if (!m_prefix.empty()) {
+            p.setFill(0xFF6E738D);
+            p.drawText(m_prefix, 10.0f, textY);
+        }
+
+        // Clip the editable run to the frame's inner box
+        p.save();
+        p.setClipRect(6.0f, 2.0f, w - 12.0f, h - 4.0f);
+
+        const std::string& value = m_text;
+        if (value.empty() && m_composition.empty() && !isFocused && !m_placeholder.empty()) {
+            p.setFill(0xFF6E738D);
+            p.drawText(m_placeholder, textX, textY);
+        }
+
+        // Selection behind the text
+        if (m_anchor != m_cursor) {
+            const float x0 = textX + widthAt(p, std::min(m_anchor, m_cursor));
+            const float x1 = textX + widthAt(p, std::max(m_anchor, m_cursor));
+            p.setFill(0x668AADF4);
+            p.setStroke(0, 0);
+            p.drawRect(x0, textY - 2.0f, x1 - x0, caretHeight + 4.0f);
+        }
+
+        // Value
+        p.setFill(0xFFCDD6F4);
+        p.drawText(value, textX, textY);
+
+        // IME composition (pre-edit): shown where it will be inserted, underlined so
+        // it reads as "not committed yet"
+        const float compositionX = textX + widthAt(p, m_cursor);
+        if (!m_composition.empty()) {
+            p.setFill(0xFFFFD479);
+            p.drawText(m_composition, compositionX, textY);
+
+            helios::TextMetrics cm{};
+            p.measureText(m_composition, cm);
+            p.setStroke(0xFFF9E2AF, 1.5f);
+            p.drawLine(compositionX, textY + caretHeight, compositionX + cm.width, textY + caretHeight);
+        }
+
+        // Caret: at the composition start while composing, else at the cursor
+        if (isFocused) {
+            p.setStroke(0xFFF5C2E7, 1.6f);
+            p.drawLine(compositionX, textY, compositionX, textY + caretHeight);
+        }
+
+        p.restore();
+    }
+
+    // ---- mouse ----
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
+            if (!hasFocus()) {
+                const bool selectAll = m_selectAllOnFocus;
+                focusWidget();
+                if (selectAll) {
+                    m_anchor = 0;
+                    m_cursor = m_text.size();
+                    m_dragging = true;
+                    requestRepaint();
+                    return true;
+                }
+            }
+            m_dragging = true;
+            setCursorFromX(e->x, false);
+            return true;
+        }
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE && m_dragging) {
+            setCursorFromX(e->x, true);
+            return true;
+        }
+        if (e->action == HELIOSVIEW_HOST_MOUSE_UP) {
+            m_dragging = false;
+            return true;
+        }
+        if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            return true;
+        }
+        return false;
+    }
+
+    // ---- keyboard ----
+
+    bool onKeyEvent(heliosview_keycode_t key, uint32_t modifiers, bool isDown) override {
+        if (!isDown) return true;
+
+        const bool shift = (modifiers & HELIOSVIEW_MOD_SHIFT) != 0;
+        const bool ctrl = (modifiers & HELIOSVIEW_MOD_CTRL) != 0;
+
+        switch (key) {
+        case HELIOSVIEW_KEY_LEFT:
+            moveCursor(detail::utf8Prev(m_text, m_cursor), shift);
+            return true;
+        case HELIOSVIEW_KEY_RIGHT:
+            moveCursor(detail::utf8Next(m_text, m_cursor), shift);
+            return true;
+        case HELIOSVIEW_KEY_HOME:
+            moveCursor(0, shift);
+            return true;
+        case HELIOSVIEW_KEY_END:
+            moveCursor(m_text.size(), shift);
+            return true;
+        case HELIOSVIEW_KEY_BACKSPACE:
+            if (deleteSelection()) break;
+            if (m_cursor > 0) {
+                const size_t from = detail::utf8Prev(m_text, m_cursor);
+                m_text.erase(from, m_cursor - from);
+                m_cursor = from;
+                m_anchor = from;
+                notifyChanged();
+            }
+            return true;
+        case HELIOSVIEW_KEY_DELETE:
+            if (deleteSelection()) break;
+            if (m_cursor < m_text.size()) {
+                m_text.erase(m_cursor, detail::utf8Next(m_text, m_cursor) - m_cursor);
+                m_anchor = m_cursor;
+                notifyChanged();
+            }
+            return true;
+        case HELIOSVIEW_KEY_RETURN:
+            if (m_onSubmit) m_onSubmit(m_text);
+            return true;
+        case HELIOSVIEW_KEY_A:
+            if (ctrl) {
+                m_anchor = 0;
+                m_cursor = m_text.size();
+                requestRepaint();
+                return true;
+            }
+            return false;
+        case HELIOSVIEW_KEY_C:
+            if (ctrl) {
+                helios::clipboardSetText(selectedText());
+                return true;
+            }
+            return false;
+        case HELIOSVIEW_KEY_X:
+            if (ctrl) {
+                const std::string sel = selectedText();
+                if (!sel.empty()) {
+                    helios::clipboardSetText(sel);
+                    if (deleteSelection()) return true;
+                }
+                return true;
+            }
+            return false;
+        case HELIOSVIEW_KEY_V:
+            if (ctrl) {
+                std::string pasted;
+                if (helios::clipboardGetText(pasted) && !pasted.empty()) {
+                    // A single-line field takes the first line of a multi-line paste
+                    if (const size_t nl = pasted.find_first_of("\r\n"); nl != std::string::npos)
+                        pasted.erase(nl);
+                    insertText(pasted);
+                }
+                return true;
+            }
+            return false;
+        case HELIOSVIEW_KEY_ESCAPE:
+        case HELIOSVIEW_KEY_TAB:
+            return false; /* let the app use these */
+        default:
+            return true; /* a key with no meaning here is still consumed: it is a text field */
+        }
+    }
+
+    // ---- text / IME ----
+
+    bool onTextInput(std::string_view utf8) override {
+        if (utf8.empty()) return true;
+        std::string incoming(utf8);
+        // An IME commit replaces the composition string it was previewing
+        if (!m_composition.empty()) {
+            m_text.replace(m_cursor, m_composition.size(), incoming);
+            m_cursor += incoming.size();
+            m_composition.clear();
+            m_anchor = m_cursor;
+            notifyChanged();
+            return true;
+        }
+        insertText(incoming);
+        return true;
+    }
+
+    bool onComposition(std::string_view utf8) override {
+        /* The composition string is not part of the value; it is previewed at the
+         * caret until the IME commits it (which arrives through onTextInput). */
+        m_composition.assign(utf8);
+        reportCaretToIme();
+        requestRepaint();
+        return true;
+    }
+
+private:
+    TextField() = default;
+
+    // ---- text access ----
+
+    std::string selectedText() const {
+        if (m_anchor == m_cursor) return {};
+        const size_t from = std::min(m_anchor, m_cursor);
+        const size_t to = std::max(m_anchor, m_cursor);
+        return m_text.substr(from, to - from);
+    }
+
+    void moveCursor(size_t to, bool extendSelection) {
+        m_cursor = std::min(to, m_text.size());
+        if (!extendSelection) m_anchor = m_cursor;
+        reportCaretToIme();
+        requestRepaint();
+    }
+
+    bool deleteSelection() {
+        if (m_anchor == m_cursor) return false;
+        const size_t from = std::min(m_anchor, m_cursor);
+        const size_t to = std::max(m_anchor, m_cursor);
+        m_text.erase(from, to - from);
+        m_cursor = from;
+        m_anchor = from;
+        notifyChanged();
+        return true;
+    }
+
+    void insertText(const std::string& incoming) {
+        deleteSelection();
+        std::string insert = incoming;
+        if (m_maxLength > 0) {
+            const size_t room = m_maxLength > detail::utf8Count(m_text) ? m_maxLength - detail::utf8Count(m_text) : 0;
+            if (detail::utf8Count(insert) > room)
+                insert.resize(detail::utf8Advance(insert, 0, room));
+        }
+        m_text.insert(m_cursor, insert);
+        m_cursor += insert.size();
+        m_anchor = m_cursor;
+        notifyChanged();
+    }
+
+    void notifyChanged() {
+        reportCaretToIme();
+        requestRepaint();
+        if (m_onChange) m_onChange(m_text);
+    }
+
+    void sync() {
+        m_cursor = std::min(m_cursor, m_text.size());
+        m_cursor = detail::utf8ClampToBoundary(m_text, m_cursor);
+        m_anchor = std::min(m_anchor, m_text.size());
+        m_anchor = detail::utf8ClampToBoundary(m_text, m_anchor);
+        requestRepaint();
+    }
+
+    // ---- geometry ----
+
+    float textOrigin() const {
+        return m_prefix.empty() ? 10.0f : 10.0f + m_prefixWidth + 8.0f;
+    }
+
+    // Width of m_text[0, index) with the field's font. Needs a live painter; the one
+    // from the last paint is cached for hit-testing, and before the first paint (or
+    // for a detached field) the metrics are rebuilt on a scratch canvas.
+    float widthAt(helios::Painter& p, size_t index) const {
+        if (index == 0) return 0.0f;
+        const size_t at = detail::utf8ClampToBoundary(m_text, index);
+        helios::TextMetrics m{};
+        p.measureText(std::string_view(m_text).substr(0, at), m);
+        return m.width;
+    }
+
+    float widthAtLive(size_t index) const {
+        if (index == 0) return 0.0f;
+        if (m_painter) return widthAt(*m_painter, index);
+
+        helios::Canvas scratch(64, 32);
+        helios::Painter p(scratch);
+        if (!p.valid()) return 0.0f;
+        p.setFont(m_font);
+        return widthAt(p, index);
+    }
+
+    // The caret's x inside the field: the composition start while composing, since
+    // that is where the previewed text begins.
+    float caretX() const {
+        return textOrigin() + widthAtLive(m_cursor);
+    }
+
+    void setCursorFromX(int mouseX, bool extendSelection) {
+        // Nearest code point boundary to the click
+        const float target = (float)mouseX - textOrigin();
+        size_t best = 0;
+        if (target > 0.0f) {
+            float bestDistance = target;
+            for (size_t i = 0; i < m_text.size();) {
+                const size_t next = detail::utf8Next(m_text, i);
+                const float w = widthAtLive(next);
+                const float distance = w > target ? w - target : target - w;
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = next;
+                }
+                i = next;
+            }
+        }
+        m_dragging = true;
+        moveCursor(best, extendSelection);
+    }
+
+    void reportCaretToIme() {
+        // Keep the IME's composition window and candidate list next to the caret; the
+        // C layer translates this local point into the host's client space.
+        const int height = m_lineHeight > 0.0f ? (int)(m_lineHeight + 0.5f) : (int)(m_font.size + 0.5f);
+        heliosview_ui_widget_report_ime_caret(m_handle, (int)(caretX() + 0.5f), 0, (float)height);
+    }
+
+    // Cache the metrics the mouse and IME paths need; called from onPaint where a
+    // painter is live.
+    void refreshMetrics(helios::Painter& p) {
+        m_painter = &p;
+        if (!m_prefix.empty()) {
+            helios::TextMetrics m{};
+            p.measureText(m_prefix, m);
+            m_prefixWidth = m.width;
+        }
+        helios::TextMetrics line{};
+        p.measureText("Ag", line);
+        m_lineHeight = line.height > 0.0f ? line.height : m_font.size;
+    }
+
+    // ---- state ----
+    std::string m_text;
+    std::string m_placeholder = "Type here (\xe4\xb8\xad\xe6\x96\x87\xe5\x8f\xaf\xe8\xbe\x93\xe5\x85\xa5)";
+    std::string m_prefix;
+    std::string m_composition; /* IME pre-edit, not part of m_text */
+    helios::FontDesc m_font{"Segoe UI", 14.0f, helios::FontFlag::None};
+
+    size_t m_cursor = 0; /* byte offset into m_text, always on a code point boundary */
+    size_t m_anchor = 0; /* the other end of the selection; == m_cursor means none */
+    bool m_dragging = false;
+    bool m_selectAllOnFocus = true;
+    size_t m_maxLength = 0; /* 0 = unlimited (code points) */
+
+    helios::Painter* m_painter = nullptr; /* only valid inside onPaint */
+    float m_lineHeight = 18.0f;
+    float m_prefixWidth = 0.0f;
+
+    std::function<void(const std::string&)> m_onChange;
+    std::function<void(const std::string&)> m_onSubmit;
 };
 
 /* ================= Built-in Card Panel ================= */

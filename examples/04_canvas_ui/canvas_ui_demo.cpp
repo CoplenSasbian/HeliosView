@@ -1347,6 +1347,113 @@ static std::shared_ptr<Widget> CreateTabGauges() {
     return tabRoot;
 }
 
+// ----------------------------------------------------------------------------
+// Tab 5: Text Input (C++ TextField, real Chinese IME support)
+// ----------------------------------------------------------------------------
+static std::shared_ptr<Widget> CreateTabInput() {
+    auto tabRoot = HStack::create(16, 0);
+
+    // ---- Left Card: editable fields ----
+    auto leftCard = Card::create(520, 520, 0xFF1E1E2E, 0xFF313244);
+    auto leftStack = VStack::create(12, 18);
+
+    auto titleL = Label::create("Text Fields (click one, then type)");
+    titleL->setFontSize(16.0f)->setColor(0xFF8AADF4);
+    leftStack->add(titleL);
+
+    auto hint = Label::create("中文输入：把输入法切到拼音，点进输入框直接打；候选窗会跟着光标走。");
+    hint->setFontSize(12.0f)->setColor(0xFFA6ADC8);
+    leftStack->add(hint);
+
+    // The live readout the change handlers write into
+    auto output = Label::create("> (nothing typed yet)");
+    output->setFontSize(12.0f)->setColor(0xFFA6E3A1);
+
+    auto line = [&](const char* prefix, const char* placeholder, const char* initial) {
+        auto row = HStack::create(10, 0);
+        auto lbl = Label::create(prefix);
+        lbl->setFontSize(12.5f)->setColor(0xFFCAD3F5);
+        lbl->setSize(96, 30);
+
+        auto field = TextField::create(372, 32);
+        field->setPrefix("");
+        field->setPlaceholder(placeholder);
+        field->setText(initial);
+        field->onChange([output, prefix](const std::string& value) {
+            output->setText(std::format("{} = \"{}\"  ({} bytes UTF-8)", prefix, value, value.size()));
+        });
+        field->onSubmit([output](const std::string& value) {
+            output->setText(std::format("submitted: \"{}\"", value));
+        });
+
+        row->add(lbl)->add(field);
+        leftStack->add(row);
+        return field;
+    };
+
+    line("Name:", "e.g. 张伟 / Alice", "");
+    line("City:", "e.g. 北京 / Shanghai", "");
+    line("Note:", "type anything, Enter submits", "");
+
+    // Password-ish field: no initial select-all, max length in code points
+    auto limitedRow = HStack::create(10, 0);
+    auto limitedLbl = Label::create("Max 8:");
+    limitedLbl->setFontSize(12.5f)->setColor(0xFFCAD3F5);
+    limitedLbl->setSize(96, 30);
+    auto limited = TextField::create(372, 32);
+    limited->setPlaceholder("at most 8 characters");
+    limited->setMaxLength(8);
+    limited->setSelectAllOnFocus(false);
+    limited->onChange([output](const std::string& v) {
+        output->setText(std::format("Max8 = \"{}\" ({} chars max 8)", v, v.size()));
+    });
+    limitedRow->add(limitedLbl)->add(limited);
+    leftStack->add(limitedRow);
+
+    leftStack->add(output);
+
+    auto notes = Label::create("Keys: Left/Right, Home/End, Shift+arrows to select, Backspace/Delete,\nCtrl+A/C/X/V, Enter to submit. IME composition shows underlined in the field.");
+    notes->setFontSize(11.5f)->setColor(0xFF6E738D);
+    leftStack->add(notes);
+
+    leftCard->addChild(leftStack);
+    tabRoot->add(leftCard);
+
+    // ---- Right Card: how the input path is wired ----
+    auto rightCard = Card::create(420, 520, 0xFF1E1E2E, 0xFF313244);
+    auto rightStack = VStack::create(10, 18);
+
+    auto titleR = Label::create("Input Pipeline");
+    titleR->setFontSize(16.0f)->setColor(0xFFA6E3A1);
+    rightStack->add(titleR);
+
+    auto pipeline = Label::create(
+        "WM_CHAR (IME commit arrives here too)\n"
+        "  -> host child window (it has focus)\n"
+        "  -> heliosview_host_ui_dispatch_text\n"
+        "  -> focused widget's text callback\n"
+        "  -> Widget::onTextInput (C++)\n"
+        "\n"
+        "WM_KEYDOWN\n"
+        "  -> main window event queue\n"
+        "  -> helios::App -> Window::event\n"
+        "  -> heliosview_host_ui_dispatch_key\n"
+        "  -> focused widget's key callback\n"
+        "\n"
+        "WM_IME_COMPOSITION\n"
+        "  -> heliosview_host_ui_dispatch_composition\n"
+        "  -> Widget::onComposition (drawn underlined)\n"
+        "  -> heliosview_ui_widget_report_ime_caret\n"
+        "  -> ImmSetCompositionWindow / ImmSetCandidateWindow");
+    pipeline->setFontSize(11.5f)->setColor(0xFFCDD6F4);
+    rightStack->add(pipeline);
+
+    rightCard->addChild(rightStack);
+    tabRoot->add(rightCard);
+
+    return tabRoot;
+}
+
 } // namespace
 
 // ----------------------------------------------------------------------------
@@ -1425,13 +1532,14 @@ int main() {
     headerRow->add(engineBadge);
     rootStack->add(headerRow);
 
-    // Segmented Tab Selector (5 Tabs)
+    // Segmented Tab Selector (6 Tabs)
     std::vector<std::string> tabNames = {
         "OS Shell",
         "Controls",
         "Charts",
         "Vectors",
-        "Gauges"
+        "Gauges",
+        "Input"
     };
     auto tabBar = SegmentedControl::create(tabNames, 0);
     tabBar->setSize(964, 40);
@@ -1443,26 +1551,30 @@ int main() {
     auto tab1 = CreateTabCharts();
     auto tab2 = CreateTabVectors();
     auto tab3 = CreateTabGauges();
+    auto tab4 = CreateTabInput();
 
     tab0->setVisible(false);
     tab1->setVisible(false);
     tab2->setVisible(false);
     tab3->setVisible(false);
+    tab4->setVisible(false);
 
     rootStack->add(tabShell);
     rootStack->add(tab0);
     rootStack->add(tab1);
     rootStack->add(tab2);
     rootStack->add(tab3);
+    rootStack->add(tab4);
 
     // Tab Switching Logic
-    tabBar->onChange([tabShell, tab0, tab1, tab2, tab3, &host](int idx) {
+    tabBar->onChange([tabShell, tab0, tab1, tab2, tab3, tab4, &host](int idx) {
         g_state.activeTab = idx;
         tabShell->setVisible(idx == 0);
         tab0->setVisible(idx == 1);
         tab1->setVisible(idx == 2);
         tab2->setVisible(idx == 3);
         tab3->setVisible(idx == 4);
+        tab4->setVisible(idx == 5);
         host.requestRepaint();
     });
 
@@ -1490,7 +1602,7 @@ int main() {
         host.requestRepaint();
     };
 
-    std::cout << "[UI] Gallery initialized with 5 interactive tabs (Tab 0: UI-driven Native OS Shell).\n";
+    std::cout << "[UI] Gallery initialized with 6 interactive tabs (Tab 5: retained-mode text input with IME).\n";
     std::cout << "[UI] Tip: Right-click anywhere in window for Native Context Menu.\n";
 
     // Main 60 FPS Animation & Event Loop
@@ -1505,6 +1617,7 @@ int main() {
     tab1.reset();
     tab2.reset();
     tab3.reset();
+    tab4.reset();
     s_contextMenu.reset();
     s_tray.reset();
     s_subWindows.clear();

@@ -12,9 +12,18 @@ struct heliosview_ui_widget {
     heliosview_ui_widget_desc_t desc{};
     void* user_data = nullptr;
 
+    /* Keyboard input (set after creation so the widget descriptor stays ABI-stable).
+     * A widget is focusable when any of these is set. */
+    heliosview_ui_text_cb text_cb = nullptr;
+    heliosview_ui_key_cb key_cb = nullptr;
+    heliosview_ui_composition_cb composition_cb = nullptr;
+
     heliosview_ui_widget* parent = nullptr;
     std::vector<heliosview_ui_widget*> children;
     heliosview_host_t* host_attached = nullptr;
+    /* Set while this widget is part of a tree attached to a host; cleared for the whole
+     * subtree when the tree is detached (see heliosview_host_ui_set_root with NULL). */
+    bool tree_attached = false;
 
     int x = 0;
     int y = 0;
@@ -31,7 +40,7 @@ struct heliosview_ui_widget {
     int stack_padding = 10;
 
     heliosview_host_t* get_host() {
-        if (host_attached) return host_attached;
+        if (tree_attached && host_attached) return host_attached;
         if (parent) return parent->get_host();
         return nullptr;
     }
@@ -74,6 +83,22 @@ struct heliosview_ui_widget {
         if (out_local_y) *out_local_y = root_y - off_y;
     }
 
+    /* Local point -> the host's client space (the tree's root is the host's origin) */
+    void local_to_host(int local_x, int local_y, int* out_x, int* out_y) const {
+        int off_x = local_x;
+        int off_y = local_y;
+        const heliosview_ui_widget* curr = this;
+        while (curr) {
+            off_x += curr->x;
+            off_y += curr->y;
+            curr = curr->parent;
+        }
+        if (out_x) *out_x = off_x;
+        if (out_y) *out_y = off_y;
+    }
+
+    bool focusable() const { return text_cb != nullptr || key_cb != nullptr; }
+
     void render_tree(heliosview_painter_t* p, int /*origin_x*/, int /*origin_y*/) {
         if (!visible) return;
 
@@ -96,9 +121,28 @@ struct HostUiBinding {
     heliosview_ui_widget_t* root = nullptr;
     heliosview_ui_widget_t* hovered_widget = nullptr;
     heliosview_ui_widget_t* pressed_widget = nullptr;
+    heliosview_ui_widget_t* focused_widget = nullptr;
 };
 
 static thread_local std::vector<std::pair<heliosview_host_t*, HostUiBinding*>> s_bindings;
+
+static HostUiBinding* find_binding(heliosview_host_t* host) {
+    if (!host) return nullptr;
+    for (const auto& pair : s_bindings) {
+        if (pair.first == host) return pair.second;
+    }
+    return nullptr;
+}
+
+/* Move keyboard focus, repainting the widget that loses it and the one that gains it
+ * (both draw a focus ring / caret from their own focus state). */
+static void set_focus(HostUiBinding* binding, heliosview_ui_widget_t* widget) {
+    if (!binding || binding->focused_widget == widget) return;
+    heliosview_ui_widget_t* previous = binding->focused_widget;
+    binding->focused_widget = widget;
+    if (previous) previous->request_repaint();
+    if (widget) widget->request_repaint();
+}
 
 // ================= Widget Core API =================
 
@@ -124,6 +168,7 @@ void heliosview_ui_widget_destroy(heliosview_ui_widget_t* widget) {
             if (pair.second->root == widget) pair.second->root = nullptr;
             if (pair.second->hovered_widget == widget) pair.second->hovered_widget = nullptr;
             if (pair.second->pressed_widget == widget) pair.second->pressed_widget = nullptr;
+            if (pair.second->focused_widget == widget) pair.second->focused_widget = nullptr;
         }
     }
     widget->host_attached = nullptr;
@@ -239,6 +284,11 @@ static void HostMouseCallback(heliosview_host_t* /*host*/, const heliosview_host
         int lx = 0, ly = 0;
         heliosview_ui_widget_t* hit = binding->root->hit_test(evt->x, evt->y, &lx, &ly);
         binding->pressed_widget = hit;
+
+        /* Clicking a focusable widget gives it keyboard focus; clicking anywhere else
+         * (a card, the background) takes focus away. */
+        set_focus(binding, (hit && hit->focusable()) ? hit : nullptr);
+
         if (hit && hit->desc.event) {
             heliosview_host_mouse_event_t local_evt = *evt;
             local_evt.x = lx;
@@ -356,13 +406,7 @@ static void HostMouseCallback(heliosview_host_t* /*host*/, const heliosview_host
 void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t* root_widget) {
     if (!host) return;
 
-    HostUiBinding* binding = nullptr;
-    for (auto& pair : s_bindings) {
-        if (pair.first == host) {
-            binding = pair.second;
-            break;
-        }
-    }
+    HostUiBinding* binding = find_binding(host);
 
     if (!binding) {
         if (!root_widget) return;
@@ -376,11 +420,38 @@ void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t
         heliosview_host_ui_set_mouse_callback(host, HostMouseCallback, binding);
     }
 
-    binding->root = root_widget;
-    if (root_widget) {
-        root_widget->host_attached = host;
-        heliosview_host_ui_request_repaint(host);
+    /* Detaching: the tree stays alive in the application, but it is no longer this
+     * host's, so drop its attached marker (the whole subtree, so a widget that leaves
+     * with it cannot keep reporting focus or an IME caret to a host it left). */
+    if (!root_widget) {
+        if (binding->root) {
+            std::vector<heliosview_ui_widget*> stack{binding->root};
+            while (!stack.empty()) {
+                heliosview_ui_widget* w = stack.back();
+                stack.pop_back();
+                w->tree_attached = false;
+                for (auto* child : w->children) stack.push_back(child);
+            }
+        }
+        binding->root = nullptr;
+        binding->focused_widget = nullptr;
+        binding->hovered_widget = nullptr;
+        binding->pressed_widget = nullptr;
+        return;
     }
+
+    binding->root = root_widget;
+    root_widget->host_attached = host;
+
+    std::vector<heliosview_ui_widget*> stack{root_widget};
+    while (!stack.empty()) {
+        heliosview_ui_widget* w = stack.back();
+        stack.pop_back();
+        w->tree_attached = true;
+        for (auto* child : w->children) stack.push_back(child);
+    }
+
+    heliosview_host_ui_request_repaint(host);
 }
 
 heliosview_ui_widget_t* heliosview_host_ui_get_root(heliosview_host_t* host) {
@@ -404,6 +475,92 @@ void heliosview_host_ui_clear_binding(heliosview_host_t* host) {
             break;
         }
     }
+}
+
+// ================= Keyboard Focus & Text Input =================
+
+void heliosview_ui_widget_set_text_callback(heliosview_ui_widget_t* widget, heliosview_ui_text_cb callback) {
+    if (!widget) return;
+    widget->text_cb = callback;
+}
+
+void heliosview_ui_widget_set_key_callback(heliosview_ui_widget_t* widget, heliosview_ui_key_cb callback) {
+    if (!widget) return;
+    widget->key_cb = callback;
+}
+
+void heliosview_ui_widget_set_composition_callback(heliosview_ui_widget_t* widget, heliosview_ui_composition_cb callback) {
+    if (!widget) return;
+    widget->composition_cb = callback;
+}
+
+int heliosview_ui_widget_is_focusable(const heliosview_ui_widget_t* widget) {
+    return (widget && widget->focusable()) ? 1 : 0;
+}
+
+heliosview_ui_widget_t* heliosview_host_ui_get_focus(heliosview_host_t* host) {
+    HostUiBinding* binding = find_binding(host);
+    return binding ? binding->focused_widget : nullptr;
+}
+
+void heliosview_host_ui_set_focus(heliosview_host_t* host, heliosview_ui_widget_t* widget) {
+    HostUiBinding* binding = find_binding(host);
+    if (!binding) return;
+    if (widget && !widget->focusable()) return;
+    set_focus(binding, widget);
+}
+
+int heliosview_host_ui_dispatch_text(heliosview_host_t* host, const char* utf8) {
+    HostUiBinding* binding = find_binding(host);
+    if (!binding || !utf8 || !*utf8) return 0;
+
+    heliosview_ui_widget_t* target = binding->focused_widget;
+    if (!target || !target->visible) return 0;
+
+    if (target->text_cb)
+        return target->text_cb(target, utf8, target->user_data) ? 1 : 0;
+
+    /* No text handler: let the key callback see it as a single character, so a widget
+     * that only implements onKey can still consume printable input. */
+    if (target->key_cb && utf8[0] > 0) {
+        const int ch = static_cast<int>(static_cast<unsigned char>(utf8[0]));
+        return target->key_cb(target, ch, 0, 1, target->user_data) ? 1 : 0;
+    }
+    return 0;
+}
+
+int heliosview_host_ui_dispatch_key(heliosview_host_t* host, int key, uint32_t modifiers, int is_down) {
+    HostUiBinding* binding = find_binding(host);
+    if (!binding) return 0;
+
+    heliosview_ui_widget_t* target = binding->focused_widget;
+    if (!target || !target->visible || !target->key_cb) return 0;
+
+    return target->key_cb(target, key, modifiers, is_down ? 1 : 0, target->user_data) ? 1 : 0;
+}
+
+int heliosview_host_ui_dispatch_composition(heliosview_host_t* host, const char* utf8) {
+    HostUiBinding* binding = find_binding(host);
+    if (!binding) return 0;
+
+    heliosview_ui_widget_t* target = binding->focused_widget;
+    if (!target || !target->visible || !target->composition_cb) return 0;
+
+    return target->composition_cb(target, utf8 ? utf8 : "", target->user_data) ? 1 : 0;
+}
+
+void heliosview_ui_widget_report_ime_caret(heliosview_ui_widget_t* widget, int local_x, int local_y, float line_height) {
+    if (!widget) return;
+    heliosview_host_t* host = widget->get_host();
+    if (!host) return;
+
+    int hx = 0, hy = 0;
+    widget->local_to_host(local_x, local_y, &hx, &hy);
+    heliosview_host_ui_set_ime_caret(host, hx, hy, static_cast<int>(line_height + 0.5f));
+}
+
+int heliosview_ui_widget_is_attached(const heliosview_ui_widget_t* widget) {
+    return (widget && widget->tree_attached) ? 1 : 0;
 }
 
 // ================= Built-in Label Widget =================

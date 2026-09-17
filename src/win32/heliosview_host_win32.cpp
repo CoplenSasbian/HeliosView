@@ -8,7 +8,10 @@
 #include "heliosview_win32_internal.h"
 
 #include <commctrl.h>
+#include <imm.h>
+#include <string>
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "imm32.lib")
 
 // ================= Internal Host Struct =================
 
@@ -59,7 +62,92 @@ struct hv_host_ui_subclass {
     heliosview_host_ui_mouse_cb mouse_cb = nullptr;
     void* mouse_udata = nullptr;
     bool mouse_tracking = false;
+    bool ime_caret_set = false;
 };
+
+/* ---------- text input ----------
+ *
+ * The host child window takes focus on click (SetFocus in WM_LBUTTONDOWN), so the
+ * keyboard and IME messages arrive HERE rather than at the parent window: WM_CHAR is
+ * posted to the focused window, and an IME only composes into a focused window. That
+ * is why the host dispatches text itself instead of leaving it to the parent's event
+ * converter, and why heliosview_host_ui_set_ime_caret exists at all.
+ */
+
+/* One UTF-16 code unit (or a buffered high surrogate) -> UTF-8. Returns the byte
+ * count written, 0 when the unit was buffered as the high half of a pair. */
+static int hv_host_utf8_from_unit(wchar_t unit, wchar_t* pending_high, char* out) {
+    auto encode = [](uint32_t cp, char* dst) -> int {
+        if (cp < 0x80) {
+            dst[0] = static_cast<char>(cp);
+            return 1;
+        }
+        if (cp < 0x800) {
+            dst[0] = static_cast<char>(0xC0 | (cp >> 6));
+            dst[1] = static_cast<char>(0x80 | (cp & 0x3F));
+            return 2;
+        }
+        if (cp < 0x10000) {
+            dst[0] = static_cast<char>(0xE0 | (cp >> 12));
+            dst[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            dst[2] = static_cast<char>(0x80 | (cp & 0x3F));
+            return 3;
+        }
+        dst[0] = static_cast<char>(0xF0 | (cp >> 18));
+        dst[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        dst[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        dst[3] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 4;
+    };
+
+    if (*pending_high != 0) {
+        const wchar_t high = *pending_high;
+        *pending_high = 0;
+        if (unit >= 0xDC00 && unit <= 0xDFFF) {
+            const uint32_t cp = 0x10000u + ((static_cast<uint32_t>(high) - 0xD800u) << 10)
+                                          + (static_cast<uint32_t>(unit) - 0xDC00u);
+            return encode(cp, out);
+        }
+        encode(0xFFFD, out); /* orphan high surrogate */
+        return 0;            /* caller falls through for the unit that arrived instead */
+    }
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+        *pending_high = unit;
+        return 0; /* wait for the low half */
+    }
+    if (unit >= 0xDC00 && unit <= 0xDFFF)
+        return encode(0xFFFD, out); /* lone low surrogate */
+    return encode(static_cast<uint32_t>(unit), out);
+}
+
+/* Pin the IME composition window and candidate list to the caret: the app reports the
+ * caret in host client coordinates. */
+static void hv_host_place_ime(HWND hwnd, int x, int y, int height) {
+    HIMC imc = ImmGetContext(hwnd);
+    if (!imc) return;
+
+    if (height <= 0) height = 18;
+    const int base = (y >= 0 && height > 0) ? y + height : 0;
+
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos.x = x;
+    cf.ptCurrentPos.y = base;
+    ImmSetCompositionWindow(imc, &cf);
+
+    CANDIDATEFORM cand{};
+    cand.dwIndex = 0;
+    cand.dwStyle = CFS_EXCLUDE; /* the candidate list may sit over the caret column */
+    cand.ptCurrentPos.x = x;
+    cand.ptCurrentPos.y = base;
+    cand.rcArea.left = x;
+    cand.rcArea.top = 0;
+    cand.rcArea.right = x;
+    cand.rcArea.bottom = base;
+    ImmSetCandidateWindow(imc, &cand);
+
+    ImmReleaseContext(hwnd, imc);
+}
 
 constexpr UINT_PTR kUiSubclassId = 0x48565549; // "HVUI"
 
@@ -168,6 +256,72 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_NCDESTROY:
         RemoveWindowSubclass(hwnd, UiSubclassProc, uIdSubclass);
         return DefSubclassProc(hwnd, msg, wp, lp);
+
+    /* ---- text input (this window is the focused one, see the note above) ---- */
+    case WM_CHAR: {
+        static thread_local wchar_t pending_high = 0;
+        const wchar_t unit = static_cast<wchar_t>(wp);
+        if (unit < 0x20 || unit == 0x7F)
+            return 0; /* backspace/tab/CR/LF/ESC are key events, not text */
+
+        char utf8[8] = {};
+        const int len = hv_host_utf8_from_unit(unit, &pending_high, utf8);
+        if (len > 0) {
+            utf8[len] = '\0';
+            heliosview_host_ui_dispatch_text(host, utf8);
+        } else if (pending_high == 0 && unit >= 0xDC00 && unit <= 0xDFFF) {
+            /* lone low surrogate: report a replacement character */
+            utf8[0] = static_cast<char>(0xEF);
+            utf8[1] = static_cast<char>(0xBF);
+            utf8[2] = static_cast<char>(0xBD);
+            utf8[3] = '\0';
+            heliosview_host_ui_dispatch_text(host, utf8);
+        }
+        return 0;
+    }
+
+    /* ---- IME: composition text and its window position ---- */
+    case WM_IME_STARTCOMPOSITION:
+        ui->ime_caret_set = true;
+        return 0;
+
+    case WM_IME_COMPOSITION: {
+        if ((lp & GCS_COMPSTR) != 0) {
+            HIMC imc = ImmGetContext(hwnd);
+            if (imc) {
+                const LONG bytes = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
+                if (bytes >= 0) {
+                    std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+                    if (bytes > 0)
+                        ImmGetCompositionStringW(imc, GCS_COMPSTR, wide.data(), static_cast<DWORD>(bytes));
+
+                    std::string utf8;
+                    utf8.reserve(wide.size() * 3 + 1);
+                    for (size_t i = 0; i < wide.size(); ++i) {
+                        char buf[8] = {};
+                        wchar_t high = 0;
+                        int n;
+                        if (wide[i] >= 0xD800 && wide[i] <= 0xDBFF && i + 1 < wide.size()) {
+                            n = hv_host_utf8_from_unit(wide[i], &high, buf);
+                            n = hv_host_utf8_from_unit(wide[++i], &high, buf);
+                        } else {
+                            n = hv_host_utf8_from_unit(wide[i], &high, buf);
+                        }
+                        if (n > 0) utf8.append(buf, static_cast<size_t>(n));
+                    }
+                    heliosview_host_ui_dispatch_composition(host, utf8.c_str());
+                }
+                ImmReleaseContext(hwnd, imc);
+            }
+        }
+        return 0;
+    }
+
+    case WM_IME_ENDCOMPOSITION:
+        /* Clear the composition; a commit arrives separately as WM_CHAR. */
+        heliosview_host_ui_dispatch_composition(host, "");
+        ui->ime_caret_set = false;
+        return 0;
 
     default:
         break;
@@ -383,6 +537,12 @@ void heliosview_host_ui_set_mouse_callback(
     auto* ui = static_cast<hv_host_ui_subclass*>(host->subclass_data);
     ui->mouse_cb = callback;
     ui->mouse_udata = user_data;
+}
+
+void heliosview_host_ui_set_ime_caret(heliosview_host_t* host, int x, int y, int height) {
+    if (!host || !host->hwnd)
+        return;
+    hv_host_place_ime(host->hwnd, x, y, height);
 }
 
 HWND hv_host_hwnd(heliosview_host_t* host) {
