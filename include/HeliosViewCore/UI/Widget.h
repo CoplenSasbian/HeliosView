@@ -38,6 +38,7 @@ class Widget;
 #include <HeliosViewCore/Canvas.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
@@ -1084,15 +1085,20 @@ public:
         case HELIOSVIEW_KEY_TAB:
             return false; /* let the app use these */
         default:
-            return true; /* a key with no meaning here is still consumed: it is a text field */
+            return false; /* not an editing key: do not claim it */
         }
 
-        return true; /* unreachable: every case above returns, but keeps the compiler quiet */
+        return false; /* unreachable: every case above returns */
     }
     // ---- text / IME ----
 
     bool onTextInput(std::string_view utf8) override {
         if (utf8.empty()) return true;
+
+        /* Trace when HELIOSVIEW_UI_LOG=1: the value's byte count before and after, and
+         * where the caret sits, is what shows a byte-level edit problem. */
+        trace("onTextInput", utf8);
+
         std::string incoming(utf8);
         // An IME commit replaces the composition string it was previewing
         if (!m_composition.empty()) {
@@ -1101,9 +1107,11 @@ public:
             m_composition.clear();
             m_anchor = m_cursor;
             notifyChanged();
+            trace("onTextInput/after", {});
             return true;
         }
         insertText(incoming);
+        trace("onTextInput/after", {});
         return true;
     }
 
@@ -1123,6 +1131,18 @@ protected:
     TextField() = default;
 
 private:
+
+    /* Diagnostic trace, compiled in but inert unless the environment enables it (see
+     * heliosview_ui_debug_log). Kept out of the edit logic so a failing edit points at
+     * the operation, not at the logging. */
+    void trace(const char* what, std::string_view incoming) const {
+        char line[512];
+        std::snprintf(line, sizeof line,
+                      "TextField %p %-22s in=%zu cursor=%zu anchor=%zu value=%zu bytes",
+                      static_cast<const void*>(this), what,
+                      incoming.size(), m_cursor, m_anchor, m_text.size());
+        heliosview_ui_debug_log(line);
+    }
 
     // ---- text access ----
 
@@ -1147,6 +1167,7 @@ private:
         m_text.erase(from, to - from);
         m_cursor = from;
         m_anchor = from;
+        trace("deleteSelection", {});
         notifyChanged();
         return true;
     }
@@ -1159,6 +1180,7 @@ private:
             if (detail::utf8Count(insert) > room)
                 insert.resize(detail::utf8Advance(insert, 0, room));
         }
+        trace("insertText", insert);
         m_text.insert(m_cursor, insert);
         m_cursor += insert.size();
         m_anchor = m_cursor;

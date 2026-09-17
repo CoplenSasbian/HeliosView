@@ -222,6 +222,15 @@ HELIOSVIEW_API void heliosview_ui_widget_report_ime_caret(heliosview_ui_widget_t
  */
 HELIOSVIEW_API int heliosview_ui_widget_is_attached(const heliosview_ui_widget_t* widget);
 
+/**
+ * Append a line to the retained-UI diagnostic log when HELIOSVIEW_UI_LOG=1 is set in the
+ * environment (no-op otherwise). The file is %TEMP%\heliosview-ui.log, or the path in
+ * HELIOSVIEW_UI_LOG_FILE. Shared by the C and C++ layers so an input trace reads in
+ * order; used to diagnose text-editing problems by recording what actually reached the
+ * buffer.
+ */
+HELIOSVIEW_API void heliosview_ui_debug_log(const char* message);
+
 /* ================= Host Integration ================= */
 
 /**

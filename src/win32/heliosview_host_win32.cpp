@@ -87,6 +87,7 @@ struct hv_host_ui_subclass {
     void* mouse_udata = nullptr;
     bool mouse_tracking = false;
     bool ime_caret_set = false;
+    bool ime_composing = false; /* an IME owns the keyboard until the composition ends */
 };
 
 /* ---------- text input ----------
@@ -340,21 +341,27 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
      * procedure rather than from the window's event dispatch. Translation uses the same
      * map_vk the window converter does, so a key means the same thing on both paths.
      *
-     * Modifiers come from the message's own extended bits (Ctrl / Alt / Shift in
-     * lParam) when they are present, falling back to the keyboard state. The bits
-     * describe the keystroke itself, which is what a shortcut should act on, and they
-     * survive a posted message -- GetKeyState only reflects the state of the thread
-     * that is reading it. */
+     * While an IME is composing, the keys belong to the IME: it is choosing a candidate
+     * with digits and arrows, and a widget that treats them as editing keys both breaks
+     * the composition and edits text the user has not committed. Composition state is
+     * tracked through the WM_IME_* messages below.
+     *
+     * A widget that does not consume a key is also asked to leave it alone: anything it
+     * reports as handled is swallowed, everything else keeps its default behaviour. */
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
-                                        hv_host_key_modifiers(lp), 1);
+        if (!ui->ime_composing) {
+            heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                            hv_host_key_modifiers(lp), 1);
+        }
         return 0;
 
     case WM_KEYUP:
     case WM_SYSKEYUP:
-        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
-                                        hv_host_key_modifiers(lp), 0);
+        if (!ui->ime_composing) {
+            heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                            hv_host_key_modifiers(lp), 0);
+        }
         return 0;
 
     /* ---- text input (this window is the focused one, see the note above) ---- */
@@ -388,6 +395,7 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_IME_STARTCOMPOSITION:
         ime_log("WM_IME_STARTCOMPOSITION");
         ui->ime_caret_set = true;
+        ui->ime_composing = true; /* the IME now owns the keys until this ends */
         return 0;
 
     case WM_IME_COMPOSITION: {
@@ -410,6 +418,9 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                     hv_host_deliver_char(host, unit, 1); /* surrogate pairs pair up inside */
                 }
                 committed = true;
+                /* The result is the end of this composition; keys go back to the widget
+                 * until the IME starts another one. */
+                ui->ime_composing = false;
             }
         }
 
@@ -451,6 +462,7 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
          * the context in WM_IME_COMPOSITION. */
         heliosview_host_ui_dispatch_composition(host, "");
         ui->ime_caret_set = false;
+        ui->ime_composing = false;
         return 0;
 
     case WM_IME_CHAR:

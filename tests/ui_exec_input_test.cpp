@@ -1,4 +1,4 @@
-﻿// Reproduce the reported failure on the real application path: helios::Window +
+// Reproduce the reported failure on the real application path: helios::Window +
 // helios::UIHost + App::exec (the message loop), with a TextField as the root. After
 // the loop starts it types ASCII and Chinese through the host's own dispatch entry
 // points -- the same functions WM_CHAR calls -- so a crash lands here with the last
@@ -60,32 +60,21 @@ int main() {
     step("install frame logic and show the window");
     int frames = 0;
     app.frameCallback = [&] {
-        if (++frames == 3) {
-            std::printf("      frame %d: typing 'a'\n", frames);
-            std::fflush(stdout);
+        ++frames;
+        if (frames == 3) {
             heliosview_host_ui_dispatch_text(host.handle(), "a");
         } else if (frames == 6) {
-            std::printf("      frame %d: typing 'b'\n", frames);
-            std::fflush(stdout);
             heliosview_host_ui_dispatch_text(host.handle(), "b");
         } else if (frames == 9) {
-            std::printf("      frame %d: IME commit 中文\n", frames);
-            std::fflush(stdout);
-            heliosview_host_ui_dispatch_text(host.handle(), "\xE4\xB8\xAD\xE6\x96\x87");
+            heliosview_host_ui_dispatch_text(host.handle(), "\xE4\xB8\xAD\xE6\x96\x87"); // 中文
         } else if (frames == 12) {
-            std::printf("      frame %d: composition 'zhong'\n", frames);
-            std::fflush(stdout);
             heliosview_host_ui_dispatch_composition(host.handle(), "zhong");
         } else if (frames == 15) {
-            std::printf("      frame %d: composition cleared\n", frames);
-            std::fflush(stdout);
             heliosview_host_ui_dispatch_composition(host.handle(), "");
         } else if (frames == 18) {
-            std::printf("      frame %d: backspace\n", frames);
-            std::fflush(stdout);
             heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_BACKSPACE, 0, 1);
         } else if (frames == 21) {
-            std::printf("      frame %d: done, value is \"%s\"\n", frames, field->text().c_str());
+            std::printf("      frame %d: value is \"%s\"\n", frames, field->text().c_str());
             std::fflush(stdout);
             window->close();
         }

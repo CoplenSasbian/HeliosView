@@ -25,6 +25,7 @@ using namespace HeliosView::UI;
 
 static int g_compositions = 0;
 static bool g_preview_seen = false;
+static bool g_keys_ignored_during_composition = false;
 
 class LoggingField : public TextField {
 public:
@@ -122,7 +123,22 @@ int main() {
                 }
                 ImmReleaseContext(hostHwnd, imc);
             }
-        } else if (frames == 14) {
+        } else if (frames == 12) {
+            /* While an IME composes, the KEYS belong to the IME: Backspace must not reach
+             * the widget and edit text the user has not committed yet. (WM_CHAR is
+             * committed text by definition and is still expected to insert -- that is
+             * how an IME delivers punctuation that commits directly.) */
+            const std::string before = preview->text();
+            SendMessageW(hostHwnd, WM_KEYDOWN, VK_BACK, 0);
+            SendMessageW(hostHwnd, WM_KEYUP, VK_BACK, 0);
+            SendMessageW(hostHwnd, WM_KEYDOWN, VK_DELETE, 0);
+            SendMessageW(hostHwnd, WM_KEYUP, VK_DELETE, 0);
+            g_keys_ignored_during_composition = (preview->text() == before);
+            std::printf("      keys during composition: preview \"%s\" (%s)\n",
+                        preview->text().c_str(),
+                        g_keys_ignored_during_composition ? "untouched" : "CHANGED");
+            std::fflush(stdout);
+        } else if (frames == 16) {
             // End the composition and drop the preview
             HIMC imc = ImmGetContext(hostHwnd);
             if (imc) {
@@ -134,7 +150,7 @@ int main() {
             std::printf("      preview check: composition seen = %d, preview field = \"%s\"\n",
                         g_preview_seen ? 1 : 0, preview->text().c_str());
             std::fflush(stdout);
-        } else if (frames == 18) {
+        } else if (frames == 20) {
             window->close();
         }
         host.requestRepaint();
@@ -151,6 +167,8 @@ int main() {
                 committed && committed_ok ? "ok  " : "FAIL", field->text().c_str(), field->text().size());
     std::printf("%s  the composition string travelled IME context -> host -> widget\n",
                 preview_ok ? "ok  " : "FAIL");
+    std::printf("%s  keys during composition stayed with the IME (value untouched)\n",
+                g_keys_ignored_during_composition ? "ok  " : "FAIL");
 
     host.clearRoot();
     preview.reset();
@@ -159,8 +177,9 @@ int main() {
     window->close();
     window.reset();
 
-    const bool ok = committed && preview_ok;
+    const bool ok = committed && preview_ok && g_keys_ignored_during_composition;
     std::printf("=== %s ===\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
+
 

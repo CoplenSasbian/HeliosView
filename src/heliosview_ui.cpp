@@ -3,6 +3,9 @@
 #include <HeliosView/heliosview_ui.h>
 #include "heliosview_internal.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -125,6 +128,29 @@ struct HostUiBinding {
 };
 
 static thread_local std::vector<std::pair<heliosview_host_t*, HostUiBinding*>> s_bindings;
+
+/* Opt-in diagnostic trace (see heliosview_ui_debug_log). The path is resolved once: an
+ * explicit HELIOSVIEW_UI_LOG_FILE, else heliosview-ui.log in the working directory.
+ * Portable by design: this file has no platform dependency. */
+void heliosview_ui_debug_log(const char* message)
+{
+    static const std::string path = [] {
+        const char* enabled = std::getenv("HELIOSVIEW_UI_LOG");
+        if (!enabled || enabled[0] != '1')
+            return std::string();
+        if (const char* explicit_path = std::getenv("HELIOSVIEW_UI_LOG_FILE"))
+            return std::string(explicit_path);
+        return std::string("heliosview-ui.log");
+    }();
+
+    if (path.empty() || !message)
+        return;
+    if (FILE* f = nullptr; fopen_s(&f, path.c_str(), "a") == 0 && f) {
+        std::fputs(message, f);
+        std::fputc('\n', f);
+        std::fclose(f);
+    }
+}
 
 static HostUiBinding* find_binding(heliosview_host_t* host) {
     if (!host) return nullptr;
@@ -515,7 +541,19 @@ int heliosview_host_ui_dispatch_text(heliosview_host_t* host, const char* utf8) 
     if (!binding || !utf8 || !*utf8) return 0;
 
     heliosview_ui_widget_t* target = binding->focused_widget;
-    if (!target || !target->visible) return 0;
+    if (!target || !target->visible) {
+        char line[256];
+        std::snprintf(line, sizeof line, "dispatch_text: DROPPED (no focused widget) \"%s\"", utf8);
+        heliosview_ui_debug_log(line);
+        return 0;
+    }
+
+    {
+        char line[256];
+        std::snprintf(line, sizeof line, "dispatch_text: \"%s\" (%zu bytes) -> widget %p",
+                      utf8, std::strlen(utf8), static_cast<const void*>(target));
+        heliosview_ui_debug_log(line);
+    }
 
     if (target->text_cb)
         return target->text_cb(target, utf8, target->user_data) ? 1 : 0;
