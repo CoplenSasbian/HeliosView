@@ -1,4 +1,4 @@
-﻿if(MSVC)
+if(MSVC)
     add_compile_options(/utf-8 /EHsc)
 endif()
 
@@ -66,13 +66,15 @@ set_tests_properties(ui_keys PROPERTIES LABELS "requires-desktop")
 # The same path on a live window: launches the canvas UI demo, clicks into a text field
 # and posts a Chinese WM_CHAR plus an IME composition round to the real host child
 # window, which is the part a headless test cannot reach.
-add_executable(HeliosView_UiLiveInputTest ui_live_input_test.cpp)
-target_link_libraries(HeliosView_UiLiveInputTest PRIVATE HeliosView::Core)
-target_compile_definitions(HeliosView_UiLiveInputTest
-    PRIVATE HELIOSVIEW_CANVAS_UI_DEMO="$<TARGET_FILE:HeliosView_CanvasUiDemo>")
-add_dependencies(HeliosView_UiLiveInputTest HeliosView_CanvasUiDemo)
-add_test(NAME ui_live_input COMMAND HeliosView_UiLiveInputTest)
-set_tests_properties(ui_live_input PROPERTIES LABELS "requires-desktop")
+if(TARGET HeliosView_CanvasUiDemo)
+    add_executable(HeliosView_UiLiveInputTest ui_live_input_test.cpp)
+    target_link_libraries(HeliosView_UiLiveInputTest PRIVATE HeliosView::Core)
+    target_compile_definitions(HeliosView_UiLiveInputTest
+        PRIVATE HELIOSVIEW_CANVAS_UI_DEMO="$<TARGET_FILE:HeliosView_CanvasUiDemo>")
+    add_dependencies(HeliosView_UiLiveInputTest HeliosView_CanvasUiDemo)
+    add_test(NAME ui_live_input COMMAND HeliosView_UiLiveInputTest)
+    set_tests_properties(ui_live_input PROPERTIES LABELS "requires-desktop")
+endif()
 
 
 # TextField buffer integrity with mixed ASCII / multi-byte text: byte loss when editing

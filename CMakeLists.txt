@@ -274,12 +274,18 @@ endif()
 # exported to consumers: any target linking HeliosView::Core is compiled as C++23
 target_compile_features(HeliosView.Core INTERFACE cxx_std_23)
 
-option(HELIOSVIEW_BUILD_EXAMPLES "Build the example executables" ON)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(_heliosview_is_toplevel ON)
+else()
+    set(_heliosview_is_toplevel OFF)
+endif()
+
+option(HELIOSVIEW_BUILD_EXAMPLES "Build the example executables" ${_heliosview_is_toplevel})
 if(HELIOSVIEW_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-option(HELIOSVIEW_BUILD_TESTS "Build the test executables" ON)
+option(HELIOSVIEW_BUILD_TESTS "Build the test executables" ${_heliosview_is_toplevel})
 if(HELIOSVIEW_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
