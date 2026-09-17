@@ -64,8 +64,12 @@ int main(int argc, char** argv) {
                 DWORD owner = 0;
                 GetWindowThreadProcessId(hwnd, &owner);
                 if (owner == f->pid && IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr) {
-                    f->found = hwnd;
-                    return FALSE;
+                    wchar_t cls[64] = {};
+                    GetClassNameW(hwnd, cls, 64);
+                    if (std::wcsncmp(cls, L"HeliosViewWindow", 16) == 0) {
+                        f->found = hwnd;
+                        return FALSE;
+                    }
                 }
                 return TRUE;
             },
@@ -75,10 +79,12 @@ int main(int argc, char** argv) {
     check(main_window != nullptr, "the demo opened its window");
 
     if (main_window) {
-        // Let the first paint happen, then look for the UI host child window
-        Sleep(1500);
-        g_hosts.clear();
-        EnumChildWindows(main_window, enum_child, 0);
+        // Let the demo finish building tabs and create its UI host child window
+        for (int i = 0; i < 50 && g_hosts.empty(); ++i) {
+            Sleep(200);
+            g_hosts.clear();
+            EnumChildWindows(main_window, enum_child, 0);
+        }
         check(!g_hosts.empty(), "the demo created a UI host child window");
 
         if (!g_hosts.empty()) {

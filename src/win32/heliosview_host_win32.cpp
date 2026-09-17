@@ -6,11 +6,13 @@
 #include <HeliosView/heliosview_ui.h>
 #include "../heliosview_internal.h"
 #include "heliosview_win32_internal.h"
+#include "heliosview_win32_input_context.h"
 
 #include <commctrl.h>
 #include <imm.h>
 #include <cstdarg>
 #include <cstdio>
+#include <memory>
 #include <string>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "imm32.lib")
@@ -86,9 +88,9 @@ struct hv_host_ui_subclass {
     heliosview_host_ui_mouse_cb mouse_cb = nullptr;
     void* mouse_udata = nullptr;
     bool mouse_tracking = false;
-    bool ime_caret_set = false;
-    bool ime_composing = false; /* an IME owns the keyboard until the composition ends */
+    std::unique_ptr<hv::win32::Win32InputContext> input_context;
 };
+
 
 /* ---------- text input ----------
  *
@@ -98,52 +100,6 @@ struct hv_host_ui_subclass {
  * is why the host dispatches text itself instead of leaving it to the parent's event
  * converter, and why heliosview_host_ui_set_ime_caret exists at all.
  */
-
-/* One UTF-16 code unit (or a buffered high surrogate) -> UTF-8. Returns the byte
- * count written, 0 when the unit was buffered as the high half of a pair. */
-static int hv_host_utf8_from_unit(wchar_t unit, wchar_t* pending_high, char* out) {
-    auto encode = [](uint32_t cp, char* dst) -> int {
-        if (cp < 0x80) {
-            dst[0] = static_cast<char>(cp);
-            return 1;
-        }
-        if (cp < 0x800) {
-            dst[0] = static_cast<char>(0xC0 | (cp >> 6));
-            dst[1] = static_cast<char>(0x80 | (cp & 0x3F));
-            return 2;
-        }
-        if (cp < 0x10000) {
-            dst[0] = static_cast<char>(0xE0 | (cp >> 12));
-            dst[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            dst[2] = static_cast<char>(0x80 | (cp & 0x3F));
-            return 3;
-        }
-        dst[0] = static_cast<char>(0xF0 | (cp >> 18));
-        dst[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        dst[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        dst[3] = static_cast<char>(0x80 | (cp & 0x3F));
-        return 4;
-    };
-
-    if (*pending_high != 0) {
-        const wchar_t high = *pending_high;
-        *pending_high = 0;
-        if (unit >= 0xDC00 && unit <= 0xDFFF) {
-            const uint32_t cp = 0x10000u + ((static_cast<uint32_t>(high) - 0xD800u) << 10)
-                                          + (static_cast<uint32_t>(unit) - 0xDC00u);
-            return encode(cp, out);
-        }
-        encode(0xFFFD, out); /* orphan high surrogate */
-        return 0;            /* caller falls through for the unit that arrived instead */
-    }
-    if (unit >= 0xD800 && unit <= 0xDBFF) {
-        *pending_high = unit;
-        return 0; /* wait for the low half */
-    }
-    if (unit >= 0xDC00 && unit <= 0xDFFF)
-        return encode(0xFFFD, out); /* lone low surrogate */
-    return encode(static_cast<uint32_t>(unit), out);
-}
 
 /* Modifier state for a key message: the keyboard state, plus the one modifier the
  * message itself carries -- bit 29 is the context bit, i.e. Alt was held (Ctrl and
@@ -155,74 +111,6 @@ static uint32_t hv_host_key_modifiers(LPARAM lp) {
         m |= HELIOSVIEW_MOD_ALT;
     }
     return m;
-}
-
-/* One committed character -> the focused widget.
- *
- * Two messages carry committed text and an IME may send either or both:
- *   - WM_CHAR, which TranslateMessage derives from a key press, and
- *   - WM_IME_CHAR, which an IME posts for the character it produced.
- * Nothing distinguishes "the same character through both channels" from "the user typed
- * the same character twice", so the channels are tracked separately: the first
- * channel to deliver a character arms the duplicate guard for the OTHER channel only,
- * which the next character (same or not) then clears. Typing "ll" therefore inserts two
- * characters, while a commit reported through both messages inserts one.
- */
-static bool hv_host_accepts_char(wchar_t unit) {
-    return unit >= 0x20 && unit != 0x7F;
-}
-
-static void hv_host_deliver_char(heliosview_host_t* host, wchar_t unit, int channel) {
-    static thread_local wchar_t pending_high = 0;
-    static thread_local wchar_t last_char[2] = {0, 0};
-
-    if (last_char[1 - channel] == unit) {
-        last_char[1 - channel] = 0; /* the other channel already delivered it */
-        return;
-    }
-    last_char[channel] = unit;
-    last_char[1 - channel] = 0;
-
-    char utf8[8] = {};
-    const int len = hv_host_utf8_from_unit(unit, &pending_high, utf8);
-    if (len > 0) {
-        utf8[len] = '\0';
-        heliosview_host_ui_dispatch_text(host, utf8);
-        return;
-    }
-    if (pending_high == 0 && unit >= 0xDC00 && unit <= 0xDFFF) {
-        /* lone low surrogate: report a replacement character */
-        heliosview_host_ui_dispatch_text(host, "\xEF\xBF\xBD");
-    }
-}
-
-/* Pin the IME composition window and candidate list to the caret: the app reports the
- * caret in host client coordinates. */
-static void hv_host_place_ime(HWND hwnd, int x, int y, int height) {
-    HIMC imc = ImmGetContext(hwnd);
-    if (!imc) return;
-
-    if (height <= 0) height = 18;
-    const int base = (y >= 0 && height > 0) ? y + height : 0;
-
-    COMPOSITIONFORM cf{};
-    cf.dwStyle = CFS_POINT;
-    cf.ptCurrentPos.x = x;
-    cf.ptCurrentPos.y = base;
-    ImmSetCompositionWindow(imc, &cf);
-
-    CANDIDATEFORM cand{};
-    cand.dwIndex = 0;
-    cand.dwStyle = CFS_EXCLUDE; /* the candidate list may sit over the caret column */
-    cand.ptCurrentPos.x = x;
-    cand.ptCurrentPos.y = base;
-    cand.rcArea.left = x;
-    cand.rcArea.top = 0;
-    cand.rcArea.right = x;
-    cand.rcArea.bottom = base;
-    ImmSetCandidateWindow(imc, &cand);
-
-    ImmReleaseContext(hwnd, imc);
 }
 
 constexpr UINT_PTR kUiSubclassId = 0x48565549; // "HVUI"
@@ -237,9 +125,18 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     if (!ui)
         return DefSubclassProc(hwnd, msg, wp, lp);
 
+    /* ---- input context handling (WM_CHAR, WM_IME_*, and key suppression during composition) ---- */
+    if (ui->input_context) {
+        LRESULT res = 0;
+        if (ui->input_context->handleMessage(hwnd, msg, wp, lp, &res)) {
+            return res;
+        }
+    }
+
     switch (msg) {
     case WM_ERASEBKGND:
         return 1; // Prevent background erasing to avoid flicker
+
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -348,43 +245,19 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
      *
      * A widget that does not consume a key is also asked to leave it alone: anything it
      * reports as handled is swallowed, everything else keeps its default behaviour. */
+    /* ---- keyboard ---- */
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        if (!ui->ime_composing) {
-            heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
-                                            hv_host_key_modifiers(lp), 1);
-        }
+        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                        hv_host_key_modifiers(lp), 1);
         return 0;
 
     case WM_KEYUP:
     case WM_SYSKEYUP:
-        if (!ui->ime_composing) {
-            heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
-                                            hv_host_key_modifiers(lp), 0);
-        }
+        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                        hv_host_key_modifiers(lp), 0);
         return 0;
 
-    /* ---- text input (this window is the focused one, see the note above) ---- */
-    case WM_CHAR: {
-        const wchar_t unit = static_cast<wchar_t>(wp);
-        if (!hv_host_accepts_char(unit))
-            return 0; /* backspace/tab/CR/LF/ESC are key events, not text */
-        hv_host_deliver_char(host, unit, 0);
-        return 0;
-    }
-
-    /* ---- IME: composition text and its window position ---- */
-
-    /* An IME associates itself with a window through this message: answering it is what
-     * keeps the IME locked to this window.
-     *
-     * ISC_SHOWUICOMPOSITIONWINDOW is cleared because the widget draws the pre-edit
-     * string itself, underlined, at the caret -- letting the IME draw its own
-     * composition window as well would show the pinyin twice.
-     *
-     * ISC_SHOWUICANDIDATEWINDOW is deliberately left alone: the candidate list is the
-     * IME's own UI, the user picks from it, and hiding it makes the IME look broken.
-     * Its position comes from heliosview_host_ui_set_ime_caret (ImmSetCandidateWindow). */
     case WM_IME_SETCONTEXT:
         ime_log("WM_IME_SETCONTEXT active=%d", (int)wp);
         if (wp) {
@@ -392,89 +265,6 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
 
-    case WM_IME_STARTCOMPOSITION:
-        ime_log("WM_IME_STARTCOMPOSITION");
-        ui->ime_caret_set = true;
-        ui->ime_composing = true; /* the IME now owns the keys until this ends */
-        return 0;
-
-    case WM_IME_COMPOSITION: {
-        ime_log("WM_IME_COMPOSITION flags=0x%04X", (unsigned)lp);
-
-        HIMC imc = ImmGetContext(hwnd);
-        if (!imc)
-            return 0;
-
-        /* The result string is the text the IME committed. It must be taken from the
-         * context BEFORE the composition ends, which is why it is read here rather than
-         * waiting for a WM_CHAR/WM_IME_CHAR that some IMEs do not send. */
-        bool committed = false;
-        if ((lp & GCS_RESULTSTR) != 0) {
-            const LONG bytes = ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
-            if (bytes > 0) {
-                std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                ImmGetCompositionStringW(imc, GCS_RESULTSTR, wide.data(), static_cast<DWORD>(bytes));
-                for (wchar_t unit : wide) {
-                    hv_host_deliver_char(host, unit, 1); /* surrogate pairs pair up inside */
-                }
-                committed = true;
-                /* The result is the end of this composition; keys go back to the widget
-                 * until the IME starts another one. */
-                ui->ime_composing = false;
-            }
-        }
-
-        /* The composition (pre-edit) string, previewed underlined. A message that
-         * committed text does not also preview: the widget already inserted the commit,
-         * and leaving the pre-edit behind would make the NEXT commit replace it. */
-        if (committed) {
-            /* Drop any preview still held from before this commit */
-            heliosview_host_ui_dispatch_composition(host, "");
-        } else if ((lp & GCS_COMPSTR) != 0) {
-            const LONG bytes = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
-            if (bytes >= 0) {
-                std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                if (bytes > 0)
-                    ImmGetCompositionStringW(imc, GCS_COMPSTR, wide.data(), static_cast<DWORD>(bytes));
-
-                std::string utf8;
-                utf8.reserve(wide.size() * 3 + 1);
-                for (size_t i = 0; i < wide.size(); ++i) {
-                    char buf[8] = {};
-                    wchar_t high = 0;
-                    int n = hv_host_utf8_from_unit(wide[i], &high, buf);
-                    if (n == 0 && high != 0 && i + 1 < wide.size()) {
-                        n = hv_host_utf8_from_unit(wide[++i], &high, buf);
-                    }
-                    if (n > 0) utf8.append(buf, static_cast<size_t>(n));
-                }
-                heliosview_host_ui_dispatch_composition(host, utf8.c_str());
-            }
-        }
-
-        ImmReleaseContext(hwnd, imc);
-        return 0;
-    }
-
-    case WM_IME_ENDCOMPOSITION:
-        ime_log("WM_IME_ENDCOMPOSITION");
-        /* Composition over: drop the preview. Any committed text was already taken from
-         * the context in WM_IME_COMPOSITION. */
-        heliosview_host_ui_dispatch_composition(host, "");
-        ui->ime_caret_set = false;
-        ui->ime_composing = false;
-        return 0;
-
-    case WM_IME_CHAR:
-        /* The character the IME produced. Some IMEs send this instead of WM_CHAR, so
-         * deliver it rather than passing it along (which would only loop back as
-         * WM_CHAR and land twice). */
-        ime_log("WM_IME_CHAR 0x%04X", (unsigned)wp);
-        /* The IME's own char message shares a channel with its result string: the two
-         * are the same character, so the second one is the duplicate */
-        if (hv_host_accepts_char(static_cast<wchar_t>(wp)))
-            hv_host_deliver_char(host, static_cast<wchar_t>(wp), 1);
-        return 0;
 
     default:
         break;
@@ -616,6 +406,7 @@ void DestroyUiSubclass(heliosview_host_t* host) {
         heliosview_canvas_destroy(ui->canvas);
         ui->canvas = nullptr;
     }
+    ui->input_context.reset();
 
     hv::hv_dealloc(ui);
     host->subclass_data = nullptr;
@@ -639,6 +430,7 @@ heliosview_host_t* heliosview_host_create_ui(
     }
     ui->canvas = heliosview_canvas_create(width > 0 ? width : 1, height > 0 ? height : 1, HELIOSVIEW_FORMAT_AUTO, engine);
     ui->presenter = heliosview_buffer_presenter_create_for_hwnd(host->hwnd);
+    ui->input_context = std::make_unique<hv::win32::Win32InputContext>(host, host->hwnd);
 
     host->subclass_data = ui;
     host->subclass_dtor = DestroyUiSubclass;
@@ -693,9 +485,19 @@ void heliosview_host_ui_set_mouse_callback(
 }
 
 void heliosview_host_ui_set_ime_caret(heliosview_host_t* host, int x, int y, int height) {
-    if (!host || !host->hwnd)
+    if (!host || !host->subclass_data)
         return;
-    hv_host_place_ime(host->hwnd, x, y, height);
+    auto* ui = static_cast<hv_host_ui_subclass*>(host->subclass_data);
+    if (ui && ui->input_context) {
+        ui->input_context->setFallbackCaret(x, y, height);
+    }
+}
+
+void* heliosview_host_ui_get_input_context(heliosview_host_t* host) {
+    if (!host || !host->subclass_data)
+        return nullptr;
+    auto* ui = static_cast<hv_host_ui_subclass*>(host->subclass_data);
+    return ui ? ui->input_context.get() : nullptr;
 }
 
 HWND hv_host_hwnd(heliosview_host_t* host) {
@@ -708,3 +510,4 @@ void hv_host_attach_subclass(heliosview_host_t* host, void* subclass_data, void 
     host->subclass_data = subclass_data;
     host->subclass_dtor = subclass_dtor;
 }
+

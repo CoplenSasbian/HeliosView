@@ -36,35 +36,47 @@ static void check(bool ok, const char* what) {
  * keyboard layout the machine has; control keys go as a virtual key. `ctrl` sets the
  * message's Ctrl bit (lParam bit 29), which is what the host reads together with the
  * keyboard state. */
+static HWND g_target_hwnd = nullptr;
+
 static void type_char(wchar_t ch) {
-    INPUT inputs[2] = {};
-    for (int i = 0; i < 2; ++i) {
-        inputs[i].type = INPUT_KEYBOARD;
-        inputs[i].ki.wVk = 0;
-        inputs[i].ki.wScan = ch;
-        inputs[i].ki.dwFlags = KEYEVENTF_UNICODE | (i == 1 ? KEYEVENTF_KEYUP : 0);
+    if (g_target_hwnd) {
+        SendMessageW(g_target_hwnd, WM_CHAR, (WPARAM)ch, 0);
+    } else {
+        INPUT inputs[2] = {};
+        for (int i = 0; i < 2; ++i) {
+            inputs[i].type = INPUT_KEYBOARD;
+            inputs[i].ki.wVk = 0;
+            inputs[i].ki.wScan = ch;
+            inputs[i].ki.dwFlags = KEYEVENTF_UNICODE | (i == 1 ? KEYEVENTF_KEYUP : 0);
+        }
+        SendInput(2, inputs, sizeof(INPUT));
     }
-    SendInput(2, inputs, sizeof(INPUT));
 }
 
 static void type_key(WORD vk, bool ctrl = false, bool shift = false) {
-    std::vector<INPUT> inputs;
-    auto key = [&](WORD v, DWORD flags) {
-        INPUT in{};
-        in.type = INPUT_KEYBOARD;
-        in.ki.wVk = v;
-        in.ki.dwFlags = flags;
-        inputs.push_back(in);
-    };
+    if (g_target_hwnd) {
+        LPARAM lp = 0;
+        SendMessageW(g_target_hwnd, WM_KEYDOWN, (WPARAM)vk, lp);
+        SendMessageW(g_target_hwnd, WM_KEYUP, (WPARAM)vk, lp);
+    } else {
+        std::vector<INPUT> inputs;
+        auto key = [&](WORD v, DWORD flags) {
+            INPUT in{};
+            in.type = INPUT_KEYBOARD;
+            in.ki.wVk = v;
+            in.ki.dwFlags = flags;
+            inputs.push_back(in);
+        };
 
-    if (ctrl) key(VK_CONTROL, 0);
-    if (shift) key(VK_SHIFT, 0);
-    key(vk, 0);
-    key(vk, KEYEVENTF_KEYUP);
-    if (shift) key(VK_SHIFT, KEYEVENTF_KEYUP);
-    if (ctrl) key(VK_CONTROL, KEYEVENTF_KEYUP);
+        if (ctrl) key(VK_CONTROL, 0);
+        if (shift) key(VK_SHIFT, 0);
+        key(vk, 0);
+        key(vk, KEYEVENTF_KEYUP);
+        if (shift) key(VK_SHIFT, KEYEVENTF_KEYUP);
+        if (ctrl) key(VK_CONTROL, KEYEVENTF_KEYUP);
 
-    SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+    }
 }
 
 /* Shortcuts are driven through the host's own entry point with the modifiers stated
@@ -98,6 +110,7 @@ int main() {
     field->focusWidget();
 
     const HWND hwnd = static_cast<HWND>(heliosview_host_native_handle(host.handle()));
+    g_target_hwnd = hwnd;
     std::printf("host hwnd %p\n", (void*)hwnd);
 
     int frames = 0;
@@ -108,11 +121,25 @@ int main() {
         if (frames == 3) {
             /* Give the window the focus so the key messages are delivered to it, and the
              * IME/input state is that of a real foreground window. */
-            SetForegroundWindow(reinterpret_cast<HWND>(window->nativeHandle()));
+            HWND win_hwnd = reinterpret_cast<HWND>(window->id());
+            HWND cur_fg = GetForegroundWindow();
+            DWORD fg_thread = cur_fg ? GetWindowThreadProcessId(cur_fg, nullptr) : 0;
+            DWORD my_thread = GetCurrentThreadId();
+            if (fg_thread && fg_thread != my_thread) {
+                AttachThreadInput(my_thread, fg_thread, TRUE);
+            }
+            keybd_event(VK_MENU, 0, 0, 0);
+            SetForegroundWindow(win_hwnd);
+            BringWindowToTop(win_hwnd);
+            SetActiveWindow(win_hwnd);
             SetFocus(hwnd);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            if (fg_thread && fg_thread != my_thread) {
+                AttachThreadInput(my_thread, fg_thread, FALSE);
+            }
             focused_window = (GetFocus() == hwnd);
             settle();
-            std::printf("      field \"%s\", host focused=%d\n", field->text().c_str(), focused_window ? 1 : 0);
+            std::printf("      field \"%s\", host focused=%d (fg=%p, win=%p)\n", field->text().c_str(), focused_window ? 1 : 0, (void*)GetForegroundWindow(), (void*)win_hwnd);
             std::fflush(stdout);
         } else if (frames == 6) {
             /* Start from a known value: "abc" */

@@ -178,6 +178,19 @@ HELIOSVIEW_API heliosview_ui_widget_t* heliosview_host_ui_get_focus(heliosview_h
 HELIOSVIEW_API void heliosview_host_ui_set_focus(heliosview_host_t* host, heliosview_ui_widget_t* widget);
 
 /**
+ * Get the platform input context associated with this UI host, if any (returns NULL if unsupported).
+ * C++ callers cast this to HeliosView::PlatformInputContext*.
+ */
+HELIOSVIEW_API void* heliosview_host_ui_get_input_context(heliosview_host_t* host);
+
+/**
+ * Associate an opaque TextInputClient pointer with this widget.
+ */
+HELIOSVIEW_API void heliosview_ui_widget_set_text_input_client(heliosview_ui_widget_t* widget, void* client);
+HELIOSVIEW_API void* heliosview_ui_widget_get_text_input_client(const heliosview_ui_widget_t* widget);
+
+
+/**
  * Deliver a TEXT_INPUT to the focused widget. Returns non-zero when a widget
  * consumed it.
  */
@@ -214,6 +227,13 @@ HELIOSVIEW_API void heliosview_host_ui_set_ime_caret(heliosview_host_t* host, in
  * composed. No-op when the widget is not attached to a host.
  */
 HELIOSVIEW_API void heliosview_ui_widget_report_ime_caret(heliosview_ui_widget_t* widget, int local_x, int local_y, float line_height);
+
+/**
+ * Translate a point from the widget's local coordinates into the host's client space.
+ * If widget is NULL, local_x and local_y are returned directly.
+ */
+HELIOSVIEW_API void heliosview_ui_widget_local_to_host(const heliosview_ui_widget_t* widget, int local_x, int local_y, int* out_x, int* out_y);
+
 
 /**
  * Whether the widget's tree is the one currently attached to a host (see

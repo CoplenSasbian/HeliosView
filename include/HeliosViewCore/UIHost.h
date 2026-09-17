@@ -51,6 +51,8 @@
 #include <HeliosView/heliosview_ui.h>
 #include <HeliosViewCore/System.h>
 #include <HeliosViewCore/Window.h>
+#include <HeliosViewCore/UI/PlatformInputContext.h>
+
 
 #include <cstdint>
 #include <memory>
@@ -206,6 +208,13 @@ public:
 	{
 		heliosview_host_ui_present(m_host);
 	}
+
+	// The platform input context associated with this UI host (if any)
+	HeliosView::PlatformInputContext* inputContext() const
+	{
+		return m_host != nullptr ? static_cast<HeliosView::PlatformInputContext*>(heliosview_host_ui_get_input_context(m_host)) : nullptr;
+	}
+
 
 	// Attach a widget tree as this host's root. The host keeps the shared_ptr alive
 	// until it is replaced, cleared, or the host is destroyed, so a tree built inline

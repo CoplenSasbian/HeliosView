@@ -75,12 +75,38 @@ int main() {
     other->focusWidget();
     check(heliosview_host_ui_get_focus(h) == other->handle(), "focus moves to the new tree");
     check(heliosview_host_ui_dispatch_text(h, "x") == 1, "the new field receives text");
-    check(other->text() == "x", "the new field's value changes");
+    // --- PlatformInputContext & TextInputClient abstraction verification ---
+    HeliosView::PlatformInputContext* ctx = host.inputContext();
+    check(ctx != nullptr, "host provides PlatformInputContext");
+    if (ctx) {
+        check(ctx->activeClient() == other->textInputClient(), "activeClient matches focused field");
+        check(other->textInputClient() != nullptr, "field exposes TextInputClient");
+
+        // Test caret box query in host space
+        helios::Rect r = other->caretHostRect();
+        check(r.height > 0, "caretHostRect returns valid height");
+
+        // Test deleteSurroundingText via client interface
+        other->textInputClient()->insertText("123");
+        check(other->text() == "x123", "client insertText succeeds");
+        other->textInputClient()->deleteSurroundingText(2, 0);
+        check(other->text() == "x1", "client deleteSurroundingText succeeds");
+
+        // Test composition preview & confirmation via client
+        other->textInputClient()->setComposition("test", 4);
+        check(other->text() == "x1", "client composition does not mutate value");
+        other->textInputClient()->confirmComposition();
+        check(other->text() == "x1test", "client confirmComposition commits text");
+    }
 
     host.clearRoot();
+    if (ctx) {
+        check(ctx->activeClient() == nullptr, "clearing root detaches active client");
+    }
     other.reset();
     field.reset();
     window.close();
+
     heliosview_host_t* hostHandle = h;
     (void)hostHandle;
 

@@ -36,8 +36,11 @@ class Widget;
 }
 
 #include <HeliosViewCore/Canvas.h>
+#include <HeliosViewCore/UI/TextInputClient.h>
+#include <HeliosViewCore/UI/PlatformInputContext.h>
 
 #include <algorithm>
+
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -162,6 +165,18 @@ public:
         heliosview_host_t* host = findHost();
         return host != nullptr && heliosview_host_ui_get_focus(host) == m_handle;
     }
+
+    virtual TextInputClient* textInputClient() { return nullptr; }
+
+    void localToHost(int local_x, int local_y, int* out_x, int* out_y) const {
+        if (m_handle) {
+            heliosview_ui_widget_local_to_host(m_handle, local_x, local_y, out_x, out_y);
+        } else {
+            if (out_x) *out_x = local_x;
+            if (out_y) *out_y = local_y;
+        }
+    }
+
 
 protected:
     heliosview_ui_widget_t* m_handle = nullptr;
@@ -835,8 +850,9 @@ inline size_t utf8Advance(std::string_view s, size_t from, size_t budget) {
  * Keys handled: Left/Right (with Shift to extend), Home/End, Backspace, Delete,
  * Ctrl+A/C/X/V, Return (fires onSubmit). Clicking places the caret; dragging selects.
  */
-class TextField : public Widget {
+class TextField : public Widget, public TextInputClient {
 public:
+
     static std::shared_ptr<TextField> create(int width = 320, int height = 34) {
         auto field = std::shared_ptr<TextField>(new TextField());
         field->setSize(width, height);
@@ -855,7 +871,8 @@ public:
         return this;
     }
 
-    const std::string& text() const noexcept { return m_text; }
+    const std::string& text() const noexcept override { return m_text; }
+
 
     TextField* setPlaceholder(std::string ph) {
         m_placeholder = std::move(ph);
@@ -1138,11 +1155,84 @@ public:
         return true;
     }
 
-protected:
-    // Protected rather than private: a field with different editing rules is a
-    // subclass (Widget's documented OOP path), and create() stays the usual way to
-    // make a plain one.
-    TextField() = default;
+    // ---- TextInputClient implementation ----
+
+    void insertText(std::string_view utf8) override {
+        onTextInput(utf8);
+    }
+
+    void setComposition(std::string_view utf8, int /*cursorInComp*/) override {
+        onComposition(utf8);
+    }
+
+    void confirmComposition() override {
+        if (!m_composition.empty()) {
+            const std::string comp = m_composition;
+            m_composition.clear();
+            insertText(comp);
+        }
+    }
+
+    void cancelComposition() override {
+        if (!m_composition.empty()) {
+            m_composition.clear();
+            reportCaretToIme();
+            requestRepaint();
+        }
+    }
+
+    void deleteSurroundingText(size_t beforeChars, size_t afterChars) override {
+        if (beforeChars > 0 && m_cursor > 0) {
+            size_t from = m_cursor;
+            for (size_t b = 0; b < beforeChars && from > 0; ++b) {
+                from = detail::utf8Prev(m_text, from);
+            }
+            m_text.erase(from, m_cursor - from);
+            m_cursor = from;
+            m_anchor = from;
+        }
+        if (afterChars > 0 && m_cursor < m_text.size()) {
+            size_t to = m_cursor;
+            for (size_t a = 0; a < afterChars && to < m_text.size(); ++a) {
+                to = detail::utf8Next(m_text, to);
+            }
+            m_text.erase(m_cursor, to - m_cursor);
+        }
+        notifyChanged();
+    }
+
+    HeliosView::UI::TextRange selection() const override {
+        return HeliosView::UI::TextRange{std::min(m_anchor, m_cursor), std::max(m_anchor, m_cursor)};
+    }
+
+    helios::Rect caretHostRect() const override {
+        int hx = 0, hy = 0;
+        const int localX = static_cast<int>(caretX() + 0.5f);
+        const int localY = 0;
+        localToHost(localX, localY, &hx, &hy);
+        const int h = m_lineHeight > 0.0f ? static_cast<int>(m_lineHeight + 0.5f) : static_cast<int>(m_font.size + 0.5f);
+        return helios::Rect{hx, hy, 2, h};
+    }
+
+    HeliosView::UI::TextInputType inputType() const override { return HeliosView::UI::TextInputType::Text; }
+
+    TextInputClient* textInputClient() override { return this; }
+
+
+public:
+    TextField() {
+        if (m_handle) {
+            heliosview_ui_widget_set_text_input_client(m_handle, static_cast<TextInputClient*>(this));
+        }
+    }
+
+    ~TextField() override {
+        if (m_handle) {
+            heliosview_ui_widget_set_text_input_client(m_handle, nullptr);
+        }
+    }
+
+
 
 private:
 
@@ -1269,11 +1359,19 @@ private:
     }
 
     void reportCaretToIme() {
+        if (heliosview_host_t* host = findHost()) {
+            void* raw_ctx = heliosview_host_ui_get_input_context(host);
+            if (raw_ctx) {
+                auto* ctx = static_cast<HeliosView::PlatformInputContext*>(raw_ctx);
+                ctx->updateCaretRect();
+            }
+        }
         // Keep the IME's composition window and candidate list next to the caret; the
         // C layer translates this local point into the host's client space.
         const int height = m_lineHeight > 0.0f ? (int)(m_lineHeight + 0.5f) : (int)(m_font.size + 0.5f);
         heliosview_ui_widget_report_ime_caret(m_handle, (int)(caretX() + 0.5f), 0, (float)height);
     }
+
 
     // Cache the metrics the mouse and IME paths need; called from onPaint where a
     // painter is live.

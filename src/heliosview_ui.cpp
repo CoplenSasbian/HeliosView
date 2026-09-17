@@ -1,6 +1,7 @@
 // HeliosView.dll -- Retained UI Component Engine (Core C ABI Implementation)
 
 #include <HeliosView/heliosview_ui.h>
+#include <HeliosViewCore/UI/PlatformInputContext.h>
 #include "heliosview_internal.h"
 
 #include <cstdio>
@@ -14,6 +15,7 @@
 struct heliosview_ui_widget {
     heliosview_ui_widget_desc_t desc{};
     void* user_data = nullptr;
+    void* text_input_client = nullptr;
 
     /* Keyboard input (set after creation so the widget descriptor stays ABI-stable).
      * A widget is focusable when any of these is set. */
@@ -121,11 +123,13 @@ struct heliosview_ui_widget {
 };
 
 struct HostUiBinding {
+    heliosview_host_t* host = nullptr;
     heliosview_ui_widget_t* root = nullptr;
     heliosview_ui_widget_t* hovered_widget = nullptr;
     heliosview_ui_widget_t* pressed_widget = nullptr;
     heliosview_ui_widget_t* focused_widget = nullptr;
 };
+
 
 static thread_local std::vector<std::pair<heliosview_host_t*, HostUiBinding*>> s_bindings;
 
@@ -166,9 +170,22 @@ static void set_focus(HostUiBinding* binding, heliosview_ui_widget_t* widget) {
     if (!binding || binding->focused_widget == widget) return;
     heliosview_ui_widget_t* previous = binding->focused_widget;
     binding->focused_widget = widget;
+
+    void* raw_ctx = heliosview_host_ui_get_input_context(binding->host);
+    if (raw_ctx) {
+        auto* ctx = static_cast<HeliosView::PlatformInputContext*>(raw_ctx);
+        auto* client = widget ? static_cast<HeliosView::UI::TextInputClient*>(widget->text_input_client) : nullptr;
+        if (client) {
+            ctx->attachClient(client);
+        } else {
+            ctx->detachClient();
+        }
+    }
+
     if (previous) previous->request_repaint();
     if (widget) widget->request_repaint();
 }
+
 
 // ================= Widget Core API =================
 
@@ -441,7 +458,9 @@ void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t
         } catch (const std::bad_alloc&) {
             return;
         }
+        binding->host = host;
         s_bindings.push_back({host, binding});
+
         heliosview_host_ui_set_paint_callback(host, HostPaintCallback, binding);
         heliosview_host_ui_set_mouse_callback(host, HostMouseCallback, binding);
     }
@@ -460,10 +479,11 @@ void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t
             }
         }
         binding->root = nullptr;
-        binding->focused_widget = nullptr;
+        set_focus(binding, nullptr);
         binding->hovered_widget = nullptr;
         binding->pressed_widget = nullptr;
         return;
+
     }
 
     binding->root = root_widget;
@@ -523,6 +543,16 @@ void heliosview_ui_widget_set_composition_callback(heliosview_ui_widget_t* widge
 int heliosview_ui_widget_is_focusable(const heliosview_ui_widget_t* widget) {
     return (widget && widget->focusable()) ? 1 : 0;
 }
+
+void heliosview_ui_widget_set_text_input_client(heliosview_ui_widget_t* widget, void* client) {
+    if (!widget) return;
+    widget->text_input_client = client;
+}
+
+void* heliosview_ui_widget_get_text_input_client(const heliosview_ui_widget_t* widget) {
+    return widget ? widget->text_input_client : nullptr;
+}
+
 
 heliosview_ui_widget_t* heliosview_host_ui_get_focus(heliosview_host_t* host) {
     HostUiBinding* binding = find_binding(host);
@@ -595,6 +625,15 @@ void heliosview_ui_widget_report_ime_caret(heliosview_ui_widget_t* widget, int l
     int hx = 0, hy = 0;
     widget->local_to_host(local_x, local_y, &hx, &hy);
     heliosview_host_ui_set_ime_caret(host, hx, hy, static_cast<int>(line_height + 0.5f));
+}
+
+void heliosview_ui_widget_local_to_host(const heliosview_ui_widget_t* widget, int local_x, int local_y, int* out_x, int* out_y) {
+    if (!widget) {
+        if (out_x) *out_x = local_x;
+        if (out_y) *out_y = local_y;
+        return;
+    }
+    widget->local_to_host(local_x, local_y, out_x, out_y);
 }
 
 int heliosview_ui_widget_is_attached(const heliosview_ui_widget_t* widget) {
