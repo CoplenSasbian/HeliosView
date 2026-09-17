@@ -1115,22 +1115,16 @@ public:
     bool onTextInput(std::string_view utf8) override {
         if (utf8.empty()) return true;
 
-        /* Trace when HELIOSVIEW_UI_LOG=1: the value's byte count before and after, and
-         * where the caret sits, is what shows a byte-level edit problem. */
         trace("onTextInput", utf8);
 
-        std::string incoming(utf8);
-        // An IME commit replaces the composition string it was previewing
-        if (!m_composition.empty()) {
-            m_text.replace(m_cursor, m_composition.size(), incoming);
-            m_cursor += incoming.size();
-            m_composition.clear();
-            m_anchor = m_cursor;
-            notifyChanged();
-            trace("onTextInput/after", {});
-            return true;
-        }
-        insertText(incoming);
+        /* The composition (pre-edit) string is a PREVIEW: onComposition only draws it at
+         * the caret and it is never part of m_text. A commit therefore must not "replace"
+         * it -- doing so erases that many bytes of the real value, which is how text got
+         * shorter on every IME commit and how erasing a fixed byte count out of a
+         * multi-byte character produced broken sequences. Drop the preview and insert. */
+        m_composition.clear();
+        insertText(std::string(utf8));
+
         trace("onTextInput/after", {});
         return true;
     }

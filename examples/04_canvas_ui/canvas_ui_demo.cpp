@@ -1361,6 +1361,10 @@ static std::shared_ptr<Widget> CreateTabInput() {
     titleL->setFontSize(16.0f)->setColor(0xFF8AADF4);
     leftStack->add(titleL);
 
+    auto buildMark = Label::create(std::format("build {} {}", __DATE__, __TIME__));
+    buildMark->setFontSize(11.0f)->setColor(0xFF6E738D);
+    leftStack->add(buildMark);
+
     auto hint = Label::create("中文输入：把输入法切到拼音，点进输入框直接打；候选窗会跟着光标走。");
     hint->setFontSize(12.0f)->setColor(0xFFA6ADC8);
     leftStack->add(hint);
@@ -1467,6 +1471,12 @@ int main() {
     // The application object owns the message loop (helios::App::exec); frames are
     // driven by App::frameCallback, native events by the Window's signals.
     helios::App app;
+
+    /* Build signature: printed on the console and shown in the Input tab. When a fix
+     * seems to have no effect, this is how to tell whether the running binary is the one
+     * that was just built. Flushed immediately so it also shows up when the output is
+     * redirected to a file. */
+    std::cout << "[build] " << __DATE__ << " " << __TIME__ << std::endl;
 
     helios::Window win(1020, 800, "HeliosView 2D DirectDraw & Retained UI Suite",
                        helios::WindowStyle::Normal);

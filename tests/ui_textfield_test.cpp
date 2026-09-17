@@ -119,7 +119,37 @@ int main() {
             check(field->text() == "first", "a CRLF paste keeps only the first line, no stray CR");
             check(field->text().find('\r') == std::string::npos, "no carriage return in the value");
         } else if (frames == 21) {
-            /* --- many alternating insertions: the growing-then-shrinking case --- */
+            /* --- THE pre-edit bug, with the caret in the MIDDLE ---
+             * The pre-edit string lives only in the widget's composition preview, never
+             * in m_text. Treating the commit as a replacement of the pre-edit erased that
+             * many bytes of the real value -- text after the caret was eaten, which is
+             * why the loss showed up when editing mid-string and why erasing a fixed byte
+             * count out of a multi-byte character broke the sequence. */
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_A, HELIOSVIEW_MOD_CTRL, 1);
+            heliosview_host_ui_dispatch_text(host.handle(), "abcd");
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_LEFT, 0, 1);
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_LEFT, 0, 1); /* caret after 'b' */
+            show("abcd, caret mid", field->text());
+
+            heliosview_host_ui_dispatch_composition(host.handle(), "zhong"); /* pre-edit */
+            heliosview_host_ui_dispatch_text(host.handle(), "\xE4\xB8\xAD"); /* commit 中 */
+            show("commit during pre-edit", field->text());
+            check(field->text() == "ab" "\xE4\xB8\xAD" "cd", "a commit while composing does not eat the text after the caret");
+            check(valid_utf8(field->text()), "value stays well-formed UTF-8");
+        } else if (frames == 24) {
+            /* The same with multi-byte text after the caret: a byte-count "replacement"
+             * here splits a character instead of removing whole ones. */
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_A, HELIOSVIEW_MOD_CTRL, 1);
+            heliosview_host_ui_dispatch_text(host.handle(), "\xE4\xB8\xAD\xE6\x96\x87" "xy"); /* 中文xy */
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_HOME, 0, 1); /* caret at the start */
+            heliosview_host_ui_dispatch_composition(host.handle(), "nihao");
+            heliosview_host_ui_dispatch_text(host.handle(), "\xE6\x96\x87"); /* commit 文 */
+            show("commit at start of CJK", field->text());
+            check(field->text() == "\xE6\x96\x87" "\xE4\xB8\xAD\xE6\x96\x87" "xy",
+                  "committing at the start of CJK text keeps it intact");
+            check(valid_utf8(field->text()), "value stays well-formed UTF-8");
+        } else if (frames == 27) {
+            /* --- many alternating insertions --- */
             heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_HOME, 0, 1);
             for (int i = 0; i < 6; ++i) {
                 heliosview_host_ui_dispatch_text(host.handle(), "\xE4\xB8\xAD"); /* 中 */
@@ -127,7 +157,7 @@ int main() {
             }
             show("interleaved inserts", field->text());
             check(valid_utf8(field->text()), "value stays well-formed UTF-8 after interleaving");
-        } else if (frames == 24) {
+        } else if (frames == 30) {
             window->close();
         }
         host.requestRepaint();
