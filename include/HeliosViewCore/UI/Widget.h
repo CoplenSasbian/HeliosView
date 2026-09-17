@@ -1073,9 +1073,12 @@ public:
             if (ctrl) {
                 std::string pasted;
                 if (helios::clipboardGetText(pasted) && !pasted.empty()) {
-                    // A single-line field takes the first line of a multi-line paste
+                    // A single-line field takes the first line of a multi-line paste.
+                    // Truncate AT the break rather than removing it: removing only the
+                    // '\n' of a CRLF pair would leave a bare '\r' in the value, which
+                    // renders as a stray control character.
                     if (const size_t nl = pasted.find_first_of("\r\n"); nl != std::string::npos)
-                        pasted.erase(nl);
+                        pasted.resize(nl);
                     insertText(pasted);
                 }
                 return true;

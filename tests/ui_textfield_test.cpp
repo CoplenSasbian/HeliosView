@@ -111,6 +111,14 @@ int main() {
             show("replace selection", field->text());
             check(field->text() == kCjk, "typing over a selection replaces it");
         } else if (frames == 18) {
+            /* --- a multi-line paste into a single-line field --- */
+            helios::clipboardSetText("first\r\nsecond");
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_A, HELIOSVIEW_MOD_CTRL, 1);
+            heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_V, HELIOSVIEW_MOD_CTRL, 1);
+            show("paste CRLF text", field->text());
+            check(field->text() == "first", "a CRLF paste keeps only the first line, no stray CR");
+            check(field->text().find('\r') == std::string::npos, "no carriage return in the value");
+        } else if (frames == 21) {
             /* --- many alternating insertions: the growing-then-shrinking case --- */
             heliosview_host_ui_dispatch_key(host.handle(), HELIOSVIEW_KEY_HOME, 0, 1);
             for (int i = 0; i < 6; ++i) {
@@ -119,7 +127,7 @@ int main() {
             }
             show("interleaved inserts", field->text());
             check(valid_utf8(field->text()), "value stays well-formed UTF-8 after interleaving");
-        } else if (frames == 21) {
+        } else if (frames == 24) {
             window->close();
         }
         host.requestRepaint();
