@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /**
  * HeliosView.Core -- Window: unified top-level window.
@@ -393,6 +393,11 @@ public:
         heliosview_webview_is_low_footprint(m_webview, &on);
         return on != 0;
     }
+
+    // Backwards-compatibility aliases for low-footprint mode
+    int webviewSuspend() { return setLowFootprint(true); }
+    int webviewResume() { return setLowFootprint(false); }
+    bool webviewIsSuspended() const { return isLowFootprint(); }
 
     int webviewSetBackgroundColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
