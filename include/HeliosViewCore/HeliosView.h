@@ -64,6 +64,7 @@
 #include <HeliosViewCore/WebViewJson.h>
 #include <HeliosViewCore/WebViewWindow.h>
 #include <HeliosViewCore/Window.h>
+#include <HeliosViewCore/UIHost.h>
 
 #include <string>
 

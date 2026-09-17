@@ -167,9 +167,15 @@ protected:
     bool m_isBorrowed = false;
     std::vector<std::shared_ptr<Widget>> m_children;
 
-    // Set by UIHost when this widget becomes its root, and inherited by descendants.
-    // The C layer owns the real parent chain; this is only what the C++ helpers need
-    // to reach the host and its focus.
+    heliosview_host_t* findHost() const { return m_host; }
+
+private:
+    heliosview_host_t* m_host = nullptr;
+
+public:
+    /* Framework plumbing, not application API: UIHost calls these when the tree becomes
+     * its root (or leaves it), so the tree knows which host its focus and IME caret
+     * reports belong to. An application attaches a tree with UIHost::setRootWidget(). */
     void attachHost(heliosview_host_t* host) {
         m_host = host;
         for (auto& child : m_children) {
@@ -183,13 +189,6 @@ protected:
             if (child) child->detachHost();
         }
     }
-
-    heliosview_host_t* findHost() const { return m_host; }
-
-    friend class helios::UIHost;
-
-private:
-    heliosview_host_t* m_host = nullptr;
 
 private:
     static void StaticPaint(heliosview_ui_widget_t*, heliosview_painter_t* p, void* udata) {
@@ -1087,8 +1086,9 @@ public:
         default:
             return true; /* a key with no meaning here is still consumed: it is a text field */
         }
-    }
 
+        return true; /* unreachable: every case above returns, but keeps the compiler quiet */
+    }
     // ---- text / IME ----
 
     bool onTextInput(std::string_view utf8) override {

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /**
  * HeliosView.Core -- Window: unified top-level window.
@@ -17,11 +17,6 @@
 #include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
 
-/* UIHost (the widget-tree child viewport) is defined in terms of the complete
- * Window above, so its header is pulled in at the end of this one -- see the
- * bottom of the file. */
-#include <HeliosViewCore/UIHost.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -32,7 +27,11 @@
 
 namespace helios {
 
-class UIHost; /* Child viewport host (defined in UIHost.h, included at the bottom) */
+/* The child viewport host that carries a widget tree. It is defined in
+ * <HeliosViewCore/UIHost.h>, which includes this header first because a UIHost is
+ * created against a complete Window; a translation unit that needs both includes
+ * Window.h, then UIHost.h (the demo headers do exactly that). */
+class UIHost;
 
 /* Web engine version used by the WebView backend (UTF-8, e.g. "131.0.2903.86"). */
 inline std::string webViewEngineVersion()
@@ -296,33 +295,26 @@ public:
 
     /* =========================================================================
      * Child Viewport Host Management (UIHost & WebViewHost)
+     *
+     * The three UIHost methods are declared here and defined in
+     * <HeliosViewCore/UIHost.h>: creating one needs a complete UIHost, which this
+     * header only forward-declares. A caller that uses them includes UIHost.h
+     * (directly, or through HeliosViewCore/HeliosView.h or UI/Widget.h).
      * ========================================================================= */
 
     // A widget-tree viewport (helios::UIHost) of width x height at (x, y) inside
     // this window's client area, attached to the window: close() destroys it with
     // the window, and the returned UIHost is a borrowed handle, not the owner.
     UIHost createUIHost(int x, int y, int width, int height,
-                        heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D)
-    {
-        heliosview_host_t* raw = ownHost(heliosview_host_create_ui(m_window, x, y, width, height, engine));
-        if (raw) m_uiHosts.push_back(raw);
-        return UIHost(raw);
-    }
+                        heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D);
 
     // Same, for an embedded web viewport. Get the WebView itself with
     // heliosview_host_get_webview(host.handle()).
-    UIHost createWebViewHost(int x, int y, int width, int height)
-    {
-        return UIHost(ownHost(heliosview_host_create_webview(m_window, x, y, width, height)));
-    }
+    UIHost createWebViewHost(int x, int y, int width, int height);
 
     // Destroy a host created by one of the factories above and detach it from the
     // window. The caller's UIHost becomes an empty object.
-    void destroyHost(UIHost& host)
-    {
-        detachHost(host.handle());
-        host.close();
-    }
+    void destroyHost(UIHost& host);
 
     // Register a C host this window now destroys on close(). Returns the host so a
     // caller can wrap it in one expression: UIHost(ownHost(heliosview_host_create_ui(...))).
@@ -331,6 +323,9 @@ public:
         if (host) m_hosts.push_back(host);
         return host;
     }
+
+    // The UI hosts this window carries, for key-event routing (used by event())
+    const std::vector<heliosview_host_t*>& uiHosts() const { return m_uiHosts; }
 
     /* =========================================================================
      * Embedded WebView Management & RPC Bridge
@@ -863,25 +858,3 @@ inline int App::loopCallback(void* userdata)
 }
 
 } // namespace helios
-
-/* ---------- UIHost factories (need the complete Window above) ---------- */
-
-inline helios::UIHost helios::UIHost::create(Window& window, int x, int y, int width, int height,
-                                             uint32_t engine)
-{
-    return UIHost(window.ownHost(heliosview_host_create_ui(
-        window.handle(), x, y, width, height, static_cast<heliosview_canvas_engine_t>(engine))));
-}
-
-inline helios::UIHost helios::UIHost::createDetached(Window& window, int x, int y, int width, int height,
-                                                     uint32_t engine)
-{
-    return UIHost(heliosview_host_create_ui(window.handle(), x, y, width, height,
-                                            static_cast<heliosview_canvas_engine_t>(engine)),
-                  Owner::UiHost);
-}
-
-inline helios::UIHost helios::UIHost::createWebView(Window& window, int x, int y, int width, int height)
-{
-    return UIHost(heliosview_host_create_webview(window.handle(), x, y, width, height), Owner::UiHost);
-}

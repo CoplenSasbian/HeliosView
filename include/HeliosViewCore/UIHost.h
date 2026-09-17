@@ -277,3 +277,46 @@ private:
 };
 
 } // namespace helios
+
+/* ---------- UIHost factories (need the complete UIHost above) ---------- */
+
+inline helios::UIHost helios::UIHost::create(Window& window, int x, int y, int width, int height,
+                                             uint32_t engine)
+{
+	return UIHost(window.ownHost(heliosview_host_create_ui(
+		window.handle(), x, y, width, height, static_cast<heliosview_canvas_engine_t>(engine))));
+}
+
+inline helios::UIHost helios::UIHost::createDetached(Window& window, int x, int y, int width, int height,
+                                                     uint32_t engine)
+{
+	return UIHost(heliosview_host_create_ui(window.handle(), x, y, width, height,
+											static_cast<heliosview_canvas_engine_t>(engine)),
+				  Owner::UiHost);
+}
+
+inline helios::UIHost helios::UIHost::createWebView(Window& window, int x, int y, int width, int height)
+{
+	return UIHost(heliosview_host_create_webview(window.handle(), x, y, width, height), Owner::UiHost);
+}
+
+/* ---------- Window's UIHost methods (declared in Window.h) ---------- */
+
+inline helios::UIHost helios::Window::createUIHost(int x, int y, int width, int height,
+												   heliosview_canvas_engine_t engine)
+{
+	heliosview_host_t* raw = ownHost(heliosview_host_create_ui(handle(), x, y, width, height, engine));
+	if (raw) m_uiHosts.push_back(raw);
+	return UIHost(raw);
+}
+
+inline helios::UIHost helios::Window::createWebViewHost(int x, int y, int width, int height)
+{
+	return UIHost(ownHost(heliosview_host_create_webview(handle(), x, y, width, height)));
+}
+
+inline void helios::Window::destroyHost(UIHost& host)
+{
+	detachHost(host.handle());
+	host.close();
+}
