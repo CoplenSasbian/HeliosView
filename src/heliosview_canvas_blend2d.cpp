@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -153,29 +154,173 @@ struct CachedFace {
     std::vector<uint8_t> data;
 };
 
+#if defined(_WIN32)
+static std::wstring utf8_to_wide(const std::string& str)
+{
+    if (str.empty()) return L"";
+    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
+    if (size <= 0) return L"";
+    std::wstring wide(size, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), &wide[0], size);
+    return wide;
+}
+
+static std::string find_windows_font_file(const std::string& family, uint32_t flags)
+{
+    auto iequals = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (tolower(static_cast<unsigned char>(a[i])) != tolower(static_cast<unsigned char>(b[i])))
+                return false;
+        }
+        return true;
+    };
+
+    const bool bold = (flags & HELIOSVIEW_FONT_BOLD) != 0;
+    const bool italic = (flags & HELIOSVIEW_FONT_ITALIC) != 0;
+
+    if (iequals(family, "Segoe UI")) {
+        if (bold && italic) return "C:\\Windows\\Fonts\\segoeuiz.ttf";
+        if (bold) return "C:\\Windows\\Fonts\\segoeuib.ttf";
+        if (italic) return "C:\\Windows\\Fonts\\segoeuii.ttf";
+        return "C:\\Windows\\Fonts\\segoeui.ttf";
+    }
+    if (iequals(family, "Microsoft YaHei") || iequals(family, "Microsoft YaHei UI") ||
+        family == "\xe5\xbe\xae\xe8\xbd\xaf\xe9\x9b\x85\xe9\xbb\x91" /* 微软雅黑 */) {
+        return bold ? "C:\\Windows\\Fonts\\msyhbd.ttc" : "C:\\Windows\\Fonts\\msyh.ttc";
+    }
+    if (iequals(family, "SimSun") || iequals(family, "NSimSun") ||
+        family == "\xe5\xae\x8b\xe4\xbd\x93" /* 宋体 */ || family == "\xe6\x96\xb0\xe5\xae\x8b\xe4\xbd\x93" /* 新宋体 */) {
+        return "C:\\Windows\\Fonts\\simsun.ttc";
+    }
+    if (iequals(family, "SimHei") || family == "\xe9\xbb\x91\xe4\xbd\x93" /* 黑体 */) {
+        return "C:\\Windows\\Fonts\\simhei.ttf";
+    }
+    if (iequals(family, "KaiTi") || family == "\xe6\xa5\xb7\xe4\xbd\x93" /* 楷体 */) {
+        return "C:\\Windows\\Fonts\\simkai.ttf";
+    }
+    if (iequals(family, "FangSong") || family == "\xe4\xbb\xbf\xe5\xae\x8b" /* 仿宋 */) {
+        return "C:\\Windows\\Fonts\\simfang.ttf";
+    }
+    if (iequals(family, "Arial")) {
+        if (bold && italic) return "C:\\Windows\\Fonts\\arialbi.ttf";
+        if (bold) return "C:\\Windows\\Fonts\\arialbd.ttf";
+        if (italic) return "C:\\Windows\\Fonts\\ariali.ttf";
+        return "C:\\Windows\\Fonts\\arial.ttf";
+    }
+    if (iequals(family, "Calibri")) {
+        if (bold) return "C:\\Windows\\Fonts\\calibrib.ttf";
+        if (italic) return "C:\\Windows\\Fonts\\calibrii.ttf";
+        return "C:\\Windows\\Fonts\\calibri.ttf";
+    }
+    if (iequals(family, "Consolas")) {
+        if (bold) return "C:\\Windows\\Fonts\\consolab.ttf";
+        return "C:\\Windows\\Fonts\\consola.ttf";
+    }
+    if (iequals(family, "Tahoma")) {
+        if (bold) return "C:\\Windows\\Fonts\\tahomabd.ttf";
+        return "C:\\Windows\\Fonts\\tahoma.ttf";
+    }
+
+    static std::mutex s_reg_mutex;
+    static std::unordered_map<std::string, std::string> s_reg_fonts;
+    static bool s_reg_scanned = false;
+
+    std::lock_guard<std::mutex> lock(s_reg_mutex);
+    if (!s_reg_scanned) {
+        s_reg_scanned = true;
+        HKEY hkey = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+                          0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+            WCHAR val_name[512];
+            BYTE val_data[1024];
+            DWORD idx = 0;
+            DWORD name_len = 512;
+            DWORD data_len = 1024;
+            DWORD type = 0;
+            while (RegEnumValueW(hkey, idx++, val_name, &name_len, nullptr, &type, val_data, &data_len) == ERROR_SUCCESS) {
+                if (type == REG_SZ && data_len > 0) {
+                    int n_u8 = WideCharToMultiByte(CP_UTF8, 0, val_name, name_len, nullptr, 0, nullptr, nullptr);
+                    std::string key_u8(n_u8, 0);
+                    WideCharToMultiByte(CP_UTF8, 0, val_name, name_len, &key_u8[0], n_u8, nullptr, nullptr);
+                    for (auto& c : key_u8) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+                    const auto* wdata = reinterpret_cast<const WCHAR*>(val_data);
+                    int d_u8 = WideCharToMultiByte(CP_UTF8, 0, wdata, -1, nullptr, 0, nullptr, nullptr);
+                    std::string file_u8(d_u8 > 1 ? d_u8 - 1 : 0, 0);
+                    if (d_u8 > 1) {
+                        WideCharToMultiByte(CP_UTF8, 0, wdata, -1, &file_u8[0], d_u8, nullptr, nullptr);
+                    }
+                    if (!file_u8.empty()) {
+                        if (file_u8.find(":\\") == std::string::npos && file_u8.find(":/") == std::string::npos) {
+                            file_u8 = "C:\\Windows\\Fonts\\" + file_u8;
+                        }
+                        s_reg_fonts[key_u8] = file_u8;
+                    }
+                }
+                name_len = 512;
+                data_len = 1024;
+            }
+            RegCloseKey(hkey);
+        }
+    }
+
+    std::string lower_target = family;
+    for (auto& c : lower_target) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    for (const auto& [reg_name, path] : s_reg_fonts) {
+        if (reg_name.find(lower_target) != std::string::npos) {
+            return path;
+        }
+    }
+    return "";
+}
+#endif
+
 static BLFont get_system_font(const char* family, float size, uint32_t flags)
 {
+    static std::mutex s_font_cache_mutex;
     static std::unordered_map<std::string, std::shared_ptr<CachedFace>> s_font_cache;
     const std::string name = (family && *family) ? family : "Segoe UI";
     const std::string key = name + "#" + std::to_string(flags);
 
-    auto it = s_font_cache.find(key);
-    if (it != s_font_cache.end()) {
-        BLFont font;
-        font.create_from_face(it->second->face, size > 0.0f ? size : 12.0f);
-        return font;
+    {
+        std::lock_guard<std::mutex> lock(s_font_cache_mutex);
+        auto it = s_font_cache.find(key);
+        if (it != s_font_cache.end()) {
+            BLFont font;
+            font.create_from_face(it->second->face, size > 0.0f ? size : 12.0f);
+            return font;
+        }
     }
 
 #if defined(_WIN32)
+    const std::string file_path = find_windows_font_file(name, flags);
+    if (!file_path.empty()) {
+        BLFontFace face;
+        if (face.create_from_file(file_path.c_str()) == BL_SUCCESS) {
+            auto cached = std::make_shared<CachedFace>();
+            cached->face = face;
+            {
+                std::lock_guard<std::mutex> lock(s_font_cache_mutex);
+                s_font_cache[key] = cached;
+            }
+            BLFont font;
+            font.create_from_face(face, size > 0.0f ? size : 12.0f);
+            return font;
+        }
+    }
+
+    // Try GDI font data query
+    const std::wstring wide_name = utf8_to_wide(name);
     HDC hdc = CreateCompatibleDC(nullptr);
-    HFONT hfont = CreateFontA(
+    HFONT hfont = CreateFontW(
         -static_cast<int>(size > 0.0f ? size : 12.0f), 0, 0, 0,
         (flags & HELIOSVIEW_FONT_BOLD) ? FW_BOLD : FW_NORMAL,
         (flags & HELIOSVIEW_FONT_ITALIC) ? TRUE : FALSE,
         (flags & HELIOSVIEW_FONT_UNDERLINE) ? TRUE : FALSE,
         0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        name.c_str()
+        wide_name.c_str()
     );
 
     BLFont font;
@@ -189,7 +334,10 @@ static BLFont get_system_font(const char* family, float size, uint32_t flags)
             BLFontData font_data;
             if (font_data.create_from_data(cached->data.data(), cached->data.size()) == BL_SUCCESS) {
                 if (cached->face.create_from_data(font_data, 0) == BL_SUCCESS) {
-                    s_font_cache[key] = cached;
+                    {
+                        std::lock_guard<std::mutex> lock(s_font_cache_mutex);
+                        s_font_cache[key] = cached;
+                    }
                     font.create_from_face(cached->face, size > 0.0f ? size : 12.0f);
                 }
             }
@@ -206,13 +354,17 @@ static BLFont get_system_font(const char* family, float size, uint32_t flags)
     static const char* kFallbackPaths[] = {
 #if defined(_WIN32)
         "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\msyh.ttc",
         "C:\\Windows\\Fonts\\arial.ttf",
         "C:\\Windows\\Fonts\\tahoma.ttf",
 #elif defined(__APPLE__)
         "/System/Library/Fonts/SFCompact.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/Helvetica.ttc",
         "/Library/Fonts/Arial.ttf",
 #else
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -233,6 +385,157 @@ static BLFont get_system_font(const char* family, float size, uint32_t flags)
 
     return BLFont();
 }
+
+static BLFont get_cjk_fallback_font(float size, uint32_t flags)
+{
+    static std::mutex s_cjk_mutex;
+    static std::shared_ptr<CachedFace> s_cjk_face;
+    static std::shared_ptr<CachedFace> s_cjk_face_bold;
+
+    const bool bold = (flags & HELIOSVIEW_FONT_BOLD) != 0;
+    std::shared_ptr<CachedFace>& target_face = bold ? s_cjk_face_bold : s_cjk_face;
+
+    {
+        std::lock_guard<std::mutex> lock(s_cjk_mutex);
+        if (target_face && target_face->face.is_valid()) {
+            BLFont font;
+            font.create_from_face(target_face->face, size > 0.0f ? size : 12.0f);
+            return font;
+        }
+    }
+
+    static const char* kCjkFontPaths[] = {
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        "C:\\Windows\\Fonts\\msjh.ttc",
+        "C:\\Windows\\Fonts\\YuGothM.ttc",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "C:\\Windows\\Fonts\\malgun.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/Songti.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+#else
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+#endif
+    };
+
+    std::lock_guard<std::mutex> lock(s_cjk_mutex);
+    if (!target_face) {
+        target_face = std::make_shared<CachedFace>();
+        size_t start_idx = (bold ? 0 : 1);
+        for (size_t i = start_idx; i < sizeof(kCjkFontPaths) / sizeof(kCjkFontPaths[0]); ++i) {
+            if (target_face->face.create_from_file(kCjkFontPaths[i]) == BL_SUCCESS) {
+                break;
+            }
+        }
+        if (!target_face->face.is_valid()) {
+            target_face->face.create_from_file(kCjkFontPaths[0]);
+        }
+    }
+
+    if (target_face && target_face->face.is_valid()) {
+        BLFont font;
+        font.create_from_face(target_face->face, size > 0.0f ? size : 12.0f);
+        return font;
+    }
+    return BLFont();
+}
+
+struct TextRun {
+    BLFont font;
+    std::unique_ptr<BLGlyphBuffer> gb;
+    float advance_x = 0.0f;
+};
+
+struct TextLayoutResult {
+    std::vector<TextRun> runs;
+    float total_width = 0.0f;
+    float ascent = 0.0f;
+    float descent = 0.0f;
+    float line_height = 0.0f;
+};
+
+static TextLayoutResult layout_text(const char* utf8, const BLFont& primary_font, float size, uint32_t flags)
+{
+    TextLayoutResult result{};
+    if (!utf8 || !*utf8 || !primary_font.is_valid())
+        return result;
+
+    BLFontMetrics primary_fm = primary_font.metrics();
+    result.ascent = primary_fm.ascent;
+    result.descent = primary_fm.descent;
+    result.line_height = primary_fm.ascent + primary_fm.descent + primary_fm.line_gap;
+
+    auto initial_gb = std::make_unique<BLGlyphBuffer>();
+    initial_gb->set_text(utf8, std::strlen(utf8), BL_TEXT_ENCODING_UTF8);
+    const size_t char_count = initial_gb->size();
+    if (char_count == 0)
+        return result;
+
+    std::vector<uint32_t> ucs4(char_count);
+    std::memcpy(ucs4.data(), initial_gb->content(), char_count * sizeof(uint32_t));
+
+    BLGlyphMappingState state;
+    primary_font.map_text_to_glyphs(*initial_gb, state);
+
+    BLFont fallback_font;
+    if (state.undefined_count > 0) {
+        fallback_font = get_cjk_fallback_font(size, flags);
+        if (fallback_font.is_valid()) {
+            BLFontMetrics fb_fm = fallback_font.metrics();
+            if (fb_fm.ascent > result.ascent) result.ascent = fb_fm.ascent;
+            if (fb_fm.descent > result.descent) result.descent = fb_fm.descent;
+            const float fb_lh = fb_fm.ascent + fb_fm.descent + fb_fm.line_gap;
+            if (fb_lh > result.line_height) result.line_height = fb_lh;
+        }
+    }
+
+    if (state.undefined_count == 0 || !fallback_font.is_valid()) {
+        primary_font.position_glyphs(*initial_gb);
+        BLTextMetrics tm;
+        primary_font.get_text_metrics(*initial_gb, tm);
+        TextRun run;
+        run.font = primary_font;
+        run.advance_x = static_cast<float>(tm.advance.x);
+        run.gb = std::move(initial_gb);
+        result.total_width = run.advance_x;
+        result.runs.push_back(std::move(run));
+        return result;
+    }
+
+    size_t i = 0;
+    while (i < char_count) {
+        bool use_fallback = (initial_gb->content()[i] == 0);
+        size_t start = i;
+        while (i < char_count && (initial_gb->content()[i] == 0) == use_fallback) {
+            ++i;
+        }
+        size_t count = i - start;
+
+        TextRun run;
+        run.font = use_fallback ? fallback_font : primary_font;
+        run.gb = std::make_unique<BLGlyphBuffer>();
+        run.gb->set_text(ucs4.data() + start, count, BL_TEXT_ENCODING_UTF32);
+        run.font.shape(*run.gb);
+        BLTextMetrics tm;
+        run.font.get_text_metrics(*run.gb, tm);
+        run.advance_x = static_cast<float>(tm.advance.x);
+        result.total_width += run.advance_x;
+        result.runs.push_back(std::move(run));
+    }
+
+    return result;
+}
+
 
 /* ================= Canvas adapter ================= */
 
@@ -564,20 +867,19 @@ public:
         if (!font.is_valid())
             return;
 
-        BLFontMetrics fm = font.metrics();
-        BLTextMetrics tm;
-        BLGlyphBuffer gb;
-        gb.set_text(utf8, std::strlen(utf8), BL_TEXT_ENCODING_UTF8);
-        font.shape(gb);
-        font.get_text_metrics(gb, tm);
+        TextLayoutResult layout = layout_text(utf8, font, m_state.font.size, m_state.font.flags);
+        if (layout.runs.empty())
+            return;
 
-        const float text_w = static_cast<float>(tm.advance.x);
-        const float text_h = static_cast<float>(fm.ascent + fm.descent);
+        const float text_w = layout.total_width;
+        const float text_h = layout.ascent + layout.descent;
 
         float x = box.x;
         float y = box.y;
 
         const bool has_box = (box.w > 0.0f && box.h > 0.0f);
+        const bool baselined = (align & HELIOSVIEW_ALIGN_BASELINE) != 0;
+
         if (has_box) {
             if (align & HELIOSVIEW_ALIGN_HCENTER)
                 x += (box.w - text_w) * 0.5f;
@@ -590,9 +892,15 @@ public:
                 y += (box.h - text_h);
         }
 
-        const BLPoint origin(x, y + fm.ascent);
+        const float baseline_y = baselined ? y : (y + layout.ascent);
+
+        float cur_x = x;
         apply_draw([&](BLContext& ctx) {
-            ctx.fill_glyph_run(origin, font, gb.glyph_run());
+            for (auto& run : layout.runs) {
+                const BLPoint origin(cur_x, baseline_y);
+                ctx.fill_glyph_run(origin, run.font, run.gb->glyph_run());
+                cur_x += run.advance_x;
+            }
         });
     }
 
@@ -612,13 +920,12 @@ public:
         out->line_height = fm.ascent + fm.descent + fm.line_gap;
 
         if (utf8 && *utf8) {
-            BLTextMetrics tm;
-            BLGlyphBuffer gb;
-            gb.set_text(utf8, std::strlen(utf8), BL_TEXT_ENCODING_UTF8);
-            font.shape(gb);
-            font.get_text_metrics(gb, tm);
-            out->width = static_cast<float>(tm.advance.x);
-            out->height = static_cast<float>(tm.bounding_box.y1 - tm.bounding_box.y0);
+            TextLayoutResult layout = layout_text(utf8, font, m_state.font.size, m_state.font.flags);
+            out->width = layout.total_width;
+            out->ascent = layout.ascent;
+            out->descent = layout.descent;
+            out->height = layout.ascent + layout.descent;
+            out->line_height = layout.line_height;
         }
         if (out->height <= 0.0f)
             out->height = out->ascent + out->descent;
@@ -634,8 +941,9 @@ public:
             return;
 
         BLImage src_img;
-        if (src_adapter && src_adapter->native_bitmap()) {
-            src_img = *static_cast<BLImage*>(src_adapter->native_bitmap());
+        auto* own = dynamic_cast<CanvasAdapterImpl*>(src_adapter);
+        if (own && own->native_bitmap()) {
+            src_img = *static_cast<BLImage*>(own->native_bitmap());
         } else if (src.format == HELIOSVIEW_FORMAT_BGRA8_PREMUL) {
             src_img.create_from_data(src.width, src.height, BL_FORMAT_PRGB32, src.pixels, src.stride);
         } else {

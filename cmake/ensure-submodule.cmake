@@ -61,81 +61,29 @@ function(_heliosview_uninitialized_submodules out_var)
     set(${out_var} "${_missing}" PARENT_SCOPE)
 endfunction()
 
-# Runs git with the remaining arguments, streaming its output. `cmake -E time`
-# prefixes the elapsed time so long clones visibly make progress.
-function(_heliosview_git description workdir)
-    list(JOIN ARGN " " _cmd_str)
-    message(STATUS "HeliosView: ${description}")
-    message(STATUS "HeliosView:   git ${_cmd_str}   [in ${workdir}]")
-    execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E time "${GIT_EXECUTABLE}" ${ARGN}
-            WORKING_DIRECTORY "${workdir}"
-            RESULT_VARIABLE _result
-    )
-    if(NOT _result EQUAL 0)
-        message(FATAL_ERROR
-                "HeliosView: 'git ${_cmd_str}' failed (exit ${_result}) in ${workdir}.\n"
-                "git's own error is printed above — fix it (network/proxy/credentials) and re-run cmake.")
-    endif()
-endfunction()
-
 if(NOT EXISTS "${HELIOSVIEW_PROJECT_ROOT}/.gitmodules")
     message(STATUS "HeliosView: .gitmodules not found; assuming submodules are pre-populated.")
     return()
 endif()
 
 _heliosview_uninitialized_submodules(_missing)
-if(NOT _missing)
-    message(STATUS "HeliosView: Submodules are already populated.")
-    return()
-endif()
-
-find_package(Git QUIET)
-if(NOT Git_FOUND)
-    message(WARNING "HeliosView: git not found; cannot initialize submodules.")
-else()
-    list(LENGTH HELIOSVIEW_BOOST_LIBS _boost_lib_count)
+if(_missing)
     list(LENGTH _missing _missing_count)
     set(_missing_hint "${_missing}")
     if(_missing_count GREATER 8)
         list(SUBLIST _missing 0 8 _missing_hint)
-        list(APPEND _missing_hint "... (${_missing_count} probe files total)")
+        list(APPEND _missing_hint "... (${_missing_count} total)")
     endif()
-    message(STATUS "HeliosView: Uninitialized submodules (${_missing_count}): ${_missing_hint}")
-    message(STATUS "HeliosView: Initializing submodules — this fetches the Boost superproject "
-            "plus ${_boost_lib_count} Boost libraries and can take a while on a fresh clone.")
-
-    # `--jobs` (git >= 2.30, like --progress) parallelizes the clones; drop it if
-    # the cache variable was set to something unusable.
-    set(_jobs_args --jobs ${HELIOSVIEW_SUBMODULE_JOBS})
-    if(NOT HELIOSVIEW_SUBMODULE_JOBS MATCHES "^[1-9][0-9]*$")
-        message(STATUS "HeliosView: HELIOSVIEW_SUBMODULE_JOBS='${HELIOSVIEW_SUBMODULE_JOBS}' "
-                "is not a positive integer; cloning serially.")
-        set(_jobs_args "")
-    endif()
-
-    # 1. HeliosView's own submodules: stdexec, the Boost superproject and the
-    #    blend2d + asmjit pair.
-    _heliosview_git("Fetching HeliosView submodules (stdexec, Boost superproject, blend2d, asmjit)..."
-            "${HELIOSVIEW_PROJECT_ROOT}"
-            submodule update --init --depth 1 --progress ${_jobs_args}
-            -- third_party/stdexec third_party/boost third_party/blend2d third_party/asmjit)
-
-    # 2. All required Boost libraries in a single call.
-    set(_boost_lib_paths "")
-    foreach(_lib IN LISTS HELIOSVIEW_BOOST_LIBS)
-        list(APPEND _boost_lib_paths "libs/${_lib}")
-    endforeach()
-    _heliosview_git("Fetching ${_boost_lib_count} Boost libraries in one call..."
-            "${HELIOSVIEW_BOOST_ROOT}"
-            submodule update --init --depth 1 --progress ${_jobs_args}
-            -- ${_boost_lib_paths})
+    message(FATAL_ERROR
+        "\n======================================================================\n"
+        "HeliosView: Git submodules are missing or uninitialized (${_missing_count} missing):\n"
+        "  ${_missing_hint}\n\n"
+        "CMake no longer downloads or clones submodules automatically during configure\n"
+        "to prevent network hangs and repeated re-downloads.\n\n"
+        "Please run the setup script to initialize submodules and dependencies:\n"
+        "  PowerShell:  .\\scripts\\setup-dependencies.ps1\n"
+        "  Or Python:   python scripts/setup-dependencies.py\n"
+        "======================================================================\n")
 endif()
 
-# Final check: a configure that continues here would fail later with a confusing
-# "file not found" while compiling, so fail fast instead.
-_heliosview_uninitialized_submodules(_still_missing)
-if(_still_missing)
-    message(FATAL_ERROR "HeliosView: submodules still not initialized: ${_still_missing}.")
-endif()
-message(STATUS "HeliosView: Submodules ready.")
+message(STATUS "HeliosView: Submodules verified.")

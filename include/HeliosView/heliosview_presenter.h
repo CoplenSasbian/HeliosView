@@ -74,6 +74,16 @@ HELIOSVIEW_API void heliosview_buffer_presenter_set_paint_callback(heliosview_bu
 /* Query the associated window handle. */
 HELIOSVIEW_API heliosview_window_t* heliosview_buffer_presenter_get_window(const heliosview_buffer_presenter_t* presenter);
 
+#if defined(_WIN32)
+/* Render the current presenter frame directly to a target Win32 DC.
+ * clip_left/top/right/bottom specify a clip rectangle (all zeroes disables clipping).
+ * 0 = success, negative = error code. */
+HELIOSVIEW_API int heliosview_buffer_presenter_render_to_dc(heliosview_buffer_presenter_t* presenter,
+                                                            void* hdc,
+                                                            int32_t clip_left, int32_t clip_top,
+                                                            int32_t clip_right, int32_t clip_bottom);
+#endif
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

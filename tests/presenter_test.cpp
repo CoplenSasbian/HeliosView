@@ -8,9 +8,17 @@
 #include <HeliosViewCore/BufferPresenter.h>
 #include <HeliosViewCore/Window.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <iostream>
 #include <vector>
 #include <cassert>
+#include <cmath>
 
 static int g_failed = 0;
 static int g_passed = 0;
@@ -88,6 +96,9 @@ int main()
         helios::Window win(320, 240, "Presenter Test Window");
         CHECK(win.nativeHandle() != nullptr, "window created successfully");
 
+        HWND hwnd = reinterpret_cast<HWND>(win.id());
+        CHECK(hwnd != nullptr && IsWindow(hwnd), "window HWND is valid");
+
         helios::BufferPresenter presenter(win);
         CHECK(presenter.isValid(), "BufferPresenter created and attached to window");
 
@@ -104,6 +115,15 @@ int main()
             paintFired = true;
         });
 
+        // Trigger WM_SIZE and verify callback
+        SendMessage(hwnd, WM_SIZE, 0, MAKELPARAM(320, 240));
+        CHECK(resizeFired, "onResize callback triggered by WM_SIZE");
+        CHECK(resizeW == 320 && resizeH == 240, "onResize received matching dimensions");
+
+        // Trigger WM_PAINT and verify callback
+        SendMessage(hwnd, WM_PAINT, 0, 0);
+        CHECK(paintFired, "onPaint callback triggered by WM_PAINT");
+
         // Create canvas and draw something
         helios::Canvas canvas(320, 240);
         canvas.fill(0xFF00FF00); // solid green
@@ -118,7 +138,7 @@ int main()
 
         // Invalidate
         presenter.invalidate();
-        CHECK(true, "invalidate() succeeds without error");
+        CHECK(IsWindow(hwnd), "window remains valid after invalidate()");
 
         // Move semantics
         helios::BufferPresenter moved(std::move(presenter));
@@ -128,8 +148,73 @@ int main()
         bool movedPresentOk = moved.present(canvas);
         CHECK(movedPresentOk, "moved presenter presents successfully");
 
+#if defined(_WIN32)
+        // 4. Pixel-level AlphaBlend verification with memory DC (§4 #2)
+        std::cout << "\n[AlphaBlend & Memory DC Pixel Verification]\n";
+        HDC memDC = CreateCompatibleDC(nullptr);
+        CHECK(memDC != nullptr, "CreateCompatibleDC succeeded");
+
+        if (memDC) {
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = 32;
+            bmi.bmiHeader.biHeight = -32; // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            uint32_t* bits = nullptr;
+            HBITMAP hbm = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
+            CHECK(hbm != nullptr && bits != nullptr, "CreateDIBSection succeeded for 32bpp memory surface");
+
+            if (hbm && bits) {
+                HGDIOBJ oldBm = SelectObject(memDC, hbm);
+
+                // Pre-fill destination DC with opaque pure Red: B=0, G=0, R=255
+                for (int i = 0; i < 32 * 32; ++i) {
+                    bits[i] = 0x00FF0000;
+                }
+
+                // Create a 32x32 BGRA8_PREMUL buffer with 50% alpha green:
+                // Alpha = 128 (0x80), Premultiplied Green = 128 (0x80), Red = 0, Blue = 0
+                // Pixel uint32_t = (128 << 24) | (0 << 16) | (128 << 8) | 0 = 0x80008000
+                std::vector<uint32_t> greenPremul(32 * 32, 0x80008000u);
+                helios::PixelView greenView(greenPremul.data(), 32, 32, 32 * 4, helios::PixelFormat::Bgra8Premul);
+
+                // Present to moved presenter, then render directly to memDC
+                moved.present(greenView);
+                bool renderOk = moved.renderToDC(memDC);
+                CHECK(renderOk, "renderToDC succeeds on memory DC");
+
+                // Sample blended pixel at (16, 16)
+                // With AC_SRC_OVER + AC_SRC_ALPHA:
+                // Dst.R = Src.R + (1 - A/255) * Dst.R = 0 + (127/255) * 255 ≈ 127
+                // Dst.G = Src.G + (1 - A/255) * Dst.G = 128 + 0 = 128
+                // Dst.B = 0
+                // (If SetDIBitsToDevice were incorrectly used, R would be 0, G would be 128).
+                const uint8_t* p = reinterpret_cast<const uint8_t*>(&bits[16 * 32 + 16]);
+                const uint8_t b = p[0];
+                const uint8_t g = p[1];
+                const uint8_t r = p[2];
+
+                CHECK(std::abs(static_cast<int>(r) - 127) <= 2, "AlphaBlend preserved background red under 50% alpha");
+                CHECK(std::abs(static_cast<int>(g) - 128) <= 2, "AlphaBlend applied source green under 50% alpha");
+                CHECK(b == 0, "blue channel is zero");
+
+                // Clip rect test: specify a clip rectangle completely outside destination
+                bits[0] = 0x00FF0000;
+                moved.renderToDC(memDC, 100, 100, 200, 200);
+                CHECK(bits[0] == 0x00FF0000, "disjoint clip_box avoids rendering to DC");
+
+                SelectObject(memDC, oldBm);
+                DeleteObject(hbm);
+            }
+            DeleteDC(memDC);
+        }
+#endif
+
         win.close();
-        CHECK(true, "window closed cleanly with presenter attached");
+        CHECK(!win.nativeHandle() || !IsWindow(hwnd), "window closed cleanly with presenter attached");
     }
 
     std::cout << "\nResult: " << g_passed << " checks, " << g_failed << " failed\n";

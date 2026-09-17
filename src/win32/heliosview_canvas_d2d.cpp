@@ -69,7 +69,7 @@ Factories& factories()
     static Factories* instance = []() -> Factories* {
         auto* created = new Factories();
         D2D1_FACTORY_OPTIONS options = {};
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, options,
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, options,
                                      created->d2d.GetAddressOf())))
             created->d2d.Reset();
         if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -455,8 +455,12 @@ public:
             return nullptr;
         ComPtr<IWICBitmap> bitmap;
         if (FAILED(wic->CreateBitmap(static_cast<UINT>(m_width), static_cast<UINT>(m_height),
-                                     GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap)))
-            return nullptr;
+                                     GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap))) {
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (FAILED(wic->CreateBitmap(static_cast<UINT>(m_width), static_cast<UINT>(m_height),
+                                         GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap)))
+                return nullptr;
+        }
         m_bitmap = std::move(bitmap);
         m_synced = false;
         return m_bitmap.Get();

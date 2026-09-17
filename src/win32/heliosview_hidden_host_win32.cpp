@@ -60,7 +60,9 @@ HWND hv_host_window(hv_host_message_fn handler)
         wc.lpfnWndProc = hv_host_wndproc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = kHostClass;
-        RegisterClassExW(&wc);
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            hv_fail_win32(GetLastError(), "RegisterClassExW failed for hidden host");
+        }
     });
 
     /* Unshown top-level window: a menu owner must be able to become the
@@ -68,6 +70,9 @@ HWND hv_host_window(hv_host_message_fn handler)
     tls_host_hwnd = CreateWindowExW(0, kHostClass, L"HeliosViewHost", WS_OVERLAPPED,
                                     0, 0, 0, 0, nullptr, nullptr,
                                     GetModuleHandleW(nullptr), nullptr);
+    if (!tls_host_hwnd) {
+        hv_fail_win32(GetLastError(), "CreateWindowExW failed for hidden host");
+    }
     return tls_host_hwnd;
 }
 

@@ -92,6 +92,13 @@ public:
         m_paintCb = std::move(cb);
     }
 
+#if defined(_WIN32)
+    bool renderToDC(void* hdc, int clipLeft = 0, int clipTop = 0, int clipRight = 0, int clipBottom = 0) {
+        if (!m_handle) return false;
+        return heliosview_buffer_presenter_render_to_dc(m_handle, hdc, clipLeft, clipTop, clipRight, clipBottom) == 0;
+    }
+#endif
+
     heliosview_buffer_presenter_t* raw() const noexcept { return m_handle; }
 
 private:

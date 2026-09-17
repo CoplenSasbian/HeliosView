@@ -3,6 +3,7 @@
 
 #include <HeliosView/heliosview_host.h>
 #include <HeliosView/heliosview_presenter.h>
+#include <HeliosView/heliosview_ui.h>
 #include "../heliosview_internal.h"
 #include "heliosview_win32_internal.h"
 
@@ -205,7 +206,13 @@ heliosview_host_t* hv_host_create_raw(heliosview_window_t* parent, int x, int y,
     if (!child_hwnd)
         return nullptr;
 
-    auto* host = hv::hv_alloc<heliosview_host>();
+    heliosview_host* host = nullptr;
+    try {
+        host = hv::hv_alloc<heliosview_host>();
+    } catch (const std::bad_alloc&) {
+        DestroyWindow(child_hwnd);
+        return nullptr;
+    }
     host->hwnd = child_hwnd;
     host->parent_window = parent;
     host->x = x;
@@ -289,6 +296,8 @@ void DestroyUiSubclass(heliosview_host_t* host) {
     if (!host || !host->subclass_data)
         return;
 
+    heliosview_host_ui_clear_binding(host);
+
     auto* ui = static_cast<hv_host_ui_subclass*>(host->subclass_data);
     RemoveWindowSubclass(host->hwnd, UiSubclassProc, kUiSubclassId);
 
@@ -314,14 +323,23 @@ heliosview_host_t* heliosview_host_create_ui(
     if (!host)
         return nullptr;
 
-    auto* ui = hv::hv_alloc<hv_host_ui_subclass>();
+    hv_host_ui_subclass* ui = nullptr;
+    try {
+        ui = hv::hv_alloc<hv_host_ui_subclass>();
+    } catch (const std::bad_alloc&) {
+        heliosview_host_destroy(host);
+        return nullptr;
+    }
     ui->canvas = heliosview_canvas_create(width > 0 ? width : 1, height > 0 ? height : 1, HELIOSVIEW_FORMAT_AUTO, engine);
     ui->presenter = heliosview_buffer_presenter_create_for_hwnd(host->hwnd);
 
     host->subclass_data = ui;
     host->subclass_dtor = DestroyUiSubclass;
 
-    SetWindowSubclass(host->hwnd, UiSubclassProc, kUiSubclassId, reinterpret_cast<DWORD_PTR>(host));
+    if (!SetWindowSubclass(host->hwnd, UiSubclassProc, kUiSubclassId, reinterpret_cast<DWORD_PTR>(host))) {
+        heliosview_host_destroy(host);
+        return nullptr;
+    }
 
     return host;
 }

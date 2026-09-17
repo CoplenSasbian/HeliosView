@@ -62,8 +62,10 @@ public:
 
     ~Action()
     {
-        if (m_sink != 0)
-            App::instance()->removeSink(m_sink);
+        if (m_sink != 0) {
+            if (auto* app = App::instance())
+                app->removeSink(m_sink);
+        }
         heliosview_action_destroy(m_action);
     }
 
@@ -113,8 +115,10 @@ public:
 private:
     void registerSelf()
     {
-        if (m_action)
-            m_sink = App::instance()->addSink([this](const Event& ev) { return handleEvent(ev); });
+        if (m_action) {
+            if (auto* app = App::instance())
+                m_sink = app->addSink([this](const Event& ev) { return handleEvent(ev); });
+        }
     }
 
     // Route MENU_SELECT events for this action to its triggered signal

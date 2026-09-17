@@ -73,11 +73,11 @@ constexpr FormatInfo kFormats[] = {
     {"tga",    true,  true,  true},
     {"gif",    true,  false, false}, /* decode only, first frame */
     {"psd",    true,  false, false},
-    {"hdr",    true,  true,  false},
+    {"hdr",    true,  false, false},
     {"pic",    true,  false, false},
-    {"pnm",    true,  true,  false},
-    {"pgm",    true,  true,  false},
-    {"ppm",    true,  true,  false},
+    {"pnm",    true,  false, false},
+    {"pgm",    true,  false, false},
+    {"ppm",    true,  false, false},
 };
 
 /* Lowercase ASCII copy of a format name, so lookups are case-insensitive without

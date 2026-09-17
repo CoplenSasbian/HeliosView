@@ -17,6 +17,11 @@
 #include <HeliosViewCore/System.h> /* Rect (work-area query) */
 #include <HeliosViewCore/Types.h>
 
+/* UIHost (the widget-tree child viewport) is defined in terms of the complete
+ * Window above, so its header is pulled in at the end of this one -- see the
+ * bottom of the file. */
+#include <HeliosViewCore/UIHost.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -26,6 +31,8 @@
 #include <vector>
 
 namespace helios {
+
+class UIHost; /* Child viewport host (defined in UIHost.h, included at the bottom) */
 
 /* Web engine version used by the WebView backend (UTF-8, e.g. "131.0.2903.86"). */
 inline std::string webViewEngineVersion()
@@ -259,7 +266,7 @@ public:
     void close()
     {
         for (auto* host : m_hosts) {
-            if (host) heliosview_host_destroy(host);
+            detachHost(host);
         }
         m_hosts.clear();
 
@@ -277,6 +284,9 @@ public:
     // Native handles
     uintptr_t id() const { return heliosview_window_id(m_window); }
     heliosview_window_t* nativeHandle() const { return m_window; }
+    // The raw C handle under the name the other wrappers use (UIHost::handle,
+    // Canvas::handle), so handle()-based helpers accept a Window directly.
+    heliosview_window_t* handle() const { return m_window; }
     void* nativeHandle(heliosview_webview_handle_kind_t kind) const
     {
         return heliosview_webview_native_handle(m_webview, kind);
@@ -287,29 +297,36 @@ public:
      * Child Viewport Host Management (UIHost & WebViewHost)
      * ========================================================================= */
 
-    heliosview_host_t* createUIHost(int x, int y, int width, int height,
-                                    heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D)
+    // A widget-tree viewport (helios::UIHost) of width x height at (x, y) inside
+    // this window's client area, attached to the window: close() destroys it with
+    // the window, and the returned UIHost is a borrowed handle, not the owner.
+    UIHost createUIHost(int x, int y, int width, int height,
+                        heliosview_canvas_engine_t engine = HELIOSVIEW_ENGINE_BLEND2D)
     {
-        heliosview_host_t* h = heliosview_host_create_ui(m_window, x, y, width, height, engine);
-        if (h) m_hosts.push_back(h);
-        return h;
+        return UIHost(ownHost(heliosview_host_create_ui(m_window, x, y, width, height, engine)));
     }
 
-    heliosview_host_t* createWebViewHost(int x, int y, int width, int height)
+    // Same, for an embedded web viewport. Get the WebView itself with
+    // heliosview_host_get_webview(host.handle()).
+    UIHost createWebViewHost(int x, int y, int width, int height)
     {
-        heliosview_host_t* h = heliosview_host_create_webview(m_window, x, y, width, height);
-        if (h) m_hosts.push_back(h);
-        return h;
+        return UIHost(ownHost(heliosview_host_create_webview(m_window, x, y, width, height)));
     }
 
-    void destroyHost(heliosview_host_t* host)
+    // Destroy a host created by one of the factories above and detach it from the
+    // window. The caller's UIHost becomes an empty object.
+    void destroyHost(UIHost& host)
     {
-        if (!host) return;
-        auto it = std::find(m_hosts.begin(), m_hosts.end(), host);
-        if (it != m_hosts.end()) {
-            m_hosts.erase(it);
-        }
-        heliosview_host_destroy(host);
+        detachHost(host.handle());
+        host.close();
+    }
+
+    // Register a C host this window now destroys on close(). Returns the host so a
+    // caller can wrap it in one expression: UIHost(ownHost(heliosview_host_create_ui(...))).
+    heliosview_host_t* ownHost(heliosview_host_t* host)
+    {
+        if (host) m_hosts.push_back(host);
+        return host;
     }
 
     /* =========================================================================
@@ -689,6 +706,19 @@ public:
     }
 
 private:
+    // Destroy one tracked child host and drop it from the tracked list
+    void detachHost(heliosview_host_t* host)
+    {
+        if (!host) return;
+        auto it = std::find(m_hosts.begin(), m_hosts.end(), host);
+        if (it != m_hosts.end())
+            m_hosts.erase(it);
+        heliosview_host_destroy(host);
+    }
+
+    // A child host is created against this window's own handle
+    friend class UIHost;
+
     static void cookiesTrampoline(int error, const heliosview_webview_cookie_t* cookies,
                                   size_t count, void* userdata)
     {
@@ -778,6 +808,11 @@ inline int App::loopCallback(void* userdata)
 {
     auto* self = static_cast<App*>(userdata);
 
+    /* Application frame logic (animation, repaint requests) runs once per iteration,
+     * before that iteration's events are dispatched. */
+    if (self->frameCallback)
+        self->frameCallback();
+
     Event ev;
     while (self->pollEvent(ev)) {
         if (ev.type == EventType::Quit) {
@@ -809,3 +844,25 @@ inline int App::loopCallback(void* userdata)
 }
 
 } // namespace helios
+
+/* ---------- UIHost factories (need the complete Window above) ---------- */
+
+inline helios::UIHost helios::UIHost::create(Window& window, int x, int y, int width, int height,
+                                             uint32_t engine)
+{
+    return UIHost(window.ownHost(heliosview_host_create_ui(
+        window.handle(), x, y, width, height, static_cast<heliosview_canvas_engine_t>(engine))));
+}
+
+inline helios::UIHost helios::UIHost::createDetached(Window& window, int x, int y, int width, int height,
+                                                     uint32_t engine)
+{
+    return UIHost(heliosview_host_create_ui(window.handle(), x, y, width, height,
+                                            static_cast<heliosview_canvas_engine_t>(engine)),
+                  Owner::UiHost);
+}
+
+inline helios::UIHost helios::UIHost::createWebView(Window& window, int x, int y, int width, int height)
+{
+    return UIHost(heliosview_host_create_webview(window.handle(), x, y, width, height), Owner::UiHost);
+}

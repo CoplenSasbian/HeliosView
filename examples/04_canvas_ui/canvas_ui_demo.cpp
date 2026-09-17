@@ -2,14 +2,24 @@
 // HeliosView Example 04: Canvas DirectDraw & Retained UI Component Gallery
 // ============================================================================
 // A comprehensive showcase of HeliosView's 2D vector drawing engine & modern
-// retained-mode UI component system:
-//   Tab 0: Controls & Forms      - Buttons, Sliders, Switches, Checkboxes, Progress, Badges
-//   Tab 1: Charts & Analytics    - Real-time Area Line Chart with Crosshair, Bar Chart, Donut Gauges
-//   Tab 2: Vector & Paths        - Even-Odd Stars, Bezier Curves, Rotating Interlocking Gears
-//   Tab 3: Gauges & Oscilloscope - Semicircular Analog Tachometer, Dual-Channel 60FPS Waveform
+// retained-mode UI component system, written entirely against the C++ wrappers:
+//   helios::Window / helios::App       - native window shell & message loop
+//   helios::UIHost                     - the DirectDraw child viewport
+//   HeliosView::UI::*                  - retained widget tree (Card, Slider, ...)
+//   helios::Painter                    - every drawing call (no C painter calls)
+//
+//   Tab 0: OS Shell              - Window shell, lifecycle, dialogs, tray, clipboard
+//   Tab 1: Controls & Forms      - Buttons, Sliders, Switches, Checkboxes, Progress, Badges
+//   Tab 2: Charts & Analytics    - Real-time Area Line Chart with Crosshair, Bar Chart, Donut Gauges
+//   Tab 3: Vector & Paths        - Even-Odd Stars, Bezier Curves, Rotating Interlocking Gears
+//   Tab 4: Gauges & Oscilloscope - Semicircular Analog Tachometer, Dual-Channel 60FPS Waveform
 // ============================================================================
 
-#include <HeliosView/heliosview.h>
+#include <HeliosViewCore/Dialogs.h>
+#include <HeliosViewCore/HeliosView.h>
+#include <HeliosViewCore/Menu.h>
+#include <HeliosViewCore/Notification.h>
+#include <HeliosViewCore/Tray.h>
 #include <HeliosViewCore/UI/Widget.h>
 
 #include <algorithm>
@@ -18,13 +28,21 @@
 #include <format>
 #include <iostream>
 #include <memory>
-#include <numbers>
 #include <string>
 #include <vector>
 
 using namespace HeliosView::UI;
 
 namespace {
+
+// The showcase window (owned by main; the widget callbacks only borrow it)
+helios::Window* s_win = nullptr;
+std::unique_ptr<helios::Menu> s_contextMenu;
+std::unique_ptr<helios::Tray> s_tray;
+std::unique_ptr<helios::Menu> s_trayMenu;
+std::vector<std::shared_ptr<helios::Window>> s_subWindows;
+std::string s_lastPickedPath;
+int s_subWindowCount = 0;
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -63,7 +81,7 @@ static AppState g_state;
 // ----------------------------------------------------------------------------
 // Helpers for Vector Drawing
 // ----------------------------------------------------------------------------
-static void DrawStar(heliosview_painter_t* p, float cx, float cy, float outerR, float innerR, int points, uint32_t fill, uint32_t stroke) {
+static void DrawStar(helios::Painter& p, float cx, float cy, float outerR, float innerR, int points, uint32_t fill, uint32_t stroke) {
     std::vector<float> pts;
     pts.reserve(points * 4);
     for (int i = 0; i < points * 2; ++i) {
@@ -72,15 +90,15 @@ static void DrawStar(heliosview_painter_t* p, float cx, float cy, float outerR, 
         pts.push_back(cx + std::cos(angle) * r);
         pts.push_back(cy + std::sin(angle) * r);
     }
-    heliosview_painter_set_fill(p, fill);
-    heliosview_painter_set_stroke(p, stroke, 1.5f);
-    heliosview_painter_draw_polygon(p, pts.data(), pts.size() / 2);
+    p.setFill(fill);
+    p.setStroke(stroke, 1.5f);
+    p.drawPolygon(pts);
 }
 
-static void DrawGear(heliosview_painter_t* p, float cx, float cy, float radius, int teeth, float angleRad, uint32_t color) {
-    heliosview_painter_save(p);
-    heliosview_painter_translate(p, cx, cy);
-    heliosview_painter_rotate(p, angleRad);
+static void DrawGear(helios::Painter& p, float cx, float cy, float radius, int teeth, float angleRad, uint32_t color) {
+    p.save();
+    p.translate(cx, cy);
+    p.rotate(angleRad);
 
     std::vector<float> pts;
     float dAngle = (2.0f * kPi) / teeth;
@@ -105,20 +123,392 @@ static void DrawGear(heliosview_painter_t* p, float cx, float cy, float radius, 
         pts.push_back(std::sin(a3) * radius);
     }
 
-    heliosview_painter_set_fill(p, color);
-    heliosview_painter_set_stroke(p, 0xFF181926, 1.5f);
-    heliosview_painter_draw_polygon(p, pts.data(), pts.size() / 2);
+    p.setFill(color);
+    p.setStroke(0xFF181926, 1.5f);
+    p.drawPolygon(pts);
 
     // Center hole
-    heliosview_painter_set_fill(p, 0xFF1E1E2E);
-    heliosview_painter_set_stroke(p, 0xFF45475A, 1.5f);
-    heliosview_painter_draw_ellipse(p, -radius * 0.35f, -radius * 0.35f, radius * 0.70f, radius * 0.70f);
+    p.setFill(0xFF1E1E2E);
+    p.setStroke(0xFF45475A, 1.5f);
+    p.drawEllipse(-radius * 0.35f, -radius * 0.35f, radius * 0.70f, radius * 0.70f);
 
-    heliosview_painter_restore(p);
+    p.restore();
 }
 
 // ----------------------------------------------------------------------------
-// Tab 0: Controls & Forms View
+// Tab 0: Native Window Shell & OS Integration View (Comprehensive Master Showcase)
+// ----------------------------------------------------------------------------
+static std::shared_ptr<Widget> CreateTabShellIntegration() {
+    auto tabRoot = HStack::create(16, 0);
+
+    // Shared status feedback label
+    auto statusLbl = Label::create("Status: Ready. Click any native action below.");
+    statusLbl->setFontSize(12.0f)->setColor(0xFFA6E3A1);
+
+    auto updateStatus = [statusLbl](const std::string& msg) {
+        statusLbl->setText(std::format("[{}] {}", "OK", msg));
+    };
+
+    // ---- Left Card: Window Shell, Multi-Window & Lifecycle ----
+    auto leftCard = Card::create(475, 540, 0xFF1E1E2E, 0xFF313244);
+    auto leftStack = VStack::create(12, 16);
+
+    auto titleL = Label::create("Window Shell & Lifecycle Controls");
+    titleL->setFontSize(15.0f);
+    titleL->setColor(0xFF8AADF4);
+    leftStack->add(titleL);
+
+    // Opacity Slider
+    auto opacLbl = Label::create("Window Opacity: 100%");
+    opacLbl->setFontSize(12.5f)->setColor(0xFFCAD3F5);
+    leftStack->add(opacLbl);
+
+    auto opacSlider = Slider::create(30.0f, 100.0f, 100.0f);
+    opacSlider->setSize(440, 26);
+    opacSlider->onChange([opacLbl, updateStatus](float val) {
+        opacLbl->setText(std::format("Window Opacity: {:.0f}%", val));
+        if (s_win) {
+            s_win->setOpacity(val / 100.0f);
+            updateStatus(std::format("Window opacity set to {:.0f}%", val));
+        }
+    });
+    leftStack->add(opacSlider);
+
+    // State Toggles
+    auto swRow1 = HStack::create(10, 0);
+    auto swTop = Switch::create(false);
+    swTop->onToggle([updateStatus](bool on) {
+        if (s_win) {
+            s_win->setTopmost(on);
+            updateStatus(on ? "Topmost enabled (Always on Top)" : "Topmost disabled");
+        }
+    });
+    auto swTopLbl = Label::create("Always on Top (Topmost Window)");
+    swTopLbl->setFontSize(12.5f)->setColor(0xFFCDD6F4);
+    swRow1->add(swTop)->add(swTopLbl);
+    leftStack->add(swRow1);
+
+    auto swRow2 = HStack::create(10, 0);
+    auto swFs = Switch::create(false);
+    swFs->onToggle([updateStatus](bool on) {
+        if (s_win) {
+            s_win->setFullscreen(on);
+            updateStatus(on ? "Fullscreen mode active" : "Fullscreen mode exited");
+        }
+    });
+    auto swFsLbl = Label::create("Fullscreen Mode (Kiosk / Immersive)");
+    swFsLbl->setFontSize(12.5f)->setColor(0xFFCDD6F4);
+    swRow2->add(swFs)->add(swFsLbl);
+    leftStack->add(swRow2);
+
+    auto swRow3 = HStack::create(10, 0);
+    auto swDark = Switch::create(true);
+    swDark->onToggle([updateStatus](bool on) {
+        if (s_win) {
+            s_win->setDarkMode(on);
+            updateStatus(on ? "Native dark frame active" : "Native dark frame disabled");
+        }
+    });
+    auto swDarkLbl = Label::create("Native Dark Mode Frame");
+    swDarkLbl->setFontSize(12.5f)->setColor(0xFFCDD6F4);
+    swRow3->add(swDark)->add(swDarkLbl);
+    leftStack->add(swRow3);
+
+    // Window action buttons
+    auto btnRow1 = HStack::create(8, 0);
+    auto maxBtn = Button::create("Maximize/Restore");
+    maxBtn->setSize(130, 32);
+    maxBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->toggleMaximize();
+            updateStatus("Toggled Maximize/Restore");
+        }
+    });
+    auto minBtn = Button::create("Minimize");
+    minBtn->setSize(85, 32);
+    minBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->minimize();
+            updateStatus("Window minimized");
+        }
+    });
+    auto centerBtn = Button::create("Center Window");
+    centerBtn->setSize(110, 32);
+    centerBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->center();
+            updateStatus("Window centered on primary monitor");
+        }
+    });
+    btnRow1->add(maxBtn)->add(minBtn)->add(centerBtn);
+    leftStack->add(btnRow1);
+
+    auto btnRow2 = HStack::create(8, 0);
+    auto flashBtn = Button::create("Flash Taskbar");
+    flashBtn->setSize(105, 32);
+    flashBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->flash();
+            updateStatus("Taskbar flash triggered");
+        }
+    });
+    auto flashUntilBtn = Button::create("Flash Until Focus");
+    flashUntilBtn->setSize(125, 32);
+    flashUntilBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->flashUntilFocus();
+            updateStatus("Taskbar flash until focus active");
+        }
+    });
+    btnRow2->add(flashBtn)->add(flashUntilBtn);
+    leftStack->add(btnRow2);
+
+    // Multi-Window & Lifecycle
+    auto subWinHeader = Label::create("Multi-Window & Application Lifecycle");
+    subWinHeader->setFontSize(13.0f)->setColor(0xFFCBA6F7);
+    leftStack->add(subWinHeader);
+
+    auto btnRow3 = HStack::create(8, 0);
+    auto spawnWinBtn = Button::create("Spawn Sub-Window");
+    spawnWinBtn->setSize(135, 32);
+    spawnWinBtn->onClick([updateStatus]() {
+        int n = ++s_subWindowCount;
+        auto sub = std::make_shared<helios::Window>(420, 300, std::format("Canvas Sub-Window #{}", n).c_str());
+        sub->show();
+
+        auto* rawSub = sub.get();
+        rawSub->closeRequested.connect([rawSub, updateStatus, n]() {
+            updateStatus(std::format("Sub-Window #{} closed", n));
+            rawSub->close();
+            std::erase_if(s_subWindows, [rawSub](const std::shared_ptr<helios::Window>& item) {
+                return item.get() == rawSub;
+            });
+        });
+        rawSub->keyPressed.connect([updateStatus, n](helios::KeyCode k) {
+            updateStatus(std::format("Key in Sub-Window #{}: code {}", n, static_cast<int>(k)));
+        });
+
+        s_subWindows.push_back(std::move(sub));
+        updateStatus(std::format("Spawned Sub-Window #{} (Active: {})", n, s_subWindows.size()));
+    });
+
+    auto closeWinsBtn = Button::create("Close Sub-Windows");
+    closeWinsBtn->setSize(135, 32);
+    closeWinsBtn->onClick([updateStatus]() {
+        size_t cnt = s_subWindows.size();
+        s_subWindows.clear();
+        updateStatus(std::format("Closed all {} sub-windows", cnt));
+    });
+
+    auto quitBtn = Button::create("Quit App");
+    quitBtn->setSize(80, 32);
+    quitBtn->onClick([]() {
+        if (auto* app = helios::App::instance()) app->quit();
+    });
+    btnRow3->add(spawnWinBtn)->add(closeWinsBtn)->add(quitBtn);
+    leftStack->add(btnRow3);
+
+    leftCard->addChild(leftStack);
+    tabRoot->add(leftCard);
+
+    // ---- Right Card: Native OS Integration, Dialogs & System Queries ----
+    auto rightCard = Card::create(475, 540, 0xFF1E1E2E, 0xFF313244);
+    auto rightStack = VStack::create(12, 16);
+
+    auto titleR = Label::create("Native OS Integration, Dialogs & System");
+    titleR->setFontSize(15.0f);
+    titleR->setColor(0xFFA6E3A1);
+    rightStack->add(titleR);
+
+    // Linked Taskbar Progress
+    auto tbLbl = Label::create("Linked Taskbar Progress: 50%");
+    tbLbl->setFontSize(12.5f)->setColor(0xFFCAD3F5);
+    rightStack->add(tbLbl);
+
+    auto tbSlider = Slider::create(0.0f, 100.0f, 50.0f);
+    tbSlider->setSize(440, 26);
+    auto tbBar = ProgressBar::create(0.50f);
+    tbBar->setSize(440, 6);
+    tbBar->setColor(0xFFA6E3A1);
+
+    tbSlider->onChange([tbLbl, tbBar, updateStatus](float val) {
+        tbLbl->setText(std::format("Linked Taskbar Progress: {:.0f}%", val));
+        tbBar->setProgress(val / 100.0f);
+        if (s_win) {
+            s_win->setProgressState(helios::ProgressState::Normal);
+            s_win->setProgress(static_cast<uint32_t>(val), 100);
+            updateStatus(std::format("Taskbar progress set to {:.0f}%", val));
+        }
+    });
+    rightStack->add(tbSlider);
+    rightStack->add(tbBar);
+
+    auto tbStateRow = HStack::create(8, 0);
+    auto tbPauseBtn = Button::create("Paused (Yellow)");
+    tbPauseBtn->setSize(105, 28);
+    tbPauseBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->setProgressState(helios::ProgressState::Paused);
+            updateStatus("Taskbar progress state: PAUSED (Yellow)");
+        }
+    });
+    auto tbErrBtn = Button::create("Error (Red)");
+    tbErrBtn->setSize(90, 28);
+    tbErrBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->setProgressState(helios::ProgressState::Error);
+            updateStatus("Taskbar progress state: ERROR (Red)");
+        }
+    });
+    auto tbClrBtn = Button::create("Clear Taskbar");
+    tbClrBtn->setSize(95, 28);
+    tbClrBtn->onClick([updateStatus]() {
+        if (s_win) {
+            s_win->clearProgress();
+            updateStatus("Taskbar progress cleared");
+        }
+    });
+    tbStateRow->add(tbPauseBtn)->add(tbErrBtn)->add(tbClrBtn);
+    rightStack->add(tbStateRow);
+
+    // Native Dialogs Row 1
+    auto dlgRow1 = HStack::create(8, 0);
+    auto fileBtn = Button::create("Open File(s)");
+    fileBtn->setSize(100, 32);
+    fileBtn->onClick([updateStatus]() {
+        auto files = helios::openFiles(s_win ? s_win->nativeHandle() : nullptr, "Select File (Canvas UI)");
+        if (!files.empty()) {
+            s_lastPickedPath = files.front();
+            updateStatus(std::format("File picked: {}", s_lastPickedPath));
+        } else {
+            updateStatus("File selection cancelled");
+        }
+    });
+    auto folderBtn = Button::create("Pick Folder");
+    folderBtn->setSize(95, 32);
+    folderBtn->onClick([updateStatus]() {
+        std::string folder;
+        if (helios::selectFolder(s_win ? s_win->nativeHandle() : nullptr, "Select Folder", folder)) {
+            s_lastPickedPath = folder;
+            updateStatus(std::format("Folder picked: {}", s_lastPickedPath));
+        } else {
+            updateStatus("Folder selection cancelled");
+        }
+    });
+    auto saveBtn = Button::create("Save File");
+    saveBtn->setSize(90, 32);
+    saveBtn->onClick([updateStatus]() {
+        std::string path;
+        const std::vector<helios::FileFilter> filters = {{"Text Files", "txt"}, {"All Files", "*.*"}};
+        if (helios::saveFile(s_win ? s_win->nativeHandle() : nullptr, "Save File (Canvas UI)", filters, "sample.txt", path)) {
+            s_lastPickedPath = path;
+            updateStatus(std::format("Save target: {}", s_lastPickedPath));
+        } else {
+            updateStatus("Save file cancelled");
+        }
+    });
+    auto revealBtn = Button::create("Reveal in Explorer");
+    revealBtn->setSize(125, 32);
+    revealBtn->onClick([updateStatus]() {
+        if (s_lastPickedPath.empty()) {
+            updateStatus("Please pick a file or folder first!");
+        } else {
+            helios::showInFolder(s_lastPickedPath);
+            updateStatus(std::format("Revealed in Explorer: {}", s_lastPickedPath));
+        }
+    });
+    dlgRow1->add(fileBtn)->add(folderBtn)->add(saveBtn)->add(revealBtn);
+    rightStack->add(dlgRow1);
+
+    // System Messaging & Queries Row 2
+    auto dlgRow2 = HStack::create(8, 0);
+    auto msgBoxBtn = Button::create("Modal MsgBox");
+    msgBoxBtn->setSize(100, 32);
+    msgBoxBtn->onClick([updateStatus]() {
+        auto res = helios::messageBox(s_win ? s_win->nativeHandle() : nullptr,
+                                      helios::MessageBoxType::Question, helios::MessageBoxButtons::YesNo,
+                                      "HeliosView Canvas UI", "Do you confirm this action?");
+        updateStatus(std::format("MsgBox result: {}", (res == helios::MessageBoxResult::Yes) ? "YES" : "NO"));
+    });
+
+    auto toastBtn = Button::create("Action Toast");
+    toastBtn->setSize(100, 32);
+    toastBtn->onClick([updateStatus]() {
+        helios::notificationShow("HeliosView Canvas UI", "Toast notification dispatched from 2D Vector UI!");
+        updateStatus("Dispatched Action Center Toast notification");
+    });
+
+    auto trayBtn = Button::create("Tray Alert");
+    trayBtn->setSize(90, 32);
+    trayBtn->onClick([updateStatus]() {
+        if (!s_tray) {
+            s_tray = std::make_unique<helios::Tray>("HeliosView UI Gallery");
+            s_trayMenu = std::make_unique<helios::Menu>();
+            auto* itemRestore = s_trayMenu->addItem("Restore Window");
+            itemRestore->triggered.connect([] { if (s_win) s_win->show(); });
+            s_trayMenu->addSeparator();
+            auto* itemQuit = s_trayMenu->addItem("Quit");
+            itemQuit->triggered.connect([] { if (auto* app = helios::App::instance()) app->quit(); });
+            s_tray->setMenu(s_trayMenu->handle());
+        }
+        s_tray->notify("HeliosView Gallery", "Tray balloon alert triggered!", helios::NotifyIcon::Info);
+        updateStatus("System tray balloon notification posted");
+    });
+
+    auto menuBtn = Button::create("Context Menu");
+    menuBtn->setSize(105, 32);
+    menuBtn->onClick([updateStatus]() {
+        if (s_contextMenu && s_win) {
+            s_contextMenu->show(s_win->nativeHandle());
+            updateStatus("Popped native context menu");
+        }
+    });
+    dlgRow2->add(msgBoxBtn)->add(toastBtn)->add(trayBtn)->add(menuBtn);
+    rightStack->add(dlgRow2);
+
+    // Clipboard & Environment Row 3
+    auto dlgRow3 = HStack::create(8, 0);
+    auto clipSetBtn = Button::create("Copy Clipboard");
+    clipSetBtn->setSize(110, 32);
+    clipSetBtn->onClick([updateStatus]() {
+        helios::clipboardSetText("HeliosView Canvas Retained UI Text Snapshot");
+        updateStatus("Copied 'HeliosView Canvas Retained UI Text Snapshot' to clipboard");
+    });
+
+    auto clipGetBtn = Button::create("Read Clipboard");
+    clipGetBtn->setSize(110, 32);
+    clipGetBtn->onClick([updateStatus]() {
+        std::string txt;
+        if (helios::clipboardGetText(txt)) {
+            updateStatus(std::format("Clipboard contains: \"{}\"", txt.substr(0, 40)));
+        } else {
+            updateStatus("Clipboard is empty or contains no text");
+        }
+    });
+
+    auto workAreaBtn = Button::create("Query Work Area");
+    workAreaBtn->setSize(125, 32);
+    workAreaBtn->onClick([updateStatus]() {
+        helios::Rect r{};
+        helios::primaryWorkArea(r);
+        int32_t cx = 0, cy = 0;
+        helios::cursorPosition(cx, cy);
+        updateStatus(std::format("WorkArea: {}x{} @ ({},{}), Cursor: ({},{})", r.width, r.height, r.x, r.y, cx, cy));
+    });
+    dlgRow3->add(clipSetBtn)->add(clipGetBtn)->add(workAreaBtn);
+    rightStack->add(dlgRow3);
+
+    // Status output display
+    rightStack->add(statusLbl);
+
+    rightCard->addChild(rightStack);
+    tabRoot->add(rightCard);
+
+    return tabRoot;
+}
+
+// ----------------------------------------------------------------------------
+// Tab 1: Controls & Forms View
 // ----------------------------------------------------------------------------
 static std::shared_ptr<Widget> CreateTabControls() {
     auto tabRoot = HStack::create(16, 0);
@@ -152,9 +542,9 @@ static std::shared_ptr<Widget> CreateTabControls() {
 
     auto sep1 = CustomWidget::create();
     sep1->setSize(434, 1);
-    sep1->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_draw_rect(p, 0, 0, 434, 1);
+    sep1->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFill(0xFF313244);
+        p.drawRect(0, 0, 434, 1);
     });
     leftStack->add(sep1);
 
@@ -241,36 +631,37 @@ static std::shared_ptr<Widget> CreateTabControls() {
 
     auto stripedBar = CustomWidget::create();
     stripedBar->setSize(434, 14);
-    stripedBar->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        int width = 0, height = 0;
-        heliosview_ui_widget_get_bounds(w->handle(), nullptr, nullptr, &width, &height);
+    stripedBar->setPaint([](CustomWidget* w, helios::Painter& p) {
+        const helios::Rect r = w->bounds();
+        const float width = (float)r.width;
+        const float height = (float)r.height;
 
         // Track
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)width, (float)height, height / 2.0f);
+        p.setFill(0xFF313244);
+        p.drawRoundRect(0, 0, width, height, height / 2.0f);
 
         // Active animated stripes
         float fillW = width * 0.78f;
-        heliosview_painter_save(p);
-        heliosview_painter_set_clip_rect(p, 0, 0, fillW, (float)height);
+        p.save();
+        p.setClipRect(0, 0, fillW, height);
 
-        heliosview_painter_set_fill(p, 0xFFCBA6F7);
-        heliosview_painter_draw_round_rect(p, 0, 0, fillW, (float)height, height / 2.0f);
+        p.setFill(0xFFCBA6F7);
+        p.drawRoundRect(0, 0, fillW, height, height / 2.0f);
 
         float stripeW = 16.0f;
         float offset = std::fmod(g_state.timeSec * 35.0f, stripeW * 2.0f);
-        heliosview_painter_set_fill(p, 0xFFB4BEFE);
+        p.setFill(0xFFB4BEFE);
 
         for (float sx = -stripeW * 2.0f + offset; sx < fillW + stripeW; sx += stripeW * 2.0f) {
-            float pts[] = {
-                sx, (float)height,
-                sx + stripeW, (float)height,
+            const float pts[] = {
+                sx, height,
+                sx + stripeW, height,
                 sx + stripeW + 8.0f, 0.0f,
                 sx + 8.0f, 0.0f
             };
-            heliosview_painter_draw_polygon(p, pts, 4);
+            p.drawPolygon(pts, 4);
         }
-        heliosview_painter_restore(p);
+        p.restore();
     });
     rightStack->add(stripedBar);
 
@@ -279,19 +670,19 @@ static std::shared_ptr<Widget> CreateTabControls() {
     auto makeBadge = [](const char* text, uint32_t bg, uint32_t fg) {
         auto badge = CustomWidget::create();
         badge->setSize(130, 32);
-        badge->setPaint([text, bg, fg](CustomWidget* w, heliosview_painter_t* p) {
-            int bw = 0, bh = 0;
-            heliosview_ui_widget_get_bounds(w->handle(), nullptr, nullptr, &bw, &bh);
-            heliosview_painter_set_fill(p, bg);
-            heliosview_painter_set_stroke(p, fg, 1.0f);
-            heliosview_painter_draw_round_rect(p, 0, 0, (float)bw, (float)bh, 6.0f);
+        badge->setPaint([text, bg, fg](CustomWidget* w, helios::Painter& p) {
+            const helios::Rect r = w->bounds();
+            const float bw = (float)r.width;
+            const float bh = (float)r.height;
+            p.setFill(bg);
+            p.setStroke(fg, 1.0f);
+            p.drawRoundRect(0, 0, bw, bh, 6.0f);
 
-            heliosview_font_desc_t font{"Segoe UI", 11.0f, HELIOSVIEW_FONT_BOLD};
-            heliosview_painter_set_font(p, &font);
-            heliosview_painter_set_fill(p, fg);
-            heliosview_text_metrics_t m{};
-            heliosview_painter_measure_text(p, text, &m);
-            heliosview_painter_draw_text(p, text, (bw - m.width) / 2.0f, (bh - m.height) / 2.0f);
+            p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::Bold });
+            p.setFill(fg);
+            helios::TextMetrics m{};
+            p.measureText(text, m);
+            p.drawText(text, (bw - m.width) / 2.0f, (bh - m.height) / 2.0f);
         });
         return badge;
     };
@@ -318,36 +709,35 @@ static std::shared_ptr<Widget> CreateTabCharts() {
     auto lineChart = CustomWidget::create();
     lineChart->setSize(956, 260);
 
-    lineChart->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        int cw = 0, ch = 0;
-        heliosview_ui_widget_get_bounds(w->handle(), nullptr, nullptr, &cw, &ch);
+    lineChart->setPaint([](CustomWidget* w, helios::Painter& p) {
+        const helios::Rect r = w->bounds();
+        const float cw = (float)r.width;
+        const float ch = (float)r.height;
 
         // Header Title
-        heliosview_font_desc_t fontH{"Segoe UI", 14.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFF8AADF4);
-        heliosview_painter_draw_text(p, "Real-Time Multi-Point Telemetry & Load Monitor (Area Gradient)", 20.0f, 16.0f);
+        p.setFont({ "Segoe UI", 14.0f, helios::FontFlag::Bold });
+        p.setFill(0xFF8AADF4);
+        p.drawText("Real-Time Multi-Point Telemetry & Load Monitor (Area Gradient)", 20.0f, 16.0f);
 
         float left = 50.0f;
-        float right = (float)cw - 24.0f;
+        float right = cw - 24.0f;
         float top = 46.0f;
-        float bottom = (float)ch - 30.0f;
+        float bottom = ch - 30.0f;
         float plotW = right - left;
         float plotH = bottom - top;
 
         // Background Grid & Y-Axis Labels
-        heliosview_font_desc_t fontAxis{"Segoe UI", 10.0f, 0};
-        heliosview_painter_set_font(p, &fontAxis);
+        p.setFont({ "Segoe UI", 10.0f, helios::FontFlag::None });
 
         for (int i = 0; i <= 4; ++i) {
             float y = bottom - i * (plotH / 4.0f);
-            heliosview_painter_set_stroke(p, 0xFF282A3A, 1.0f);
-            heliosview_painter_draw_line(p, left, y, right, y);
+            p.setStroke(0xFF282A3A, 1.0f);
+            p.drawLine(left, y, right, y);
 
             char buf[16];
             std::snprintf(buf, sizeof(buf), "%d%%", i * 25);
-            heliosview_painter_set_fill(p, 0xFF6E738D);
-            heliosview_painter_draw_text(p, buf, 14.0f, y - 6.0f);
+            p.setFill(0xFF6E738D);
+            p.drawText(buf, 14.0f, y - 6.0f);
         }
 
         // Generate dynamic waveform data points
@@ -372,13 +762,13 @@ static std::shared_ptr<Widget> CreateTabCharts() {
         poly.push_back(left);
         poly.push_back(bottom);
 
-        heliosview_painter_set_fill(p, 0x30A6E3A1);
-        heliosview_painter_set_stroke(p, 0, 0);
-        heliosview_painter_draw_polygon(p, poly.data(), poly.size() / 2);
+        p.setFill(0x30A6E3A1);
+        p.setStroke(0, 0);
+        p.drawPolygon(poly);
 
         // Curve stroke
-        heliosview_painter_set_stroke(p, 0xFFA6E3A1, 2.2f);
-        heliosview_painter_draw_polyline(p, pts.data(), pts.size() / 2, 0);
+        p.setStroke(0xFFA6E3A1, 2.2f);
+        p.drawPolyline(pts);
 
         // Secondary Telemetry Stream (Mauve)
         std::vector<float> pts2;
@@ -392,14 +782,14 @@ static std::shared_ptr<Widget> CreateTabCharts() {
             pts2.push_back(px);
             pts2.push_back(py);
         }
-        heliosview_painter_set_stroke(p, 0xFFCBA6F7, 1.8f);
-        heliosview_painter_draw_polyline(p, pts2.data(), pts2.size() / 2, 0);
+        p.setStroke(0xFFCBA6F7, 1.8f);
+        p.drawPolyline(pts2);
 
         // Crosshair & Data Tooltip when hovered
         if (g_state.chartHovered && g_state.chartHoverX >= left && g_state.chartHoverX <= right) {
             float hx = (float)g_state.chartHoverX;
-            heliosview_painter_set_stroke(p, 0x808AADF4, 1.2f);
-            heliosview_painter_draw_line(p, hx, top, hx, bottom);
+            p.setStroke(0x808AADF4, 1.2f);
+            p.drawLine(hx, top, hx, bottom);
 
             // Interpolated value at crosshair
             float frac = (hx - left) / plotW;
@@ -409,9 +799,9 @@ static std::shared_ptr<Widget> CreateTabCharts() {
             float hy = bottom - val * plotH;
 
             // Highlight point
-            heliosview_painter_set_fill(p, 0xFFFFFFFF);
-            heliosview_painter_set_stroke(p, 0xFFA6E3A1, 2.5f);
-            heliosview_painter_draw_ellipse(p, hx - 5.0f, hy - 5.0f, 10.0f, 10.0f);
+            p.setFill(0xFFFFFFFF);
+            p.setStroke(0xFFA6E3A1, 2.5f);
+            p.drawEllipse(hx - 5.0f, hy - 5.0f, 10.0f, 10.0f);
 
             // Tooltip box
             char tip[64];
@@ -420,14 +810,13 @@ static std::shared_ptr<Widget> CreateTabCharts() {
             float tipX = (hx + 10.0f + tipW > right) ? (hx - tipW - 10.0f) : (hx + 10.0f);
             float tipY = std::clamp(hy - 30.0f, top, bottom - tipH);
 
-            heliosview_painter_set_fill(p, 0xEE181926);
-            heliosview_painter_set_stroke(p, 0xFF8AADF4, 1.0f);
-            heliosview_painter_draw_round_rect(p, tipX, tipY, tipW, tipH, 4.0f);
+            p.setFill(0xEE181926);
+            p.setStroke(0xFF8AADF4, 1.0f);
+            p.drawRoundRect(tipX, tipY, tipW, tipH, 4.0f);
 
-            heliosview_font_desc_t fTip{"Segoe UI", 11.0f, HELIOSVIEW_FONT_BOLD};
-            heliosview_painter_set_font(p, &fTip);
-            heliosview_painter_set_fill(p, 0xFFCDD6F4);
-            heliosview_painter_draw_text(p, tip, tipX + 8.0f, tipY + 6.0f);
+            p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::Bold });
+            p.setFill(0xFFCDD6F4);
+            p.drawText(tip, tipX + 8.0f, tipY + 6.0f);
         }
     });
 
@@ -457,27 +846,26 @@ static std::shared_ptr<Widget> CreateTabCharts() {
     auto barWidget = CustomWidget::create();
     barWidget->setSize(470, 244);
 
-    barWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        int bw = 0, bh = 0;
-        heliosview_ui_widget_get_bounds(w->handle(), nullptr, nullptr, &bw, &bh);
+    barWidget->setPaint([](CustomWidget* w, helios::Painter& p) {
+        const helios::Rect r = w->bounds();
+        const float bw = (float)r.width;
+        const float bh = (float)r.height;
 
-        heliosview_font_desc_t fontH{"Segoe UI", 13.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFFF5BDE6);
-        heliosview_painter_draw_text(p, "Weekly Network Throughput (GB)", 18.0f, 14.0f);
+        p.setFont({ "Segoe UI", 13.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFF5BDE6);
+        p.drawText("Weekly Network Throughput (GB)", 18.0f, 14.0f);
 
         const char* days[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
         float vals[] = {4.2f, 7.8f, 5.4f, 9.2f, 8.5f, 3.1f, 6.4f};
         float maxVal = 10.0f;
 
         float startX = 36.0f;
-        float startY = (float)bh - 42.0f;
+        float startY = bh - 42.0f;
         float chartH = 140.0f;
-        float slotW = ((float)bw - startX - 24.0f) / 7.0f;
+        float slotW = (bw - startX - 24.0f) / 7.0f;
         float barWidth = 32.0f;
 
-        heliosview_font_desc_t fontDay{"Segoe UI", 11.0f, 0};
-        heliosview_painter_set_font(p, &fontDay);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::None });
 
         for (int i = 0; i < 7; ++i) {
             float x = startX + i * slotW + (slotW - barWidth) / 2.0f;
@@ -488,20 +876,20 @@ static std::shared_ptr<Widget> CreateTabCharts() {
             uint32_t fill = hovered ? 0xFF8AADF4 : 0xFF585B70;
             if (i == 3) fill = hovered ? 0xFFF5BDE6 : 0xFFCBA6F7; // Peak highlight
 
-            heliosview_painter_set_fill(p, fill);
-            heliosview_painter_set_stroke(p, 0, 0);
-            heliosview_painter_draw_round_rect(p, x, y, barWidth, h, 4.0f);
+            p.setFill(fill);
+            p.setStroke(0, 0);
+            p.drawRoundRect(x, y, barWidth, h, 4.0f);
 
             // Day label
-            heliosview_painter_set_fill(p, hovered ? 0xFFFFFFFF : 0xFFA6ADC8);
-            heliosview_painter_draw_text(p, days[i], x + 4.0f, startY + 8.0f);
+            p.setFill(hovered ? 0xFFFFFFFF : 0xFFA6ADC8);
+            p.drawText(days[i], x + 4.0f, startY + 8.0f);
 
             // Value on top if hovered
             if (hovered) {
                 char buf[16];
                 std::snprintf(buf, sizeof(buf), "%.1fG", vals[i]);
-                heliosview_painter_set_fill(p, 0xFFCAD3F5);
-                heliosview_painter_draw_text(p, buf, x - 2.0f, y - 16.0f);
+                p.setFill(0xFFCAD3F5);
+                p.drawText(buf, x - 2.0f, y - 16.0f);
             }
         }
     });
@@ -533,63 +921,58 @@ static std::shared_ptr<Widget> CreateTabCharts() {
     auto donutWidget = CustomWidget::create();
     donutWidget->setSize(470, 244);
 
-    donutWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        int dw = 0, dh = 0;
-        heliosview_ui_widget_get_bounds(w->handle(), nullptr, nullptr, &dw, &dh);
+    donutWidget->setPaint([](CustomWidget* w, helios::Painter& p) {
+        const float dh = (float)w->bounds().height;
 
-        heliosview_font_desc_t fontH{"Segoe UI", 13.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFFA6E3A1);
-        heliosview_painter_draw_text(p, "System Quota Allocation (Nested Rings)", 18.0f, 14.0f);
+        p.setFont({ "Segoe UI", 13.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFA6E3A1);
+        p.drawText("System Quota Allocation (Nested Rings)", 18.0f, 14.0f);
 
         float cx = 130.0f;
-        float cy = (float)dh / 2.0f + 10.0f;
+        float cy = dh / 2.0f + 10.0f;
 
         // Outer Ring: Disk 74%
         float r1 = 68.0f;
-        heliosview_painter_set_fill(p, 0);
-        heliosview_painter_set_stroke(p, 0xFF313244, 8.0f);
-        heliosview_painter_draw_ellipse(p, cx - r1, cy - r1, r1 * 2, r1 * 2);
-        heliosview_painter_set_stroke(p, 0xFF8AADF4, 8.0f);
-        heliosview_painter_draw_arc(p, cx - r1, cy - r1, r1 * 2, r1 * 2, -90.0f, 0.74f * 360.0f);
+        p.setFill(0);
+        p.setStroke(0xFF313244, 8.0f);
+        p.drawEllipse(cx - r1, cy - r1, r1 * 2, r1 * 2);
+        p.setStroke(0xFF8AADF4, 8.0f);
+        p.drawArc(cx - r1, cy - r1, r1 * 2, r1 * 2, -90.0f, 0.74f * 360.0f);
 
         // Middle Ring: Memory 58%
         float r2 = 52.0f;
-        heliosview_painter_set_stroke(p, 0xFF313244, 8.0f);
-        heliosview_painter_draw_ellipse(p, cx - r2, cy - r2, r2 * 2, r2 * 2);
-        heliosview_painter_set_stroke(p, 0xFFCBA6F7, 8.0f);
-        heliosview_painter_draw_arc(p, cx - r2, cy - r2, r2 * 2, r2 * 2, -90.0f, 0.58f * 360.0f);
+        p.setStroke(0xFF313244, 8.0f);
+        p.drawEllipse(cx - r2, cy - r2, r2 * 2, r2 * 2);
+        p.setStroke(0xFFCBA6F7, 8.0f);
+        p.drawArc(cx - r2, cy - r2, r2 * 2, r2 * 2, -90.0f, 0.58f * 360.0f);
 
         // Inner Ring: GPU VRAM 82%
         float r3 = 36.0f;
-        heliosview_painter_set_stroke(p, 0xFF313244, 8.0f);
-        heliosview_painter_draw_ellipse(p, cx - r3, cy - r3, r3 * 2, r3 * 2);
-        heliosview_painter_set_stroke(p, 0xFFA6E3A1, 8.0f);
-        heliosview_painter_draw_arc(p, cx - r3, cy - r3, r3 * 2, r3 * 2, -90.0f, 0.82f * 360.0f);
+        p.setStroke(0xFF313244, 8.0f);
+        p.drawEllipse(cx - r3, cy - r3, r3 * 2, r3 * 2);
+        p.setStroke(0xFFA6E3A1, 8.0f);
+        p.drawArc(cx - r3, cy - r3, r3 * 2, r3 * 2, -90.0f, 0.82f * 360.0f);
 
         // Center Score
-        heliosview_font_desc_t fScore{"Segoe UI", 15.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fScore);
-        heliosview_painter_set_fill(p, 0xFFCAD3F5);
-        heliosview_painter_draw_text(p, "71%", cx - 14.0f, cy - 8.0f);
+        p.setFont({ "Segoe UI", 15.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFCAD3F5);
+        p.drawText("71%", cx - 14.0f, cy - 8.0f);
 
         // Legend on Right
         float lx = 240.0f;
         float ly = 60.0f;
-        auto drawLegend = [p, &lx, &ly](uint32_t col, const char* name, const char* pct) {
-            heliosview_painter_set_fill(p, col);
-            heliosview_painter_set_stroke(p, 0, 0);
-            heliosview_painter_draw_round_rect(p, lx, ly, 12.0f, 12.0f, 3.0f);
+        auto drawLegend = [&p, &lx, &ly](uint32_t col, const char* name, const char* pct) {
+            p.setFill(col);
+            p.setStroke(0, 0);
+            p.drawRoundRect(lx, ly, 12.0f, 12.0f, 3.0f);
 
-            heliosview_font_desc_t f{"Segoe UI", 12.0f, 0};
-            heliosview_painter_set_font(p, &f);
-            heliosview_painter_set_fill(p, 0xFFCDD6F4);
-            heliosview_painter_draw_text(p, name, lx + 20.0f, ly);
+            p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::None });
+            p.setFill(0xFFCDD6F4);
+            p.drawText(name, lx + 20.0f, ly);
 
-            heliosview_font_desc_t fBold{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
-            heliosview_painter_set_font(p, &fBold);
-            heliosview_painter_set_fill(p, col);
-            heliosview_painter_draw_text(p, pct, lx + 140.0f, ly);
+            p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::Bold });
+            p.setFill(col);
+            p.drawText(pct, lx + 140.0f, ly);
             ly += 32.0f;
         };
 
@@ -616,11 +999,10 @@ static std::shared_ptr<Widget> CreateTabVectors() {
     auto pathWidget = CustomWidget::create();
     pathWidget->setSize(470, 520);
 
-    pathWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_font_desc_t fontH{"Segoe UI", 14.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFFF9E2AF);
-        heliosview_painter_draw_text(p, "Complex 2D Paths, Stars & Bezier Curves", 18.0f, 16.0f);
+    pathWidget->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFont({ "Segoe UI", 14.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFF9E2AF);
+        p.drawText("Complex 2D Paths, Stars & Bezier Curves", 18.0f, 16.0f);
 
         // 1. Golden 5-Point Star
         DrawStar(p, 110.0f, 110.0f, 60.0f, 26.0f, 5, 0xFFF9E2AF, 0xFFFAB387);
@@ -629,21 +1011,19 @@ static std::shared_ptr<Widget> CreateTabVectors() {
         DrawStar(p, 340.0f, 110.0f, 62.0f, 32.0f, 8, 0xFF89DCEB, 0xFF74C7EC);
 
         // Labels
-        heliosview_font_desc_t fontL{"Segoe UI", 11.0f, 0};
-        heliosview_painter_set_font(p, &fontL);
-        heliosview_painter_set_fill(p, 0xFFA6ADC8);
-        heliosview_painter_draw_text(p, "5-Point Vector Polygon", 44.0f, 185.0f);
-        heliosview_painter_draw_text(p, "8-Point Radiant Compass", 270.0f, 185.0f);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::None });
+        p.setFill(0xFFA6ADC8);
+        p.drawText("5-Point Vector Polygon", 44.0f, 185.0f);
+        p.drawText("8-Point Radiant Compass", 270.0f, 185.0f);
 
         // Separator
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_draw_rect(p, 20.0f, 210.0f, 430.0f, 1.0f);
+        p.setFill(0xFF313244);
+        p.drawRect(20.0f, 210.0f, 430.0f, 1.0f);
 
         // 3. Smooth Cubic Bezier Ribbon
-        heliosview_font_desc_t fontSub{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontSub);
-        heliosview_painter_set_fill(p, 0xFFCBA6F7);
-        heliosview_painter_draw_text(p, "Dynamic Cubic Bezier Waveform", 20.0f, 226.0f);
+        p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFCBA6F7);
+        p.drawText("Dynamic Cubic Bezier Waveform", 20.0f, 226.0f);
 
         float bx0 = 30.0f, by0 = 340.0f;
         float bx3 = 440.0f, by3 = 340.0f;
@@ -651,14 +1031,14 @@ static std::shared_ptr<Widget> CreateTabVectors() {
         float bx2 = 320.0f, by2 = 430.0f - std::sin(g_state.timeSec * 3.0f) * 60.0f;
 
         // Draw control lines
-        heliosview_painter_set_stroke(p, 0xFF45475A, 1.0f);
-        heliosview_painter_draw_line(p, bx0, by0, bx1, by1);
-        heliosview_painter_draw_line(p, bx3, by3, bx2, by2);
+        p.setStroke(0xFF45475A, 1.0f);
+        p.drawLine(bx0, by0, bx1, by1);
+        p.drawLine(bx3, by3, bx2, by2);
 
         // Control point handles
-        heliosview_painter_set_fill(p, 0xFFF38BA8);
-        heliosview_painter_draw_ellipse(p, bx1 - 4.0f, by1 - 4.0f, 8.0f, 8.0f);
-        heliosview_painter_draw_ellipse(p, bx2 - 4.0f, by2 - 4.0f, 8.0f, 8.0f);
+        p.setFill(0xFFF38BA8);
+        p.drawEllipse(bx1 - 4.0f, by1 - 4.0f, 8.0f, 8.0f);
+        p.drawEllipse(bx2 - 4.0f, by2 - 4.0f, 8.0f, 8.0f);
 
         // Approximate cubic bezier curve with polyline
         const int steps = 40;
@@ -668,12 +1048,12 @@ static std::shared_ptr<Widget> CreateTabVectors() {
             float u = (float)i / steps;
             float inv = 1.0f - u;
             float px = inv * inv * inv * bx0 + 3.0f * inv * inv * u * bx1 + 3.0f * inv * u * u * bx2 + u * u * u * bx3;
-            float py = inv * inv * inv * by0 + 3.0f * inv * inv * u * by1 + 3.0f * inv * u * u * bx2 + u * u * u * by3;
+            float py = inv * inv * inv * by0 + 3.0f * inv * inv * u * by1 + 3.0f * inv * u * u * by2 + u * u * u * by3;
             bPts.push_back(px);
             bPts.push_back(py);
         }
-        heliosview_painter_set_stroke(p, 0xFFF5C2E7, 3.0f);
-        heliosview_painter_draw_polyline(p, bPts.data(), bPts.size() / 2, 0);
+        p.setStroke(0xFFF5C2E7, 3.0f);
+        p.drawPolyline(bPts);
 
         // 4. Concentric Nested Polygons (Hexagon)
         float hx = 235.0f, hy = 445.0f;
@@ -684,9 +1064,9 @@ static std::shared_ptr<Widget> CreateTabVectors() {
                 hex.push_back(hx + std::cos(a) * r);
                 hex.push_back(hy + std::sin(a) * r);
             }
-            heliosview_painter_set_fill(p, 0);
-            heliosview_painter_set_stroke(p, (r == 48) ? 0xFF8AADF4 : 0xFFCBA6F7, 1.5f);
-            heliosview_painter_draw_polygon(p, hex.data(), 6);
+            p.setFill(0);
+            p.setStroke((r == 48) ? 0xFF8AADF4 : 0xFFCBA6F7, 1.5f);
+            p.drawPolygon(hex);
         }
     });
 
@@ -698,16 +1078,14 @@ static std::shared_ptr<Widget> CreateTabVectors() {
     auto gearWidget = CustomWidget::create();
     gearWidget->setSize(470, 520);
 
-    gearWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_font_desc_t fontH{"Segoe UI", 14.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFF8AADF4);
-        heliosview_painter_draw_text(p, "Mechanical Gear Train (Affine Transforms)", 18.0f, 16.0f);
+    gearWidget->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFont({ "Segoe UI", 14.0f, helios::FontFlag::Bold });
+        p.setFill(0xFF8AADF4);
+        p.drawText("Mechanical Gear Train (Affine Transforms)", 18.0f, 16.0f);
 
-        heliosview_font_desc_t fontSub{"Segoe UI", 11.0f, 0};
-        heliosview_painter_set_font(p, &fontSub);
-        heliosview_painter_set_fill(p, 0xFFA6ADC8);
-        heliosview_painter_draw_text(p, "Real-time affine matrix rotation with synchronized gear ratios", 18.0f, 38.0f);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::None });
+        p.setFill(0xFFA6ADC8);
+        p.drawText("Real-time affine matrix rotation with synchronized gear ratios", 18.0f, 38.0f);
 
         // Main drive gear (18 teeth, Radius 80)
         float cx1 = 175.0f, cy1 = 200.0f, r1 = 80.0f;
@@ -734,21 +1112,19 @@ static std::shared_ptr<Widget> CreateTabVectors() {
 
         // Bottom Info Card
         float infoY = 380.0f;
-        heliosview_painter_set_fill(p, 0xFF181926);
-        heliosview_painter_set_stroke(p, 0xFF313244, 1.0f);
-        heliosview_painter_draw_round_rect(p, 20.0f, infoY, 430.0f, 110.0f, 8.0f);
+        p.setFill(0xFF181926);
+        p.setStroke(0xFF313244, 1.0f);
+        p.drawRoundRect(20.0f, infoY, 430.0f, 110.0f, 8.0f);
 
-        heliosview_font_desc_t fBold{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fBold);
-        heliosview_painter_set_fill(p, 0xFFCAD3F5);
-        heliosview_painter_draw_text(p, "Kinematic Drive Metrics:", 34.0f, infoY + 16.0f);
+        p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFCAD3F5);
+        p.drawText("Kinematic Drive Metrics:", 34.0f, infoY + 16.0f);
 
-        heliosview_font_desc_t fInfo{"Segoe UI", 11.0f, 0};
-        heliosview_painter_set_font(p, &fInfo);
-        heliosview_painter_set_fill(p, 0xFFA6ADC8);
-        heliosview_painter_draw_text(p, "> Primary Drive: 18T @ 1.0x Angular Velocity", 34.0f, infoY + 40.0f);
-        heliosview_painter_draw_text(p, "> Intermediate Planet: 12T @ -1.5x Meshed Velocity", 34.0f, infoY + 60.0f);
-        heliosview_painter_draw_text(p, "> High-Speed Pinion: 9T @ -2.0x Overdrive", 34.0f, infoY + 80.0f);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::None });
+        p.setFill(0xFFA6ADC8);
+        p.drawText("> Primary Drive: 18T @ 1.0x Angular Velocity", 34.0f, infoY + 40.0f);
+        p.drawText("> Intermediate Planet: 12T @ -1.5x Meshed Velocity", 34.0f, infoY + 60.0f);
+        p.drawText("> High-Speed Pinion: 9T @ -2.0x Overdrive", 34.0f, infoY + 80.0f);
     });
 
     gearCard->addChild(gearWidget);
@@ -768,40 +1144,38 @@ static std::shared_ptr<Widget> CreateTabGauges() {
     auto tachoWidget = CustomWidget::create();
     tachoWidget->setSize(470, 520);
 
-    tachoWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_font_desc_t fontH{"Segoe UI", 14.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFFF38BA8);
-        heliosview_painter_draw_text(p, "Analog Precision Speedometer / Tachometer", 18.0f, 16.0f);
+    tachoWidget->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFont({ "Segoe UI", 14.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFF38BA8);
+        p.drawText("Analog Precision Speedometer / Tachometer", 18.0f, 16.0f);
 
         float cx = 235.0f;
         float cy = 250.0f;
         float r = 160.0f;
 
         // Dial Bezel (Gradient-like concentric rings)
-        heliosview_painter_set_fill(p, 0xFF181926);
-        heliosview_painter_set_stroke(p, 0xFF45475A, 3.0f);
-        heliosview_painter_draw_ellipse(p, cx - r, cy - r, r * 2.0f, r * 2.0f);
+        p.setFill(0xFF181926);
+        p.setStroke(0xFF45475A, 3.0f);
+        p.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
 
         // Color Arc Zones:
         // Semicircular range: 135 deg to 405 deg (270 deg span)
         float startAngle = 135.0f;
         // Green zone (0 - 80 km/h) -> 135 to 270 deg (135 deg span)
-        heliosview_painter_set_fill(p, 0);
-        heliosview_painter_set_stroke(p, 0xFFA6E3A1, 6.0f);
-        heliosview_painter_draw_arc(p, cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 135.0f, 135.0f);
+        p.setFill(0);
+        p.setStroke(0xFFA6E3A1, 6.0f);
+        p.drawArc(cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 135.0f, 135.0f);
 
         // Amber zone (80 - 120 km/h) -> 270 to 337.5 deg (67.5 deg span)
-        heliosview_painter_set_stroke(p, 0xFFF9E2AF, 6.0f);
-        heliosview_painter_draw_arc(p, cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 270.0f, 67.5f);
+        p.setStroke(0xFFF9E2AF, 6.0f);
+        p.drawArc(cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 270.0f, 67.5f);
 
         // Red danger zone (120 - 160 km/h) -> 337.5 to 405 deg (67.5 deg span)
-        heliosview_painter_set_stroke(p, 0xFFF38BA8, 6.0f);
-        heliosview_painter_draw_arc(p, cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 337.5f, 67.5f);
+        p.setStroke(0xFFF38BA8, 6.0f);
+        p.drawArc(cx - r + 14.0f, cy - r + 14.0f, (r - 14.0f) * 2.0f, (r - 14.0f) * 2.0f, 337.5f, 67.5f);
 
         // Major and Minor Tick Marks
-        heliosview_font_desc_t fontTick{"Segoe UI", 11.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontTick);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::Bold });
 
         for (int val = 0; val <= 160; val += 20) {
             float frac = (float)val / 160.0f;
@@ -816,16 +1190,16 @@ static std::shared_ptr<Widget> CreateTabGauges() {
             float x2 = cx + cosA * (r - 16.0f);
             float y2 = cy + sinA * (r - 16.0f);
 
-            heliosview_painter_set_stroke(p, (val >= 120) ? 0xFFF38BA8 : 0xFFCAD3F5, 2.5f);
-            heliosview_painter_draw_line(p, x1, y1, x2, y2);
+            p.setStroke((val >= 120) ? 0xFFF38BA8 : 0xFFCAD3F5, 2.5f);
+            p.drawLine(x1, y1, x2, y2);
 
             // Number Label
             char buf[8];
             std::snprintf(buf, sizeof(buf), "%d", val);
             float lx = cx + cosA * (r - 46.0f) - 8.0f;
             float ly = cy + sinA * (r - 46.0f) - 6.0f;
-            heliosview_painter_set_fill(p, 0xFFA6ADC8);
-            heliosview_painter_draw_text(p, buf, lx, ly);
+            p.setFill(0xFFA6ADC8);
+            p.drawText(buf, lx, ly);
         }
 
         // Animated Needle with Spring Physics Simulation
@@ -842,33 +1216,31 @@ static std::shared_ptr<Widget> CreateTabGauges() {
         float tailX = cx - std::cos(needleRad) * 22.0f;
         float tailY = cy - std::sin(needleRad) * 22.0f;
 
-        heliosview_painter_set_stroke(p, 0xFFF38BA8, 3.5f);
-        heliosview_painter_draw_line(p, tailX, tailY, nx, ny);
+        p.setStroke(0xFFF38BA8, 3.5f);
+        p.drawLine(tailX, tailY, nx, ny);
 
         // Center Pivot Hub
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_set_stroke(p, 0xFFCAD3F5, 2.0f);
-        heliosview_painter_draw_ellipse(p, cx - 14.0f, cy - 14.0f, 28.0f, 28.0f);
+        p.setFill(0xFF313244);
+        p.setStroke(0xFFCAD3F5, 2.0f);
+        p.drawEllipse(cx - 14.0f, cy - 14.0f, 28.0f, 28.0f);
 
         // Digital Readout Display
-        heliosview_painter_set_fill(p, 0xFF11111B);
-        heliosview_painter_set_stroke(p, 0xFF313244, 1.0f);
-        heliosview_painter_draw_round_rect(p, cx - 75.0f, cy + 60.0f, 150.0f, 48.0f, 8.0f);
+        p.setFill(0xFF11111B);
+        p.setStroke(0xFF313244, 1.0f);
+        p.drawRoundRect(cx - 75.0f, cy + 60.0f, 150.0f, 48.0f, 8.0f);
 
         char digBuf[32];
         std::snprintf(digBuf, sizeof(digBuf), "%.1f", g_state.tachometerVal);
-        heliosview_font_desc_t fDigital{"Segoe UI", 20.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fDigital);
-        heliosview_painter_set_fill(p, 0xFFF38BA8);
+        p.setFont({ "Segoe UI", 20.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFF38BA8);
 
-        heliosview_text_metrics_t dm{};
-        heliosview_painter_measure_text(p, digBuf, &dm);
-        heliosview_painter_draw_text(p, digBuf, cx - dm.width / 2.0f - 18.0f, cy + 72.0f);
+        helios::TextMetrics dm{};
+        p.measureText(digBuf, dm);
+        p.drawText(digBuf, cx - dm.width / 2.0f - 18.0f, cy + 72.0f);
 
-        heliosview_font_desc_t fKm{"Segoe UI", 11.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fKm);
-        heliosview_painter_set_fill(p, 0xFF6E738D);
-        heliosview_painter_draw_text(p, "KM/H", cx + 22.0f, cy + 78.0f);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::Bold });
+        p.setFill(0xFF6E738D);
+        p.drawText("KM/H", cx + 22.0f, cy + 78.0f);
     });
 
     tachoCard->addChild(tachoWidget);
@@ -879,11 +1251,10 @@ static std::shared_ptr<Widget> CreateTabGauges() {
     auto oscWidget = CustomWidget::create();
     oscWidget->setSize(470, 520);
 
-    oscWidget->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_font_desc_t fontH{"Segoe UI", 14.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontH);
-        heliosview_painter_set_fill(p, 0xFFA6E3A1);
-        heliosview_painter_draw_text(p, "Dual-Channel Live CRT Oscilloscope (60FPS)", 18.0f, 16.0f);
+    oscWidget->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFont({ "Segoe UI", 14.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFA6E3A1);
+        p.drawText("Dual-Channel Live CRT Oscilloscope (60FPS)", 18.0f, 16.0f);
 
         float scrX = 20.0f;
         float scrY = 48.0f;
@@ -891,29 +1262,29 @@ static std::shared_ptr<Widget> CreateTabGauges() {
         float scrH = 340.0f;
 
         // CRT Screen Frame
-        heliosview_painter_set_fill(p, 0xFF0D1117);
-        heliosview_painter_set_stroke(p, 0xFF238636, 1.5f);
-        heliosview_painter_draw_round_rect(p, scrX, scrY, scrW, scrH, 10.0f);
+        p.setFill(0xFF0D1117);
+        p.setStroke(0xFF238636, 1.5f);
+        p.drawRoundRect(scrX, scrY, scrW, scrH, 10.0f);
 
         // Screen Grid (Phosphor Grid)
-        heliosview_painter_save(p);
-        heliosview_painter_set_clip_rect(p, scrX, scrY, scrW, scrH);
+        p.save();
+        p.setClipRect(scrX, scrY, scrW, scrH);
 
         // Grid lines
-        heliosview_painter_set_stroke(p, 0x30238636, 1.0f);
+        p.setStroke(0x30238636, 1.0f);
         for (float x = scrX; x < scrX + scrW; x += 35.0f) {
-            heliosview_painter_draw_line(p, x, scrY, x, scrY + scrH);
+            p.drawLine(x, scrY, x, scrY + scrH);
         }
         for (float y = scrY; y < scrY + scrH; y += 35.0f) {
-            heliosview_painter_draw_line(p, scrX, y, scrX + scrW, y);
+            p.drawLine(scrX, y, scrX + scrW, y);
         }
 
         // Center crosshairs
         float midX = scrX + scrW / 2.0f;
         float midY = scrY + scrH / 2.0f;
-        heliosview_painter_set_stroke(p, 0x60238636, 1.5f);
-        heliosview_painter_draw_line(p, scrX, midY, scrX + scrW, midY);
-        heliosview_painter_draw_line(p, midX, scrY, midX, scrY + scrH);
+        p.setStroke(0x60238636, 1.5f);
+        p.drawLine(scrX, midY, scrX + scrW, midY);
+        p.drawLine(midX, scrY, midX, scrY + scrH);
 
         // Channel 1: High-Frequency Sine Carrier (Emerald Green Glow)
         const int samples = 140;
@@ -926,10 +1297,10 @@ static std::shared_ptr<Widget> CreateTabGauges() {
             ch1Pts.push_back(x);
             ch1Pts.push_back(y);
         }
-        heliosview_painter_set_stroke(p, 0x40A6E3A1, 5.0f); // Bloom glow
-        heliosview_painter_draw_polyline(p, ch1Pts.data(), samples, 0);
-        heliosview_painter_set_stroke(p, 0xFFA6E3A1, 1.8f); // Sharp core
-        heliosview_painter_draw_polyline(p, ch1Pts.data(), samples, 0);
+        p.setStroke(0x40A6E3A1, 5.0f); // Bloom glow
+        p.drawPolyline(ch1Pts);
+        p.setStroke(0xFFA6E3A1, 1.8f); // Sharp core
+        p.drawPolyline(ch1Pts);
 
         // Channel 2: Modulated Low-Frequency Signal (Cyan Glow)
         std::vector<float> ch2Pts;
@@ -942,30 +1313,28 @@ static std::shared_ptr<Widget> CreateTabGauges() {
             ch2Pts.push_back(x);
             ch2Pts.push_back(y);
         }
-        heliosview_painter_set_stroke(p, 0x4089DCEB, 5.0f); // Bloom glow
-        heliosview_painter_draw_polyline(p, ch2Pts.data(), samples, 0);
-        heliosview_painter_set_stroke(p, 0xFF89DCEB, 1.8f); // Sharp core
-        heliosview_painter_draw_polyline(p, ch2Pts.data(), samples, 0);
+        p.setStroke(0x4089DCEB, 5.0f); // Bloom glow
+        p.drawPolyline(ch2Pts);
+        p.setStroke(0xFF89DCEB, 1.8f); // Sharp core
+        p.drawPolyline(ch2Pts);
 
-        heliosview_painter_restore(p);
+        p.restore();
 
         // Channel Status Badges
         float badgeY = scrY + scrH + 18.0f;
-        auto drawChBadge = [p, badgeY](float bx, const char* name, const char* spec, uint32_t col) {
-            heliosview_painter_set_fill(p, 0xFF181926);
-            heliosview_painter_set_stroke(p, col, 1.0f);
-            heliosview_painter_draw_round_rect(p, bx, badgeY, 195.0f, 75.0f, 8.0f);
+        auto drawChBadge = [&p, badgeY](float bx, const char* name, const char* spec, uint32_t col) {
+            p.setFill(0xFF181926);
+            p.setStroke(col, 1.0f);
+            p.drawRoundRect(bx, badgeY, 195.0f, 75.0f, 8.0f);
 
-            heliosview_font_desc_t fB{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
-            heliosview_painter_set_font(p, &fB);
-            heliosview_painter_set_fill(p, col);
-            heliosview_painter_draw_text(p, name, bx + 14.0f, badgeY + 12.0f);
+            p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::Bold });
+            p.setFill(col);
+            p.drawText(name, bx + 14.0f, badgeY + 12.0f);
 
-            heliosview_font_desc_t fS{"Segoe UI", 10.0f, 0};
-            heliosview_painter_set_font(p, &fS);
-            heliosview_painter_set_fill(p, 0xFFA6ADC8);
-            heliosview_painter_draw_text(p, spec, bx + 14.0f, badgeY + 36.0f);
-            heliosview_painter_draw_text(p, "Probe: 1X | Coupling: DC", bx + 14.0f, badgeY + 52.0f);
+            p.setFont({ "Segoe UI", 10.0f, helios::FontFlag::None });
+            p.setFill(0xFFA6ADC8);
+            p.drawText(spec, bx + 14.0f, badgeY + 36.0f);
+            p.drawText("Probe: 1X | Coupling: DC", bx + 14.0f, badgeY + 52.0f);
         };
 
         drawChBadge(scrX + 10.0f, "CH 1: 50.0 mV/div", "Sine wave @ 2.45 kHz", 0xFFA6E3A1);
@@ -988,12 +1357,48 @@ int main() {
     std::cout << " HeliosView 2D DirectDraw & UI Component Suite Showcase\n";
     std::cout << "===========================================================\n";
 
-    heliosview_window_t* win = heliosview_window_create(1020, 800, "HeliosView 2D DirectDraw & Retained UI Suite");
-    if (!win) return 1;
+    // The application object owns the message loop (helios::App::exec); frames are
+    // driven by App::frameCallback, native events by the Window's signals.
+    helios::App app;
 
-    // DirectDraw UIHost with Blend2D Engine
-    heliosview_host_t* host = heliosview_host_create_ui(win, 0, 0, 1020, 800, HELIOSVIEW_ENGINE_BLEND2D);
-    if (!host) return 1;
+    helios::Window win(1020, 800, "HeliosView 2D DirectDraw & Retained UI Suite",
+                       helios::WindowStyle::Normal);
+    s_win = &win;
+
+    // Right-click context popup menu
+    s_contextMenu = std::make_unique<helios::Menu>();
+    auto* itemMax = s_contextMenu->addItem("Toggle Maximize");
+    itemMax->triggered.connect([] { if (s_win) s_win->toggleMaximize(); });
+
+    auto* itemFs = s_contextMenu->addItem("Toggle Fullscreen");
+    itemFs->triggered.connect([] {
+        static bool fs = false;
+        fs = !fs;
+        if (s_win) s_win->setFullscreen(fs);
+    });
+
+    s_contextMenu->addSeparator();
+
+    auto* itemPicker = s_contextMenu->addItem("Open File Picker...");
+    itemPicker->triggered.connect([] {
+        auto files = helios::openFiles(s_win ? s_win->nativeHandle() : nullptr, "Context Menu File Picker");
+        if (!files.empty()) std::cout << "[Menu] Selected: " << files.front() << "\n";
+    });
+
+    auto* itemToast = s_contextMenu->addItem("Send OS Toast Notification");
+    itemToast->triggered.connect([] {
+        helios::notificationShow("HeliosView Context Menu", "Triggered from right-click native context menu!");
+    });
+
+    s_contextMenu->addSeparator();
+
+    auto* itemExit = s_contextMenu->addItem("Exit Gallery");
+    itemExit->triggered.connect([] { if (auto* a = helios::App::instance()) a->quit(); });
+
+    // DirectDraw UI viewport with the Blend2D engine. The host is attached to the
+    // window (the window destroys it), and it keeps the widget tree alive.
+    helios::UIHost host = win.createUIHost(0, 0, 1020, 800, HELIOSVIEW_ENGINE_BLEND2D);
+    if (!host.valid()) return 1;
 
     // Root UI Tree (VStack)
     auto rootStack = VStack::create(16, 24);
@@ -1008,96 +1413,103 @@ int main() {
 
     auto engineBadge = CustomWidget::create();
     engineBadge->setSize(260, 32);
-    engineBadge->setPaint([](CustomWidget* w, heliosview_painter_t* p) {
-        heliosview_painter_set_fill(p, 0xFF181926);
-        heliosview_painter_set_stroke(p, 0xFF8AADF4, 1.0f);
-        heliosview_painter_draw_round_rect(p, 0, 0, 260.0f, 32.0f, 6.0f);
+    engineBadge->setPaint([](CustomWidget*, helios::Painter& p) {
+        p.setFill(0xFF181926);
+        p.setStroke(0xFF8AADF4, 1.0f);
+        p.drawRoundRect(0, 0, 260.0f, 32.0f, 6.0f);
 
-        heliosview_font_desc_t font{"Segoe UI", 11.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &font);
-        heliosview_painter_set_fill(p, 0xFF8AADF4);
-        heliosview_painter_draw_text(p, "ENGINE: BLEND2D (JIT X86_64) | 60 FPS", 16.0f, 8.0f);
+        p.setFont({ "Segoe UI", 11.0f, helios::FontFlag::Bold });
+        p.setFill(0xFF8AADF4);
+        p.drawText("Engine: BLEND2D (JIT X86_64) | 60 FPS", 16.0f, 8.0f);
     });
     headerRow->add(engineBadge);
     rootStack->add(headerRow);
 
-    // Segmented Tab Selector
+    // Segmented Tab Selector (5 Tabs)
     std::vector<std::string> tabNames = {
-        "Controls & Forms",
-        "Charts & Analytics",
-        "Vector & Paths",
-        "Gauges & Waves"
+        "OS Shell",
+        "Controls",
+        "Charts",
+        "Vectors",
+        "Gauges"
     };
     auto tabBar = SegmentedControl::create(tabNames, 0);
     tabBar->setSize(964, 40);
     rootStack->add(tabBar);
 
     // Tab Views
+    auto tabShell = CreateTabShellIntegration();
     auto tab0 = CreateTabControls();
     auto tab1 = CreateTabCharts();
     auto tab2 = CreateTabVectors();
     auto tab3 = CreateTabGauges();
 
+    tab0->setVisible(false);
     tab1->setVisible(false);
     tab2->setVisible(false);
     tab3->setVisible(false);
 
+    rootStack->add(tabShell);
     rootStack->add(tab0);
     rootStack->add(tab1);
     rootStack->add(tab2);
     rootStack->add(tab3);
 
     // Tab Switching Logic
-    tabBar->onChange([tab0, tab1, tab2, tab3, host](int idx) {
+    tabBar->onChange([tabShell, tab0, tab1, tab2, tab3, &host](int idx) {
         g_state.activeTab = idx;
-        tab0->setVisible(idx == 0);
-        tab1->setVisible(idx == 1);
-        tab2->setVisible(idx == 2);
-        tab3->setVisible(idx == 3);
-        heliosview_host_ui_request_repaint(host);
+        tabShell->setVisible(idx == 0);
+        tab0->setVisible(idx == 1);
+        tab1->setVisible(idx == 2);
+        tab2->setVisible(idx == 3);
+        tab3->setVisible(idx == 4);
+        host.requestRepaint();
     });
 
-    // Attach root to Host
-    heliosview_host_ui_set_root(host, rootStack->handle());
-    heliosview_window_show(win);
+    // Attach the tree to the host (which now keeps it alive) and show the window
+    host.setRootWidget(rootStack);
+    win.show();
 
-    std::cout << "[UI] Gallery initialized with 4 interactive tabs.\n";
+    // Native event wiring -- no polling loop: the Window dispatches into its signals
+    win.closeRequested.connect([&win] { win.close(); });
+    win.resized.connect([&host](int32_t w, int32_t h) {
+        host.setBounds(0, 0, w, h);
+    });
+    win.mouseButtonPressed.connect([](int32_t, int32_t, helios::MouseButton button) {
+        if (button == helios::MouseButton::Right && s_contextMenu && s_win) {
+            s_contextMenu->show(s_win->nativeHandle());
+        }
+    });
 
-    // Main 60 FPS Animation & Event Loop
-    struct LoopCtx {
-        heliosview_host_t* host;
-        std::shared_ptr<VStack> root;
-    } loopCtx{host, rootStack};
-
-    heliosview_run([](void* udata) -> int {
-        auto* ctx = static_cast<LoopCtx*>(udata);
+    // Per-frame animation state, then a repaint request for the live widgets
+    app.frameCallback = [&host] {
         g_state.timeSec += 0.016f;
         g_state.gearAngle += 0.035f;
 
         // Continuous 60 FPS repaint for animations & live gauges
-        heliosview_host_ui_request_repaint(ctx->host);
+        host.requestRepaint();
+    };
 
-        heliosview_event_t ev;
-        while (heliosview_poll(&ev)) {
-            if (ev.type == HELIOSVIEW_EVENT_WINDOW_RESIZE) {
-                heliosview_host_set_bounds(ctx->host, 0, 0, ev.width, ev.height);
-            } else if (ev.type == HELIOSVIEW_EVENT_WINDOW_CLOSE) {
-                heliosview_quit();
-                return 1;
-            }
-        }
-        return 0;
-    }, &loopCtx);
+    std::cout << "[UI] Gallery initialized with 5 interactive tabs (Tab 0: UI-driven Native OS Shell).\n";
+    std::cout << "[UI] Tip: Right-click anywhere in window for Native Context Menu.\n";
 
-    // Teardown
+    // Main 60 FPS Animation & Event Loop
+    const int exitCode = app.exec();
+
+    // Teardown: detach the tree while the host is still alive, then let the window
+    // destroy the host it owns.
+    host.clearRoot();
     rootStack.reset();
+    tabShell.reset();
     tab0.reset();
     tab1.reset();
     tab2.reset();
     tab3.reset();
+    s_contextMenu.reset();
+    s_tray.reset();
+    s_subWindows.clear();
+    win.close();
+    s_win = nullptr;
 
-    if (host) heliosview_host_destroy(host);
-    if (win) heliosview_window_destroy(win);
-
-    return 0;
+    return exitCode;
 }

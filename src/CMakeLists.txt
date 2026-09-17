@@ -37,10 +37,19 @@ if(WIN32)
     # WebView2 SDK: header-only interface target populated at configure time
     # (see the top-level CMakeLists.txt), linking the WebView2Loader import lib.
     target_link_libraries(HeliosView PRIVATE WebView2::SDK)
-    # WebView2Loader.dll must sit next to the exe (the static loader loads it at runtime)
+    # Runtime dependencies must sit next to the DLL/exe:
+    #   - WebView2Loader.dll (dynamic loader)
+    #   - libssl-3-x64.dll & libcrypto-3-x64.dll (OpenSSL runtime)
+    #   - cacert.pem (TLS root certificate bundle)
     add_custom_command(TARGET HeliosView POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${HELIOSVIEW_WEBVIEW2_LOADER_DLL}"
+            $<TARGET_FILE_DIR:HeliosView>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${HELIOSVIEW_OPENSSL_DLLS}
+            $<TARGET_FILE_DIR:HeliosView>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HELIOSVIEW_CACERT_PEM}"
             $<TARGET_FILE_DIR:HeliosView>
     )
 

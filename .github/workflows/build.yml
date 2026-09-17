@@ -1,11 +1,11 @@
 name: build
 
 on:
-  # Builds are manual: run from the Actions page (Run workflow, pick a branch)
-  # whenever needed. The only automatic run is a version tag push, which also
-  # publishes the release.
   workflow_dispatch:
+  pull_request:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
 
@@ -17,13 +17,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        # Submodules are inited manually below: actions/checkout fetches
-        # submodules with full history, and the boost superproject must never
-        # be recursed into (all ~160 lib submodules). A shallow init keeps the
-        # checkout small; CMake then inits only the boost libs the build needs.
-      - name: Init submodules (shallow)
-        shell: bash
-        run: git submodule update --init --depth 1
+      - name: Setup dependencies (submodules and prebuilt packages)
+        shell: pwsh
+        run: .\scripts\setup-dependencies.ps1
 
       # windows-latest ships Visual Studio 2026, not 2022 - and std::flat_map
       # needs a recent MSVC. msvc-dev-cmd finds the latest installed VS toolset
@@ -52,6 +48,9 @@ jobs:
 
       - name: Build (Release)
         run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -84,10 +83,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           cmake --install build --prefix $root
           New-Item -ItemType Directory -Force -Path (Join-Path $root "examples") | Out-Null
-          Copy-Item examples\CMakeLists.txt, examples\*.cpp, examples\*.c -Destination (Join-Path $root "examples")
+          Copy-Item examples\* -Recurse -Destination (Join-Path $root "examples")
           # Prebuilt demos go into bin/ alongside the DLLs, so the package is
-          # runnable as-is (extract and double-click a demo).
-          Copy-Item build\bin\*.exe -Destination (Join-Path $root "bin")
+          # runnable as-is (extract and double-click a demo). Exclude test binaries.
+          Get-ChildItem build\bin\*.exe -Exclude "*Test.exe" | Copy-Item -Destination (Join-Path $root "bin")
           Copy-Item packaging\README.md -Destination (Join-Path $root "README.md")
           $zip = Join-Path $sdk "HeliosView-$ver-win64-SDK.zip"
           Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal

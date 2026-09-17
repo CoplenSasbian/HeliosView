@@ -61,11 +61,21 @@ struct heliosview_ui_widget {
         return this;
     }
 
-    void render_tree(heliosview_painter_t* p, int origin_x, int origin_y) {
-        if (!visible) return;
+    void screen_to_local(int root_x, int root_y, int* out_local_x, int* out_local_y) const {
+        int off_x = 0;
+        int off_y = 0;
+        const heliosview_ui_widget* curr = this;
+        while (curr) {
+            off_x += curr->x;
+            off_y += curr->y;
+            curr = curr->parent;
+        }
+        if (out_local_x) *out_local_x = root_x - off_x;
+        if (out_local_y) *out_local_y = root_y - off_y;
+    }
 
-        int abs_x = origin_x + x;
-        int abs_y = origin_y + y;
+    void render_tree(heliosview_painter_t* p, int /*origin_x*/, int /*origin_y*/) {
+        if (!visible) return;
 
         heliosview_painter_save(p);
         heliosview_painter_translate(p, (float)x, (float)y);
@@ -82,11 +92,24 @@ struct heliosview_ui_widget {
     }
 };
 
+struct HostUiBinding {
+    heliosview_ui_widget_t* root = nullptr;
+    heliosview_ui_widget_t* hovered_widget = nullptr;
+    heliosview_ui_widget_t* pressed_widget = nullptr;
+};
+
+static thread_local std::vector<std::pair<heliosview_host_t*, HostUiBinding*>> s_bindings;
+
 // ================= Widget Core API =================
 
 heliosview_ui_widget_t* heliosview_ui_widget_create(
     const heliosview_ui_widget_desc_t* desc, void* user_data) {
-    auto* w = hv::hv_alloc<heliosview_ui_widget>();
+    heliosview_ui_widget* w = nullptr;
+    try {
+        w = hv::hv_alloc<heliosview_ui_widget>();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
     if (desc) w->desc = *desc;
     w->user_data = user_data;
     w->visible = true;
@@ -95,6 +118,15 @@ heliosview_ui_widget_t* heliosview_ui_widget_create(
 
 void heliosview_ui_widget_destroy(heliosview_ui_widget_t* widget) {
     if (!widget) return;
+
+    for (auto& pair : s_bindings) {
+        if (pair.second) {
+            if (pair.second->root == widget) pair.second->root = nullptr;
+            if (pair.second->hovered_widget == widget) pair.second->hovered_widget = nullptr;
+            if (pair.second->pressed_widget == widget) pair.second->pressed_widget = nullptr;
+        }
+    }
+    widget->host_attached = nullptr;
 
     if (widget->parent) {
         auto& sibs = widget->parent->children;
@@ -183,12 +215,6 @@ void heliosview_ui_widget_request_repaint(heliosview_ui_widget_t* widget) {
 
 // ================= Host Integration =================
 
-struct HostUiBinding {
-    heliosview_ui_widget_t* root = nullptr;
-    heliosview_ui_widget_t* hovered_widget = nullptr;
-    heliosview_ui_widget_t* pressed_widget = nullptr;
-};
-
 static void HostPaintCallback(heliosview_host_t* host, heliosview_painter_t* painter, void* userdata) {
     auto* binding = static_cast<HostUiBinding*>(userdata);
     if (!binding || !binding->root) return;
@@ -205,18 +231,49 @@ static void HostPaintCallback(heliosview_host_t* host, heliosview_painter_t* pai
     binding->root->render_tree(painter, 0, 0);
 }
 
-static void HostMouseCallback(heliosview_host_t* host, const heliosview_host_mouse_event_t* evt, void* userdata) {
+static void HostMouseCallback(heliosview_host_t* /*host*/, const heliosview_host_mouse_event_t* evt, void* userdata) {
     auto* binding = static_cast<HostUiBinding*>(userdata);
     if (!binding || !binding->root) return;
 
-    int lx = 0, ly = 0;
-    heliosview_ui_widget_t* hit = binding->root->hit_test(evt->x, evt->y, &lx, &ly);
+    if (evt->action == HELIOSVIEW_HOST_MOUSE_DOWN) {
+        int lx = 0, ly = 0;
+        heliosview_ui_widget_t* hit = binding->root->hit_test(evt->x, evt->y, &lx, &ly);
+        binding->pressed_widget = hit;
+        if (hit && hit->desc.event) {
+            heliosview_host_mouse_event_t local_evt = *evt;
+            local_evt.x = lx;
+            local_evt.y = ly;
+            hit->desc.event(hit, &local_evt, hit->user_data);
+        }
+        return;
+    }
 
     if (evt->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+        if (binding->pressed_widget) {
+            // Mouse drag in progress: route move event to the pressed widget even outside its bounds
+            int lx = 0, ly = 0;
+            binding->pressed_widget->screen_to_local(evt->x, evt->y, &lx, &ly);
+            if (binding->pressed_widget->desc.event) {
+                heliosview_host_mouse_event_t local_evt = *evt;
+                local_evt.x = lx;
+                local_evt.y = ly;
+                binding->pressed_widget->desc.event(binding->pressed_widget, &local_evt, binding->pressed_widget->user_data);
+            }
+            return;
+        }
+
+        // Standard hover & mouse move
+        int lx = 0, ly = 0;
+        heliosview_ui_widget_t* hit = binding->root->hit_test(evt->x, evt->y, &lx, &ly);
         if (hit != binding->hovered_widget) {
             if (binding->hovered_widget) {
                 binding->hovered_widget->hovered = false;
                 binding->hovered_widget->request_repaint();
+                if (binding->hovered_widget->desc.event) {
+                    heliosview_host_mouse_event_t leave_evt = *evt;
+                    leave_evt.action = HELIOSVIEW_HOST_MOUSE_LEAVE;
+                    binding->hovered_widget->desc.event(binding->hovered_widget, &leave_evt, binding->hovered_widget->user_data);
+                }
             }
             if (hit) {
                 hit->hovered = true;
@@ -224,29 +281,81 @@ static void HostMouseCallback(heliosview_host_t* host, const heliosview_host_mou
             }
             binding->hovered_widget = hit;
         }
-    } else if (evt->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
-        if (binding->hovered_widget) {
-            binding->hovered_widget->hovered = false;
-            binding->hovered_widget->pressed = false;
-            binding->hovered_widget->request_repaint();
-            binding->hovered_widget = nullptr;
+
+        if (hit && hit->desc.event) {
+            heliosview_host_mouse_event_t local_evt = *evt;
+            local_evt.x = lx;
+            local_evt.y = ly;
+            hit->desc.event(hit, &local_evt, hit->user_data);
         }
-        binding->pressed_widget = nullptr;
+        return;
     }
 
-    // Forward event to hit widget
-    if (hit && hit->desc.event) {
-        heliosview_host_mouse_event_t local_evt = *evt;
-        local_evt.x = lx;
-        local_evt.y = ly;
-        hit->desc.event(hit, &local_evt, hit->user_data);
+    if (evt->action == HELIOSVIEW_HOST_MOUSE_UP) {
+        heliosview_ui_widget_t* target = binding->pressed_widget;
+        binding->pressed_widget = nullptr;
+
+        int lx = 0, ly = 0;
+        if (target) {
+            target->screen_to_local(evt->x, evt->y, &lx, &ly);
+            if (target->desc.event) {
+                heliosview_host_mouse_event_t local_evt = *evt;
+                local_evt.x = lx;
+                local_evt.y = ly;
+                target->desc.event(target, &local_evt, target->user_data);
+            }
+        } else {
+            heliosview_ui_widget_t* hit = binding->root->hit_test(evt->x, evt->y, &lx, &ly);
+            if (hit && hit->desc.event) {
+                heliosview_host_mouse_event_t local_evt = *evt;
+                local_evt.x = lx;
+                local_evt.y = ly;
+                hit->desc.event(hit, &local_evt, hit->user_data);
+            }
+        }
+
+        // Re-evaluate hover target after mouse release
+        int hx = 0, hy = 0;
+        heliosview_ui_widget_t* cur_hit = binding->root->hit_test(evt->x, evt->y, &hx, &hy);
+        if (cur_hit != binding->hovered_widget) {
+            if (binding->hovered_widget) {
+                binding->hovered_widget->hovered = false;
+                binding->hovered_widget->request_repaint();
+                if (binding->hovered_widget->desc.event) {
+                    heliosview_host_mouse_event_t leave_evt = *evt;
+                    leave_evt.action = HELIOSVIEW_HOST_MOUSE_LEAVE;
+                    binding->hovered_widget->desc.event(binding->hovered_widget, &leave_evt, binding->hovered_widget->user_data);
+                }
+            }
+            if (cur_hit) {
+                cur_hit->hovered = true;
+                cur_hit->request_repaint();
+            }
+            binding->hovered_widget = cur_hit;
+        }
+        return;
+    }
+
+    if (evt->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+        if (!binding->pressed_widget) {
+            if (binding->hovered_widget) {
+                binding->hovered_widget->hovered = false;
+                binding->hovered_widget->pressed = false;
+                binding->hovered_widget->request_repaint();
+                if (binding->hovered_widget->desc.event) {
+                    heliosview_host_mouse_event_t leave_evt = *evt;
+                    binding->hovered_widget->desc.event(binding->hovered_widget, &leave_evt, binding->hovered_widget->user_data);
+                }
+                binding->hovered_widget = nullptr;
+            }
+        }
+        return;
     }
 }
 
 void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t* root_widget) {
     if (!host) return;
 
-    static thread_local std::vector<std::pair<heliosview_host_t*, HostUiBinding*>> s_bindings;
     HostUiBinding* binding = nullptr;
     for (auto& pair : s_bindings) {
         if (pair.first == host) {
@@ -256,7 +365,12 @@ void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t
     }
 
     if (!binding) {
-        binding = hv::hv_alloc<HostUiBinding>();
+        if (!root_widget) return;
+        try {
+            binding = hv::hv_alloc<HostUiBinding>();
+        } catch (const std::bad_alloc&) {
+            return;
+        }
         s_bindings.push_back({host, binding});
         heliosview_host_ui_set_paint_callback(host, HostPaintCallback, binding);
         heliosview_host_ui_set_mouse_callback(host, HostMouseCallback, binding);
@@ -271,8 +385,25 @@ void heliosview_host_ui_set_root(heliosview_host_t* host, heliosview_ui_widget_t
 
 heliosview_ui_widget_t* heliosview_host_ui_get_root(heliosview_host_t* host) {
     if (!host) return nullptr;
-    // Query registered binding if needed
+    for (const auto& pair : s_bindings) {
+        if (pair.first == host && pair.second) {
+            return pair.second->root;
+        }
+    }
     return nullptr;
+}
+
+void heliosview_host_ui_clear_binding(heliosview_host_t* host) {
+    if (!host) return;
+    for (auto it = s_bindings.begin(); it != s_bindings.end(); ++it) {
+        if (it->first == host) {
+            if (it->second) {
+                hv::hv_dealloc(it->second);
+            }
+            s_bindings.erase(it);
+            break;
+        }
+    }
 }
 
 // ================= Built-in Label Widget =================
@@ -283,7 +414,7 @@ struct LabelData {
     float font_size = 14.0f;
 };
 
-static void LabelPaint(heliosview_ui_widget_t* w, heliosview_painter_t* p, void* udata) {
+static void LabelPaint(heliosview_ui_widget_t* /*w*/, heliosview_painter_t* p, void* udata) {
     auto* d = static_cast<LabelData*>(udata);
     if (!d || d->text.empty()) return;
 
@@ -299,7 +430,12 @@ static void LabelDestroy(void* udata) {
 }
 
 heliosview_ui_widget_t* heliosview_ui_label_create(const char* text) {
-    auto* d = hv::hv_alloc<LabelData>();
+    LabelData* d = nullptr;
+    try {
+        d = hv::hv_alloc<LabelData>();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
     if (text) d->text = text;
 
     heliosview_ui_widget_desc_t desc{};
@@ -307,6 +443,10 @@ heliosview_ui_widget_t* heliosview_ui_label_create(const char* text) {
     desc.destroy = LabelDestroy;
 
     auto* w = heliosview_ui_widget_create(&desc, d);
+    if (!w) {
+        hv::hv_dealloc(d);
+        return nullptr;
+    }
     w->width = 120;
     w->height = 24;
     return w;
@@ -386,8 +526,11 @@ static int ButtonEvent(heliosview_ui_widget_t* w, const heliosview_host_mouse_ev
         if (w->pressed) {
             w->pressed = false;
             w->request_repaint();
-            if (d->on_click) {
-                d->on_click(w, d->click_udata);
+            // Only fire click if release happened inside button boundaries
+            if (e->x >= 0 && e->x < w->width && e->y >= 0 && e->y < w->height) {
+                if (d->on_click) {
+                    d->on_click(w, d->click_udata);
+                }
             }
             return 1;
         }
@@ -402,7 +545,12 @@ static void ButtonDestroy(void* udata) {
 
 heliosview_ui_widget_t* heliosview_ui_button_create(
     const char* label, heliosview_ui_click_cb on_click, void* user_data) {
-    auto* d = hv::hv_alloc<ButtonData>();
+    ButtonData* d = nullptr;
+    try {
+        d = hv::hv_alloc<ButtonData>();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
     if (label) d->label = label;
     d->on_click = on_click;
     d->click_udata = user_data;
@@ -413,6 +561,10 @@ heliosview_ui_widget_t* heliosview_ui_button_create(
     desc.destroy = ButtonDestroy;
 
     auto* w = heliosview_ui_widget_create(&desc, d);
+    if (!w) {
+        hv::hv_dealloc(d);
+        return nullptr;
+    }
     w->width = 110;
     w->height = 38;
     return w;

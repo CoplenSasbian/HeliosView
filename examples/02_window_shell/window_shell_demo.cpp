@@ -43,9 +43,14 @@ public:
 private:
     void printInstructions() {
         std::cout << "\n===========================================================\n";
-        std::cout << " HeliosView Window Shell Interactive Demo\n";
+        std::cout << " HeliosView Example 02: Native Window Shell Demo\n";
         std::cout << "===========================================================\n";
-        std::cout << "  Keyboard Shortcuts:\n";
+        std::cout << "  [TIP] These native window & OS integration capabilities have\n";
+        std::cout << "        been integrated with graphical UI drivers in:\n";
+        std::cout << "          - Example 03 (HeliosView_WebViewBridgeDemo): Web UI Driven\n";
+        std::cout << "          - Example 04 (HeliosView_CanvasUiDemo): 2D Canvas UI Driven\n";
+        std::cout << "-----------------------------------------------------------\n";
+        std::cout << "  Keyboard Shortcuts for this minimal headless shell:\n";
         std::cout << "    [F1]  Maximize / Restore window\n";
         std::cout << "    [F2]  Minimize window\n";
         std::cout << "    [F3]  Toggle Fullscreen mode\n";

@@ -88,7 +88,7 @@ return app.exec();
 | **子视口宿主** | `heliosview_host_*` | `helios::UIHost`, `helios::WebViewHost` | 宿主窗口内多视口无缝嵌入；自绘画布与 Web 视口同屏分屏混合应用；动态排版定位与显隐控制 |
 | **2D 矢量画布** | `heliosview_canvas_*` | `helios::Canvas`, `Painter`, `BufferPresenter` | Blend2D JIT 软件光栅化引擎；亚像素级高质量抗锯齿；路径变换、渐变填充、文字渲染；GDI 快速双缓冲直刷呈现 |
 | **保留模式 UI** | `heliosview_ui_*` | `helios::ui::Widget`, `VStack`, `HStack` | 内置 `Button`、`Slider`、`Switch`、`Checkbox`、`ProgressBar`、`SegmentedControl`、`Card`、`CustomWidget`；树状层次布局与鼠标命中分发 |
-| **现代 WebView2** | `heliosview_webview_*` | `helios::WebViewWindow`, `WebViewHost` | Chromium 内核；页面 DOM 完整支持；虚拟本地资源服务器映射（`localUrl`）；开发者工具、页面缩放、低资源占用模式 |
+| **现代 WebView2** | `heliosview_webview_*` | `helios::Window`（或 `WebViewWindow`）, `WebViewHost` | Chromium 内核；页面 DOM 完整支持；虚拟本地资源服务器映射（`localUrl`）；开发者工具、页面缩放、低资源占用模式 |
 | **RPC 桥接** | `heliosview_webview_bind` | `bindJson`, `subscribeJson`, `broadcast` | 基于 Boost.Describe 参数类型全自动推导；`std::execution::task` 协程处理器；双向发布订阅消息流 |
 | **异步与协程** | `heliosview_run` | `helios::Async`, `std::execution` | Boost.Asio 线程池；P2300 Senders/Receivers 标准流水线；C++23 协程原生支持（`co_await`, `co_return`） |
 | **HTTP 客户端** | — | `helios::http::Client` | Boost.Beast Keep-Alive 长连接池；幂等请求空闲断连自动重试；SSL/TLS 证书校验 |
@@ -123,18 +123,22 @@ if (heliosview_select_folder(NULL, "选择项目目录", &selected_folder) == 1)
 
 | 依赖库 | 版本 | 来源方式 | 核心用途 |
 | --- | --- | --- | --- |
-| **WebView2 SDK** | 1.0.4129.50 | CMake 配置时自动从 NuGet 拉取 | Win32 Chromium WebView2 运行时加载器 |
+| **WebView2 SDK** | 1.0.4181-prerelease | CMake 配置时自动从 NuGet 拉取 | Win32 Chromium WebView2 运行时加载器 |
 | **Blend2D** | v0.21.3 | Git submodule (`third_party/blend2d`) | 内建 JIT 2D 矢量光栅化画布引擎 |
 | **asmjit** | 固定 commit `dffd8b1` | Git submodule (`third_party/asmjit`) | Blend2D 的 x86/ARM JIT 汇编器后端 |
-| **stdexec** | 固定 commit `758f41f4` | Git submodule (`third_party/stdexec`) | P2300 Senders/Receivers 与 C++23 协程执行模型 |
+| **stdexec** | 固定 commit `b783aac` | Git submodule (`third_party/stdexec`) | P2300 Senders/Receivers 与 C++23 协程执行模型 |
 | **Boost** | 1.92.0 | Git submodule (`third_party/boost`) | Asio（线程池）、Beast（HTTP）、JSON（RPC 自动绑定） |
+| **stb** | 单头文件内建 | Git 源码内置 (`third_party/stb`) | 图像加载（stb_image）与保存（stb_image_write） |
 
 ### 源码克隆与构建
 
 ```sh
-# 克隆仓库与子模块
-git clone --recurse-submodules https://github.com/CoplenSasbian/HeliosView.git
+# 克隆仓库
+git clone https://github.com/CoplenSasbian/HeliosView.git
 cd HeliosView
+
+# 初始化所需子模块（轻量级浅克隆）
+git submodule update --init --depth 1
 
 # 使用 Ninja 配置构建工程
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -510,7 +514,7 @@ int main(void) {
     heliosview_window_show(win);
 
     // 创建托盘图标并弹出通知
-    heliosview_tray_t* tray = heliosview_tray_create(win, "托盘图标", NULL, NULL);
+    heliosview_tray_t* tray = heliosview_tray_create(win, "托盘图标", NULL);
     heliosview_tray_notify(tray, "HeliosView", "正在通过 C99 运行", HELIOSVIEW_TRAY_NOTIFY_INFO, 3000);
 
     // 运行主事件循环
@@ -538,8 +542,8 @@ HeliosView/
 │   └── HeliosViewCore/               # 纯头文件 C++23 框架封装
 │       ├── HeliosView.h              # C++ 总头文件
 │       ├── App.h                     # App 单例与 UI 线程调度器
-│       ├── Window.h                  # 顶层窗口封装
-│       ├── WebViewWindow.h           # WebView2 窗口与视口宿主（UIHost, WebViewHost）
+│       ├── Window.h                  # 顶层窗口封装（包含 WebView2 与视口宿主管理）
+│       ├── WebViewWindow.h           # 向后兼容别名头文件
 │       ├── Canvas.h                  # C++ Canvas, Painter, Path, Matrix RAII
 │       ├── BufferPresenter.h         # 像素双缓冲呈现器
 │       ├── UI/

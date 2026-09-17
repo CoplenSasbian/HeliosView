@@ -3,7 +3,7 @@
 // ============================================================================
 // Demonstrates HeliosView's killer architecture:
 //   1. Single Window Host Shell (adaptive split-view layout)
-//   2. Left Viewport: UIHost (Retained 2D DirectDraw canvas via Blend2D)
+//   2. Left Viewport: helios::UIHost (Retained 2D DirectDraw canvas via Blend2D)
 //      - 60FPS continuous animated waveform
 //      - Interactive circular gauge
 //      - OOP telemetry status cards
@@ -12,9 +12,13 @@
 //   4. Zero-Copy Cross-Viewport Synchronization:
 //      - Native Gauge Click -> Automatically updates WebView HTML metric bar
 //      - Web Button Click -> Invokes C++ JS Bridge, toggling Native simulation state
+//
+// Written against the C++ wrappers: helios::Window / helios::App own the shell and
+// the message loop, helios::UIHost the viewports, HeliosView::UI the widget tree,
+// and helios::Painter every drawing call.
 // ============================================================================
 
-#include <HeliosView/heliosview.h>
+#include <HeliosViewCore/HeliosView.h>
 #include <HeliosViewCore/UI/Widget.h>
 
 #include <cmath>
@@ -29,9 +33,9 @@ using namespace HeliosView::UI;
 // Global Hybrid Application State
 // ----------------------------------------------------------------------------
 struct StudioApp {
-    heliosview_window_t* window = nullptr;
-    heliosview_host_t* ui_host = nullptr;
-    heliosview_host_t* web_host = nullptr;
+    std::unique_ptr<helios::Window> window;   // native shell + message loop owner
+    helios::UIHost ui_host;                   // left viewport: retained widget tree
+    helios::UIHost web_host;                  // right viewport: embedded WebView2
 
     float wave_phase = 0.0f;
     float gauge_val = 0.72f;
@@ -48,93 +52,83 @@ static StudioApp g_app;
 // ----------------------------------------------------------------------------
 // Native DirectDraw Widgets (Left Viewport)
 // ----------------------------------------------------------------------------
-struct DialData {
-    float* p_val = nullptr;
-    bool is_hovered = false;
-};
 
-static void DialPaint(heliosview_ui_widget_t* w, heliosview_painter_t* p, void* udata) {
-    auto* data = static_cast<DialData*>(udata);
-    int width = 0, height = 0;
-    heliosview_ui_widget_get_bounds(w, nullptr, nullptr, &width, &height);
+// Interactive circular gauge: a Widget subclass that draws through the C++ painter
+// wrapper and exposes the bound value to the rest of the studio.
+class DialWidget : public Widget {
+public:
+    DialWidget() = default;
 
-    float cx = width / 2.0f;
-    float cy = height / 2.0f;
-    float r = std::min(width, height) / 2.0f - 8.0f;
-
-    // Track
-    heliosview_painter_set_fill(p, 0);
-    heliosview_painter_set_stroke(p, 0xFF313244, 8.0f);
-    heliosview_painter_draw_ellipse(p, cx - r, cy - r, r * 2, r * 2);
-
-    // Active arc
-    float val = data->p_val ? *data->p_val : 0.5f;
-    uint32_t arc_color = data->is_hovered ? 0xFFF5BDE6 : 0xFF8AADF4;
-    heliosview_painter_set_stroke(p, arc_color, 8.0f);
-    heliosview_painter_draw_arc(p, cx - r, cy - r, r * 2, r * 2, -90.0f, val * 360.0f);
-
-    // Percentage
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%d%%", (int)(val * 100.0f));
-    heliosview_font_desc_t font{"Segoe UI", 15.0f, HELIOSVIEW_FONT_BOLD};
-    heliosview_painter_set_font(p, &font);
-    heliosview_painter_set_fill(p, 0xFFCAD3F5);
-
-    heliosview_text_metrics_t m{};
-    heliosview_painter_measure_text(p, buf, &m);
-    heliosview_painter_draw_text(p, buf, cx - m.width / 2.0f, cy - m.height / 2.0f);
-}
-
-static int DialEvent(heliosview_ui_widget_t* w, const heliosview_host_mouse_event_t* e, void* udata) {
-    auto* data = static_cast<DialData*>(udata);
-    if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
-        if (!data->is_hovered) {
-            data->is_hovered = true;
-            heliosview_ui_widget_request_repaint(w);
-        }
-        return 1;
-    } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
-        if (data->is_hovered) {
-            data->is_hovered = false;
-            heliosview_ui_widget_request_repaint(w);
-        }
-        return 1;
-    } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN) {
-        if (data->p_val) {
-            *data->p_val += 0.08f;
-            if (*data->p_val > 1.0f) *data->p_val = 0.05f;
-            heliosview_ui_widget_request_repaint(w);
-
-            // Synchronize with WebView2 viewport via eval
-            heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host);
-            if (wv) {
-                char js[128];
-                std::snprintf(js, sizeof(js), "updateGauge(%d);", (int)(*data->p_val * 100));
-                heliosview_webview_eval(wv, js);
-            }
-        }
-        return 1;
+    static std::shared_ptr<DialWidget> create(float* boundValue) {
+        auto dial = std::make_shared<DialWidget>();
+        dial->m_value = boundValue;
+        dial->setSize(95, 95);
+        return dial;
     }
-    return 0;
-}
 
-static void DialDestroy(void* udata) {
-    delete static_cast<DialData*>(udata);
-}
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect box = bounds();
+        const float cx = (float)box.width / 2.0f;
+        const float cy = (float)box.height / 2.0f;
+        const float r = std::min(box.width, box.height) / 2.0f - 8.0f;
 
-static std::shared_ptr<Widget> CreatePureCDial(float* bind_val) {
-    auto* data = new DialData();
-    data->p_val = bind_val;
+        // Track
+        p.setFill(0);
+        p.setStroke(0xFF313244, 8.0f);
+        p.drawEllipse(cx - r, cy - r, r * 2, r * 2);
 
-    heliosview_ui_widget_desc_t desc{};
-    desc.paint = DialPaint;
-    desc.event = DialEvent;
-    desc.destroy = DialDestroy;
+        // Active arc
+        const float val = m_value ? *m_value : 0.5f;
+        p.setStroke(m_isHovered ? 0xFFF5BDE6 : 0xFF8AADF4, 8.0f);
+        p.drawArc(cx - r, cy - r, r * 2, r * 2, -90.0f, val * 360.0f);
 
-    auto* raw = heliosview_ui_widget_create(&desc, data);
-    heliosview_ui_widget_set_bounds(raw, 0, 0, 95, 95);
-    return std::make_shared<Widget>(raw);
-}
+        // Percentage
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d%%", (int)(val * 100.0f));
+        p.setFont({ "Segoe UI", 15.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFCAD3F5);
+
+        helios::TextMetrics m{};
+        p.measureText(buf, m);
+        p.drawText(buf, cx - m.width / 2.0f, cy - m.height / 2.0f);
+    }
+
+    bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
+        if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
+            if (!m_isHovered) {
+                m_isHovered = true;
+                requestRepaint();
+            }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
+            if (m_isHovered) {
+                m_isHovered = false;
+                requestRepaint();
+            }
+            return true;
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN) {
+            if (m_value) {
+                *m_value += 0.08f;
+                if (*m_value > 1.0f) *m_value = 0.05f;
+                requestRepaint();
+
+                // Synchronize with the WebView2 viewport (native -> web)
+                heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host.handle());
+                if (wv) {
+                    char js[128];
+                    std::snprintf(js, sizeof(js), "updateGauge(%d);", (int)(*m_value * 100));
+                    heliosview_webview_eval(wv, js);
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+private:
+    float* m_value = nullptr;
+    bool m_isHovered = false;
+};
 
 class MonitorCard : public Widget {
 public:
@@ -146,23 +140,22 @@ public:
         return card;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect box = bounds();
+        const float w = (float)box.width;
+        const float h = (float)box.height;
 
-        heliosview_painter_set_fill(p, m_isHovered ? 0xFF24273A : 0xFF1E1E2E);
-        heliosview_painter_set_stroke(p, m_isHovered ? 0xFF8AADF4 : 0xFF363A4F, 1.2f);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 10.0f);
+        p.setFill(m_isHovered ? 0xFF24273A : 0xFF1E1E2E);
+        p.setStroke(m_isHovered ? 0xFF8AADF4 : 0xFF363A4F, 1.2f);
+        p.drawRoundRect(0, 0, w, h, 10.0f);
 
-        heliosview_font_desc_t fontT{"Segoe UI", 15.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &fontT);
-        heliosview_painter_set_fill(p, 0xFFF5BDE6);
-        heliosview_painter_draw_text(p, m_title.c_str(), 16.0f, 16.0f);
+        p.setFont({ "Segoe UI", 15.0f, helios::FontFlag::Bold });
+        p.setFill(0xFFF5BDE6);
+        p.drawText(m_title, 16.0f, 16.0f);
 
-        heliosview_font_desc_t fontD{"Segoe UI", 12.0f, 0};
-        heliosview_painter_set_font(p, &fontD);
-        heliosview_painter_set_fill(p, 0xFFA5ADCB);
-        heliosview_painter_draw_text(p, m_desc.c_str(), 16.0f, 42.0f);
+        p.setFont({ "Segoe UI", 12.0f, helios::FontFlag::None });
+        p.setFill(0xFFA5ADCB);
+        p.drawText(m_desc, 16.0f, 42.0f);
     }
 
     bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
@@ -219,35 +212,35 @@ static std::shared_ptr<Widget> BuildNativeUI() {
 
     auto midRow = HStack::create(15, 0);
 
-    auto dial = CreatePureCDial(&g_app.gauge_val);
+    auto dial = DialWidget::create(&g_app.gauge_val);
     midRow->add(dial);
 
     g_app.wave_widget = CustomWidget::create();
     g_app.wave_widget->setSize(310, 95);
-    g_app.wave_widget->setPaint([](CustomWidget* self, heliosview_painter_t* p) {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(self->handle(), nullptr, nullptr, &w, &h);
+    g_app.wave_widget->setPaint([](CustomWidget* self, helios::Painter& p) {
+        const helios::Rect r = self->bounds();
+        const float w = (float)r.width;
+        const float h = (float)r.height;
 
-        heliosview_painter_set_fill(p, 0xFF181926);
-        heliosview_painter_set_stroke(p, 0xFF363A4F, 1.0f);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 8.0f);
+        p.setFill(0xFF181926);
+        p.setStroke(0xFF363A4F, 1.0f);
+        p.drawRoundRect(0, 0, w, h, 8.0f);
 
-        heliosview_painter_set_stroke(p, 0xFF24273A, 1.0f);
-        heliosview_painter_draw_line(p, 10, h / 2.0f, w - 10, h / 2.0f);
+        p.setStroke(0xFF24273A, 1.0f);
+        p.drawLine(10, h / 2.0f, w - 10, h / 2.0f);
 
-        heliosview_painter_set_stroke(p, 0xFF8AADF4, 2.2f);
+        p.setStroke(0xFF8AADF4, 2.2f);
         float prev_x = 10, prev_y = h / 2.0f;
         for (float x = 10; x < w - 10; x += 4) {
             float y = h / 2.0f + std::sin((x * 0.06f) + g_app.wave_phase) * 28.0f;
-            heliosview_painter_draw_line(p, prev_x, prev_y, x, y);
+            p.drawLine(prev_x, prev_y, x, y);
             prev_x = x;
             prev_y = y;
         }
 
-        heliosview_font_desc_t font{"Segoe UI", 10.0f, 0};
-        heliosview_painter_set_font(p, &font);
-        heliosview_painter_set_fill(p, 0xFF8087A2);
-        heliosview_painter_draw_text(p, "LIVE SIGNAL CH-01", 14.0f, 8.0f);
+        p.setFont({ "Segoe UI", 10.0f, helios::FontFlag::None });
+        p.setFill(0xFF8087A2);
+        p.drawText("LIVE SIGNAL CH-01", 14.0f, 8.0f);
     });
 
     g_app.wave_widget->setMouse([](CustomWidget*, const heliosview_host_mouse_event_t* e) {
@@ -277,7 +270,7 @@ static std::shared_ptr<Widget> BuildNativeUI() {
     sendBtn->setSize(170, 40);
     sendBtn->onClick([]() {
         g_app.click_count++;
-        heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host);
+        heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host.handle());
         if (wv) {
             char js[128];
             std::snprintf(js, sizeof(js), "addLog('Native button clicked (Total: %d)');", g_app.click_count);
@@ -383,78 +376,63 @@ static void UpdateLayout(int width, int height) {
     int split_x = 460;
     if (width < 600) split_x = width / 2;
 
-    heliosview_host_set_bounds(g_app.ui_host, 0, 0, split_x, height);
-    heliosview_host_set_bounds(g_app.web_host, split_x, 0, width - split_x, height);
-}
-
-static int FrameCallback(void*) {
-    if (g_app.is_simulating && g_app.wave_widget) {
-        g_app.wave_phase += 0.08f;
-        g_app.wave_widget->requestRepaint();
-    }
-
-    heliosview_event_t ev;
-    while (heliosview_poll(&ev)) {
-        if (ev.type == HELIOSVIEW_EVENT_WINDOW_RESIZE) {
-            UpdateLayout(ev.width, ev.height);
-        } else if (ev.type == HELIOSVIEW_EVENT_WINDOW_CLOSE) {
-            heliosview_quit();
-            return 1;
-        }
-    }
-    return 0;
+    g_app.ui_host.setBounds(0, 0, split_x, height);
+    g_app.web_host.setBounds(split_x, 0, width - split_x, height);
 }
 
 int main() {
-    // 1. Create main window (1280 x 780)
-    g_app.window = heliosview_window_create(1280, 780, "HeliosView Studio - Hybrid Native UI & Web Platform");
-    if (!g_app.window) {
-        std::cerr << "Failed to create window!\n";
-        return 1;
-    }
+    // 1. The application object owns the message loop (helios::App::exec)
+    helios::App app;
+
+    // 2. Create the main window shell (1280 x 780)
+    g_app.window = std::make_unique<helios::Window>(1280, 780, "HeliosView Studio - Hybrid Native UI & Web Platform");
+    helios::Window& window = *g_app.window;
 
     int split_x = 460;
 
-    // 2. Left Host: UIHost (Retained native UI)
-    g_app.ui_host = heliosview_host_create_ui(g_app.window, 0, 0, split_x, 780, HELIOSVIEW_ENGINE_BLEND2D);
+    // 3. Left Viewport: UIHost (Retained native UI), attached to the window
+    g_app.ui_host = window.createUIHost(0, 0, split_x, 780, HELIOSVIEW_ENGINE_BLEND2D);
     auto uiTree = BuildNativeUI();
-    heliosview_host_ui_set_root(g_app.ui_host, uiTree->handle());
+    g_app.ui_host.setRootWidget(uiTree);
 
-    // 3. Right Host: WebViewHost (Chromium / WebView2)
-    g_app.web_host = heliosview_host_create_webview(g_app.window, split_x, 0, 1280 - split_x, 780);
-    heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host);
+    // 4. Right Viewport: WebViewHost (Chromium / WebView2), owned by its UIHost
+    g_app.web_host = helios::UIHost::createWebView(window, split_x, 0, 1280 - split_x, 780);
+    heliosview_webview_t* wv = heliosview_host_get_webview(g_app.web_host.handle());
     if (wv) {
         heliosview_webview_navigate_html(wv, kDashboardHtml);
         heliosview_webview_bind(wv, "toggle_sim", OnWebMessage, nullptr, nullptr);
     }
 
-    heliosview_window_show(g_app.window);
+    // 5. Native event wiring: the window dispatches into its signals, the App into
+    // its frame callback -- no manual event pump.
+    window.closeRequested.connect([&window] { window.close(); });
+    window.resized.connect([](int32_t w, int32_t h) { UpdateLayout(w, h); });
 
-    // 4. Run loop
-    heliosview_run(FrameCallback, nullptr);
+    app.frameCallback = [] {
+        if (g_app.is_simulating && g_app.wave_widget) {
+            g_app.wave_phase += 0.08f;
+            g_app.wave_widget->requestRepaint();
+        }
+    };
 
-    // 5. Structured teardown in strict hierarchical order:
-    // First, release retained UI widget references and tree
+    window.show();
+
+    // 6. Run loop
+    const int exitCode = app.exec();
+
+    // 7. Structured teardown in strict hierarchical order:
+    // First, release retained UI widget references and the tree the host holds
     g_app.wave_widget.reset();
     g_app.status_label.reset();
     g_app.sim_btn.reset();
     uiTree.reset();
+    g_app.ui_host.clearRoot();
 
-    // Second, destroy child hosts before parent window
-    if (g_app.ui_host) {
-        heliosview_host_destroy(g_app.ui_host);
-        g_app.ui_host = nullptr;
-    }
-    if (g_app.web_host) {
-        heliosview_host_destroy(g_app.web_host);
-        g_app.web_host = nullptr;
-    }
+    // Second, destroy the web host this object owns, then the window (which destroys
+    // the UI host it owns)
+    g_app.web_host.close();
+    window.close();
+    g_app.window.reset();
 
-    // Third, destroy parent window shell
-    if (g_app.window) {
-        heliosview_window_destroy(g_app.window);
-        g_app.window = nullptr;
-    }
-
-    return 0;
+    return exitCode;
 }

@@ -15,3 +15,10 @@ CMakeFiles/
 *.ilk
 *.pdb
 __pycache__/
+
+# Third-party prebuilt downloads (managed by scripts/setup-dependencies)
+third_party/openssl/
+third_party/webview2-sdk/
+third_party/cacert.pem
+third_party/*.nupkg
+*.tmp

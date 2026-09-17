@@ -91,10 +91,8 @@
 #include <HeliosView/heliosview_export.h>
 
 /* heliosview_rect_t (source rectangles below) and the opaque
- * heliosview_window_t declaration live in heliosview.h; it includes this header
- * at its end, so this include is a no-op in the usual umbrella order and pulls
- * the definitions in when this header is included first. */
-#include <HeliosView/heliosview.h>
+ * heliosview_window_t declaration live in heliosview_base.h. */
+#include <HeliosView/heliosview_base.h>
 
 #ifdef __cplusplus
 extern "C" {

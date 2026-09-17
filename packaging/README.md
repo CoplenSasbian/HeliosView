@@ -34,13 +34,12 @@ Extract the zip and launch any executable in `bin\` — the DLLs sit next to the
 exes, so no `PATH` setup is needed:
 
 ```
-bin\HeliosViewDemo.exe           # master demo: a WebView page drives every feature
-bin\HeliosViewWebViewDemo.exe    # the JS <-> native bridge (bindJson / subscribeJson)
-bin\HeliosViewWebViewEventsDemo.exe  # navigation events, local assets, native dialogs
-bin\HeliosViewWindowDemo.exe     # windows, styles, signals, menus, tray
-bin\HeliosViewSystemDemo.exe     # dialogs, clipboard, toasts, global hotkey, info
-bin\HeliosViewAsyncHttpDemo.exe  # console: Async pool + pooled HttpClient
-bin\HeliosViewCDemo.exe          # pure C consumer
+bin\HeliosView_ConsoleCoreDemo.exe   # 01: async thread pool, HTTP client, JSON RPC, timers
+bin\HeliosView_WindowShellDemo.exe   # 02: window shell, styles, events, menus, tray icon
+bin\HeliosView_WebViewBridgeDemo.exe # 03: WebView2 embedding, bidirectional JS bridge & RPC
+bin\HeliosView_CanvasUiDemo.exe      # 04: retained UI controls (buttons, labels, stacks) on Canvas
+bin\HeliosView_StudioHybridDemo.exe  # 05: hybrid dual viewport (retained UI + live WebView2)
+bin\HeliosView_CApiDemo.exe          # 06: pure C99 ABI usage
 ```
 
 ## Use from C
@@ -159,13 +158,12 @@ CMake 包配置和示例源码。
 解压后直接运行 `bin\` 里的 exe 即可——DLL 与 exe 同目录，无需配置 PATH：
 
 ```
-bin\HeliosViewDemo.exe           # 总演示：WebView 页面驱动全部功能
-bin\HeliosViewWebViewDemo.exe    # JS <-> 原生桥（bindJson / subscribeJson）
-bin\HeliosViewWebViewEventsDemo.exe  # 导航事件、本地资源、原生对话框
-bin\HeliosViewWindowDemo.exe     # 窗口、样式、信号、菜单、托盘
-bin\HeliosViewSystemDemo.exe     # 对话框、剪贴板、toast、全局热键、系统信息
-bin\HeliosViewAsyncHttpDemo.exe  # 控制台：Async 线程池 + 连接池 HttpClient
-bin\HeliosViewCDemo.exe          # 纯 C 消费者
+bin\HeliosView_ConsoleCoreDemo.exe   # 01: 控制台核心：Async 线程池、HTTP 客户端、JSON RPC、定时器
+bin\HeliosView_WindowShellDemo.exe   # 02: 原生窗口壳：窗口样式、事件、菜单、托盘图标
+bin\HeliosView_WebViewBridgeDemo.exe # 03: 现代 WebView：双向 JS 桥接与 RPC 通信
+bin\HeliosView_CanvasUiDemo.exe      # 04: 保留式 UI：Canvas 驱动的控件树（按钮、标签、布局栈）
+bin\HeliosView_StudioHybridDemo.exe  # 05: 混合双视口：保留式 UI 工具栏与 WebView2 视口并存
+bin\HeliosView_CApiDemo.exe          # 06: 纯 C99 ABI 接口消费示例
 ```
 
 ## C 用法

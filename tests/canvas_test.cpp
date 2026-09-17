@@ -27,8 +27,10 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using helios::Canvas;
@@ -335,6 +337,28 @@ void check_drawing(PaintEngine engine, const std::string& out_dir)
     /* Center-aligned text in a box */
     p.drawTextEx("centered in a box", 320, 380, 300, 32, TextAlign::HCenter | TextAlign::VCenter);
 
+    /* Chinese / CJK text fallback & rendering tests */
+    p.setFont({"Segoe UI", 24.0f, FontFlag::Bold});
+    TextMetrics cjk_metrics;
+    check(p.measureText(reinterpret_cast<const char*>(u8"中文测试"), cjk_metrics), "measure_text CJK succeeds");
+    check(cjk_metrics.width > 0.0f, "cjk text has positive width with fallback");
+    std::printf("     \"中文测试\" fallback -> %.1f x %.1f\n", cjk_metrics.width, cjk_metrics.height);
+
+    const uint32_t cjk_before = pixel(canvas, 60 + 12, 70 + static_cast<int32_t>(cjk_metrics.height / 2.0f));
+    check(p.drawText(reinterpret_cast<const char*>(u8"中文测试"), 60, 70), "draw_text CJK succeeds");
+    const uint32_t cjk_after = pixel(canvas, 60 + 12, 70 + static_cast<int32_t>(cjk_metrics.height / 2.0f));
+    check(cjk_before != cjk_after, "draw_text CJK wrote pixels");
+
+    // Explicit Chinese font name
+    p.setFont({"Microsoft YaHei", 24.0f, FontFlag::None});
+    TextMetrics yh_metrics;
+    check(p.measureText(reinterpret_cast<const char*>(u8"微软雅黑测试"), yh_metrics), "measure_text with Microsoft YaHei succeeds");
+    check(yh_metrics.width > 0.0f, "Microsoft YaHei text has positive width");
+    check(p.drawText(reinterpret_cast<const char*>(u8"微软雅黑测试"), 60, 110), "draw_text with Microsoft YaHei succeeds");
+
+    // Restore font for subsequent tests if any
+    p.setFont({"Segoe UI", 28.0f, FontFlag::Bold});
+
     check(p.end(), "painter_end succeeds");
 
     /* Every canvas operation above went through one engine; save the result so the
@@ -423,6 +447,74 @@ void check_images(PaintEngine engine, const std::string& out_dir)
         Painter p(canvas);
         check(!p.drawImage(canvas, 0, 0, 10, 10, nullptr, 1.0f),
               "drawing a canvas into itself is rejected");
+    }
+}
+
+void check_cross_engine_images()
+{
+    std::printf("\n[cross-engine draw_image (B1)]\n");
+    const std::vector<PaintEngine> candidate_engines = {
+        PaintEngine::Blend2D,
+        PaintEngine::GdiPlus,
+        PaintEngine::D2D
+    };
+
+    std::vector<PaintEngine> ready;
+    for (PaintEngine e : candidate_engines) {
+        if (helios::engineProbe(e)) {
+            ready.push_back(e);
+        }
+    }
+
+    if (ready.size() < 2) {
+        std::printf("  skip: fewer than 2 distinct engines probed (%d ready)\n",
+                    static_cast<int>(ready.size()));
+        return;
+    }
+
+    for (size_t i = 0; i < ready.size(); ++i) {
+        for (size_t j = 0; j < ready.size(); ++j) {
+            if (i == j) continue;
+            const PaintEngine src_eng = ready[i];
+            const PaintEngine dst_eng = ready[j];
+
+            const std::string label = helios::engineName(src_eng) + " -> " + helios::engineName(dst_eng);
+            Canvas src(32, 32, PixelFormat::Bgra8Premul, src_eng);
+            Canvas dst(64, 64, PixelFormat::Bgra8Premul, dst_eng);
+            if (!src.valid() || !dst.valid()) {
+                check(false, ("create canvases for " + label).c_str());
+                continue;
+            }
+
+            src.fill(0xFFFF0000u); // opaque red
+            dst.fill(0xFF0000FFu); // opaque blue
+
+            {
+                Painter p(dst);
+                check(p.drawImage(src, 16.0f, 16.0f, 32.0f, 32.0f),
+                      ("draw_image succeeds: " + label).c_str());
+            }
+
+            // Verify drawn region in dst is red and untouched border is blue
+            check(color_near(pixel(dst, 32, 32), 0xFFFF0000u, 10),
+                  ("destination pixel in drawn region is red: " + label).c_str());
+            check(color_near(pixel(dst, 4, 4), 0xFF0000FFu, 10),
+                  ("destination pixel outside drawn region is blue: " + label).c_str());
+
+            // Cross-engine drawing with non-premul / format conversion
+            Canvas src_rgba(32, 32, PixelFormat::Rgba8, src_eng);
+            if (src_rgba.valid()) {
+                src_rgba.fill(0xFF00FF00u); // opaque green
+                dst.fill(0xFF000000u);
+                {
+                    Painter p(dst);
+                    check(p.drawImage(src_rgba, 16.0f, 16.0f, 32.0f, 32.0f),
+                          ("draw_image RGBA8 format conversion: " + label).c_str());
+                }
+                check(color_near(pixel(dst, 32, 32), 0xFF00FF00u, 10),
+                      ("destination pixel with RGBA8 source is green: " + label).c_str());
+            }
+        }
     }
 }
 
@@ -747,6 +839,14 @@ void check_image_io(PaintEngine engine, const std::string& out_dir)
     check(helios::formatSupported("jpeg", true), "the codec writes JPEG");
     check(!helios::formatSupported("webp"), "the codec reports WebP as unsupported");
 
+    /* Format alignment checks (§4 #3) */
+    check(!helios::formatSupported("pnm", true), "the codec reports PNM write as unsupported");
+    check(!helios::formatSupported("hdr", true), "the codec reports HDR write as unsupported");
+    check(!helios::formatSupported("pgm", true), "the codec reports PGM write as unsupported");
+    check(!helios::formatSupported("ppm", true), "the codec reports PPM write as unsupported");
+    check(helios::formatSupported("pnm", false), "the codec reports PNM read as supported");
+    check(helios::formatSupported("hdr", false), "the codec reports HDR read as supported");
+
     Canvas canvas(120, 80, PixelFormat::Bgra8Premul, engine);
     if (!canvas.valid()) {
         check(false, "canvas for the format checks");
@@ -801,22 +901,18 @@ int main(int argc, char** argv)
 
     describe_engines();
 
-    /* Where the preview images go. The path is relative to the working directory this
-     * runs from, so running it from the repository root puts them in examples/out.
-     * Windows has no mkdir -p, so create the intermediate directory too. */
-    const std::string out_dir = "examples/out";
-#if defined(_WIN32)
-    _mkdir("examples");
-    _mkdir(out_dir.c_str()); /* EEXIST is fine: the saves below report any real problem */
-#else
-    mkdir("examples", 0755);
-    mkdir(out_dir.c_str(), 0755);
-#endif
+    /* Where the preview images go. Configurable via HELIOSVIEW_TEST_OUT or defaults
+     * to examples/out relative to working directory. */
+    const char* env_out = std::getenv("HELIOSVIEW_TEST_OUT");
+    const std::string out_dir = (env_out && *env_out) ? std::string(env_out) : "examples/out";
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
 
     check_canvas_basics(engine);
     check_clone_and_formats(engine);
     check_drawing(engine, out_dir);
     check_images(engine, out_dir);
+    check_cross_engine_images();
     check_image_io(engine, out_dir);
     check_lines_and_curves(engine);
     check_path_verbs(engine);

@@ -57,6 +57,9 @@ typedef struct heliosview_painter heliosview_painter_t;
 /* A child viewport host (see heliosview_host.h) */
 typedef struct heliosview_host heliosview_host_t;
 
+/* An embedded web view (see heliosview_webview.h) */
+typedef struct heliosview_webview heliosview_webview_t;
+
 
 /* ================= Geometry =================
  *

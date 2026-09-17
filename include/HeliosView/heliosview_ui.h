@@ -129,6 +129,11 @@ HELIOSVIEW_API void heliosview_host_ui_set_root(heliosview_host_t* host, heliosv
  */
 HELIOSVIEW_API heliosview_ui_widget_t* heliosview_host_ui_get_root(heliosview_host_t* host);
 
+/**
+ * Clear and free any UI binding associated with a UIHost.
+ */
+HELIOSVIEW_API void heliosview_host_ui_clear_binding(heliosview_host_t* host);
+
 /* ================= Built-in Basic Widgets (C API) ================= */
 
 /* ---- Label Widget ---- */

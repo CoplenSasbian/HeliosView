@@ -61,8 +61,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+/* Named as a friend of Painter below, so the retained widget system can adopt the
+ * live painter session its host hands to a paint callback. Declared here so this
+ * header stands on its own (see <HeliosViewCore/UI/Widget.h>). */
+namespace HeliosView::UI {
+class Widget;
+}
 
 namespace helios {
 
@@ -774,39 +782,84 @@ private:
 
 /* ---------- Painter ---------- */
 
-// Draws onto one Canvas. The session begins in the constructor and ends in the
-// destructor (which flushes the engine and releases the canvas), so the natural
-// shape is a scope:
+// Draws onto one Canvas. Two ways to get one, and only the first owns a session:
 //
-//     { Painter p(canvas); p.clear(...); p.fillRect(...); }
+//  1. Owning -- the session begins in the constructor and ends in the destructor
+//     (which flushes the engine and releases the canvas), so the natural shape is a
+//     scope:
+//
+//         { Painter p(canvas); p.clear(...); p.fillRect(...); }
+//
+//  2. Borrowing -- adopt a session this code did not begin, for a callback that is
+//     handed a live painter handle. Anything exposing handle() works (a Canvas, a
+//     UIHost, a UI widget); the handle's owner keeps the session, so the destructor
+//     must not end it:
+//
+//         void onPaint(helios::Painter& p);            // the callback's signature
+//         widget->setPaint([](Widget* w, heliosview_painter_t* raw) {
+//             helios::Painter p(w);                    // w->handle() is the widget
+//             p.setFill(...); p.drawRoundRect(...);    // the C handle is never named
+//         });
 //
 // The state always starts at the documented defaults (stroke and fill off, width 1,
 // butt / miter, default 12px font, alpha 1, antialias on, identity transform, clip =
 // the whole canvas), so a painter is predictable and two scopes cannot interfere.
 //
-// Move-only; the Canvas must outlive it. Invalid when the canvas is invalid or a
+// Move-only; the Canvas must outlive an owning painter, and a borrowed painter must
+// not outlive the session it borrowed. Invalid when the canvas is invalid or a
 // painter is already active on it. After end(), the methods fail instead of drawing
 // on released state.
 class Painter {
 public:
 	explicit Painter(Canvas& canvas)
-		: m_painter(canvas.valid() ? heliosview_painter_begin(canvas.handle()) : nullptr)
+		: m_painter(canvas.valid() ? heliosview_painter_begin(canvas.handle()) : nullptr),
+		  m_ownsSession(true)
+	{
+	}
+
+	// Tag for adopting a session that arrives as a raw handle -- a callback the
+	// library calls with a live heliosview_painter_t*, which is how the widget layer
+	// hands one to onPaint. Only the friends below can name it, so a bare pointer
+	// never converts to a Painter by accident.
+	struct Borrowed {
+		explicit Borrowed(heliosview_painter_t* session) : painter(session) {}
+		heliosview_painter_t* painter;
+	};
+
+	// Adopt a live session, without owning it: the callback that passed the handle
+	// keeps the session and ends it. See the friends for who may use this.
+	explicit Painter(Borrowed borrowed) : m_painter(borrowed.painter), m_ownsSession(false) {}
+
+	// Borrow a live painter session from the object that owns it -- any handle()
+	// wrapper (Canvas, UIHost, UI widget). Never begins a session: the C layer
+	// rejects a second painter on the same canvas. The handle stays valid only as
+	// long as the callback that passed it in; end() is a no-op on a borrowed painter.
+	//
+	// Constrained to class types other than Painter itself, so the raw
+	// heliosview_painter_t* overload and the copy/move constructors keep working.
+	template <class Handle,
+			  class = std::enable_if_t<std::is_class_v<std::remove_cvref_t<Handle>> &&
+									   !std::is_same_v<std::remove_cvref_t<Handle>, Painter>>>
+	explicit Painter(const Handle& owner)
+		: m_painter(owner.handle()), m_ownsSession(false)
 	{
 	}
 
 	~Painter()
 	{
 		// Flush and release. end() is idempotent, so calling it explicitly first is fine.
-		if (m_painter != nullptr)
+		if (m_ownsSession && m_painter != nullptr)
 			heliosview_painter_end(m_painter);
 	}
 
 	Painter(const Painter&) = delete;
 	Painter& operator=(const Painter&) = delete;
 
-	Painter(Painter&& other) noexcept : m_painter(other.m_painter)
+	Painter(Painter&& other) noexcept
+		: m_painter(other.m_painter), m_ownsSession(other.m_ownsSession)
 	{
 		other.m_painter = nullptr;
+		other.m_ownsSession = false;
 	}
 
 	Painter& operator=(Painter&& other) noexcept
@@ -814,15 +867,24 @@ public:
 		if (this != &other) {
 			end();
 			m_painter = other.m_painter;
+			m_ownsSession = other.m_ownsSession;
 			other.m_painter = nullptr;
+			other.m_ownsSession = false;
 		}
 		return *this;
 	}
 
-	// True when the session started (a valid canvas, no painter already active on it)
+	// True when there is a live session to draw into. For a borrowed painter that
+	// only says the handle was non-NULL; the owning callback decides when it ends.
 	bool valid() const
 	{
 		return m_painter != nullptr;
+	}
+
+	// Whether this painter began the session (and therefore ends it)
+	bool ownsSession() const
+	{
+		return m_ownsSession;
 	}
 
 	heliosview_painter_t* handle() const
@@ -832,12 +894,15 @@ public:
 
 	// End the session now: the canvas is complete and safe to save, read, blit or
 	// resize. Returns false when it had already ended (the destructor's no-op case).
+	// A borrowed painter does not own the session, so this only drops the borrow and
+	// leaves the owner's session running.
 	bool end()
 	{
-		if (m_painter == nullptr)
+		if (m_painter == nullptr || !m_ownsSession)
 			return false;
 		heliosview_painter_t* painter = m_painter;
 		m_painter = nullptr;
+		m_ownsSession = false;
 		return heliosview_painter_end(painter) == 0;
 	}
 
@@ -1034,10 +1099,22 @@ public:
 		return heliosview_painter_draw_polyline(m_painter, points, count, closed ? 1 : 0) == 0;
 	}
 
+	// Same, for the flat [x0, y0, x1, y1, ...] buffers the demos build
+	bool drawPolyline(const std::vector<float>& points, bool closed = false)
+	{
+		return drawPolyline(points.data(), points.size() / 2, closed);
+	}
+
 	// Filled polygon through `count` (x, y) pairs (>= 3 points)
 	bool drawPolygon(const float* points, size_t count)
 	{
 		return heliosview_painter_draw_polygon(m_painter, points, count) == 0;
+	}
+
+	// Same, for the flat [x0, y0, x1, y1, ...] buffers the demos build
+	bool drawPolygon(const std::vector<float>& points)
+	{
+		return drawPolygon(points.data(), points.size() / 2);
 	}
 
 	/* ---- paths ---- */
@@ -1168,6 +1245,11 @@ public:
 
 private:
 	heliosview_painter_t* m_painter = nullptr;
+	bool m_ownsSession = false;
+
+	// The retained widget system wraps the painter session its host owns (see
+	// <HeliosViewCore/UI/Widget.h>): the only caller allowed to adopt a raw handle.
+	friend class ::HeliosView::UI::Widget;
 };
 
 } // namespace helios

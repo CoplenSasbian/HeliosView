@@ -88,7 +88,7 @@ return app.exec();
 | **Viewport Hosts** | `heliosview_host_*` | `helios::UIHost`, `helios::WebViewHost` | Child viewports embedded in host windows; side-by-side hybrid studio layouts; dynamic resizing and visibility |
 | **2D Canvas** | `heliosview_canvas_*` | `helios::Canvas`, `Painter`, `BufferPresenter` | Blend2D JIT x86_64 rasterizer; paths, transforms, gradients, text, clipping; high-performance software blitting via GDI DIB |
 | **Retained UI** | `heliosview_ui_*` | `helios::ui::Widget`, `VStack`, `HStack` | Built-in `Button`, `Slider`, `Switch`, `Checkbox`, `ProgressBar`, `SegmentedControl`, `Card`, `CustomWidget`; layout & hit testing |
-| **WebView2** | `heliosview_webview_*` | `helios::WebViewWindow`, `WebViewHost` | Modern Chromium engine; full DOM integration; virtual scheme mapping (`localUrl`); DevTools, zoom, low-footprint mode |
+| **WebView2** | `heliosview_webview_*` | `helios::Window` (or `WebViewWindow`), `WebViewHost` | Modern Chromium engine; full DOM integration; virtual scheme mapping (`localUrl`); DevTools, zoom, low-footprint mode |
 | **RPC Bridge** | `heliosview_webview_bind` | `bindJson`, `subscribeJson`, `broadcast` | Automatic parameter type deduction via Boost.Describe; asynchronous `std::execution::task` handlers; bi-directional messaging |
 | **Async & Coroutines** | `heliosview_run` | `helios::Async`, `std::execution` | Boost.Asio thread pool; P2300 Senders & Receivers; C++23 coroutines (`co_await`, `co_return`) |
 | **HTTP Client** | — | `helios::http::Client` | Boost.Beast keep-alive connection pool; automatic retries for idempotent requests; TLS/SSL verification |
@@ -123,18 +123,22 @@ All third-party dependencies are vendored as submodules or auto-fetched — **no
 
 | Dependency | Version | Source | Purpose |
 | --- | --- | --- | --- |
-| **WebView2 SDK** | 1.0.4129.50 | NuGet (auto-downloaded at configure time) | Win32 Chromium WebView2 runtime loader |
+| **WebView2 SDK** | 1.0.4181-prerelease | NuGet (auto-downloaded at configure time) | Win32 Chromium WebView2 runtime loader |
 | **Blend2D** | v0.21.3 | Git submodule (`third_party/blend2d`) | Built-in JIT 2D vector rasterization engine |
 | **asmjit** | pinned `dffd8b1` | Git submodule (`third_party/asmjit`) | JIT assembler backend for Blend2D |
-| **stdexec** | pinned `758f41f4` | Git submodule (`third_party/stdexec`) | P2300 Senders/Receivers & C++23 execution |
+| **stdexec** | pinned `b783aac` | Git submodule (`third_party/stdexec`) | P2300 Senders/Receivers & C++23 execution |
 | **Boost** | 1.92.0 | Git submodule (`third_party/boost`) | Asio (thread pool), Beast (HTTP), JSON (RPC auto-binding) |
+| **stb** | vendored | Single-header (`third_party/stb`) | Image decoding (stb_image) and encoding (stb_image_write) |
 
 ### Clone & Build
 
 ```sh
-# Clone repository with submodules
-git clone --recurse-submodules https://github.com/CoplenSasbian/HeliosView.git
+# Clone repository
+git clone https://github.com/CoplenSasbian/HeliosView.git
 cd HeliosView
+
+# Initialize required submodules (selective shallow clone)
+git submodule update --init --depth 1
 
 # Configure build with Ninja
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -516,7 +520,7 @@ int main(void) {
     heliosview_window_show(win);
 
     // Create system tray
-    heliosview_tray_t* tray = heliosview_tray_create(win, "Tray Icon", NULL, NULL);
+    heliosview_tray_t* tray = heliosview_tray_create(win, "Tray Icon", NULL);
     heliosview_tray_notify(tray, "HeliosView", "Running from C99", HELIOSVIEW_TRAY_NOTIFY_INFO, 3000);
 
     // Start event loop
@@ -544,8 +548,8 @@ HeliosView/
 │   └── HeliosViewCore/               # Header-only C++23 Framework
 │       ├── HeliosView.h              # Master C++ umbrella header
 │       ├── App.h                     # App instance & UI thread scheduler
-│       ├── Window.h                  # Top-level window wrapper
-│       ├── WebViewWindow.h           # WebView2 window & Viewport Hosts (UIHost, WebViewHost)
+│       ├── Window.h                  # Top-level window wrapper (includes WebView2 & hosts)
+│       ├── WebViewWindow.h           # Backward-compatible alias for Window.h
 │       ├── Canvas.h                  # C++ Canvas, Painter, Path, Matrix RAII
 │       ├── BufferPresenter.h         # Pixel buffer presentation & blitting
 │       ├── UI/

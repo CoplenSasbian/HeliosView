@@ -240,8 +240,21 @@ public:
     {
         if (m_pixels)
             m_bitmap.reset(new Gdiplus::Bitmap(width, height, stride, bitmap_format, static_cast<BYTE*>(m_pixels)));
-        if (!m_bitmap || m_bitmap->GetLastStatus() != Gdiplus::Ok)
+        if (!m_bitmap || m_bitmap->GetLastStatus() != Gdiplus::Ok) {
             m_bitmap.reset();
+            return;
+        }
+        if (bitmap_format == PixelFormat8bppIndexed) {
+            const int palette_size = sizeof(Gdiplus::ColorPalette) + 255 * sizeof(Gdiplus::ARGB);
+            std::vector<uint8_t> buffer(palette_size);
+            auto* palette = reinterpret_cast<Gdiplus::ColorPalette*>(buffer.data());
+            palette->Flags = Gdiplus::PaletteFlagsGrayScale;
+            palette->Count = 256;
+            for (int i = 0; i < 256; ++i) {
+                palette->Entries[i] = Gdiplus::Color::MakeARGB(255, i, i, i);
+            }
+            m_bitmap->SetPalette(palette);
+        }
     }
 
     bool valid() const { return m_bitmap != nullptr; }
@@ -603,12 +616,26 @@ public:
     {
         if (!src.pixels)
             return;
-        Gdiplus::Bitmap* source = src_adapter ? static_cast<Gdiplus::Bitmap*>(src_adapter->native_bitmap()) : nullptr;
+        auto* own = dynamic_cast<CanvasAdapterImpl*>(src_adapter);
+        Gdiplus::Bitmap* source = own ? own->bitmap() : nullptr;
         std::unique_ptr<Gdiplus::Bitmap> wrapper;
-        Gdiplus::PixelFormat format = gdiplus_format(src.format);
         if (!source) {
-            wrapper.reset(new Gdiplus::Bitmap(src.width, src.height, src.stride, format,
-                                     static_cast<BYTE*>(src.pixels)));
+            if (src.format == HELIOSVIEW_FORMAT_BGRA8_PREMUL) {
+                wrapper.reset(new Gdiplus::Bitmap(src.width, src.height, src.stride, PixelFormat32bppPARGB,
+                                                 static_cast<BYTE*>(src.pixels)));
+            } else if (src.format == HELIOSVIEW_FORMAT_BGRA8) {
+                wrapper.reset(new Gdiplus::Bitmap(src.width, src.height, src.stride, PixelFormat32bppARGB,
+                                                 static_cast<BYTE*>(src.pixels)));
+            } else {
+                const size_t row_bytes = static_cast<size_t>(src.width) * 4u;
+                m_image_scratch.assign(row_bytes * static_cast<size_t>(src.height), 0u);
+                const CanvasData tmp{src.width, src.height, static_cast<int32_t>(row_bytes),
+                                     HELIOSVIEW_FORMAT_BGRA8_PREMUL, m_image_scratch.data()};
+                convert_copy(src, Rect{0.0f, 0.0f, static_cast<float>(src.width), static_cast<float>(src.height)},
+                             tmp, 0, 0, 1.0f);
+                wrapper.reset(new Gdiplus::Bitmap(src.width, src.height, static_cast<INT>(row_bytes),
+                                                 PixelFormat32bppPARGB, m_image_scratch.data()));
+            }
             if (!wrapper || wrapper->GetLastStatus() != Gdiplus::Ok)
                 return;
             source = wrapper.get();
@@ -794,6 +821,7 @@ private:
         Rect clip_bounds;
     };
     std::vector<SavedGdiState> m_saved_gdi_states;
+    std::vector<uint8_t> m_image_scratch;
 };
 
 /* ================= Engine ================= */

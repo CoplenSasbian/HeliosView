@@ -93,9 +93,16 @@ struct heliosview_buffer_presenter {
         has_frame = true;
     }
 
-    void render_to_dc(HDC hdc, const RECT& /*clip_box*/) {
+    void render_to_dc(HDC hdc, const RECT& clip_box) {
         if (!has_frame || backbuffer.empty() || buffer_width <= 0 || buffer_height <= 0) {
             return;
+        }
+
+        if (clip_box.right > clip_box.left && clip_box.bottom > clip_box.top) {
+            RECT dst_rect{dst_x, dst_y, dst_x + buffer_width, dst_y + buffer_height};
+            RECT intersect{};
+            if (!IntersectRect(&intersect, &clip_box, &dst_rect))
+                return;
         }
 
         BITMAPINFO bmi{};
@@ -106,6 +113,38 @@ struct heliosview_buffer_presenter {
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
+
+        if (buffer_format == HELIOSVIEW_FORMAT_BGRA8_PREMUL) {
+            HDC mem_dc = CreateCompatibleDC(hdc);
+            if (mem_dc) {
+                void* bits = nullptr;
+                HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+                if (hbm && bits) {
+                    std::memcpy(bits, backbuffer.data(), backbuffer.size());
+                    HGDIOBJ old_bm = SelectObject(mem_dc, hbm);
+                    BLENDFUNCTION bf{};
+                    bf.BlendOp = AC_SRC_OVER;
+                    bf.BlendFlags = 0;
+                    bf.SourceConstantAlpha = 255;
+                    bf.AlphaFormat = AC_SRC_ALPHA;
+                    AlphaBlend(
+                        hdc,
+                        dst_x, dst_y,
+                        buffer_width, buffer_height,
+                        mem_dc,
+                        0, 0,
+                        buffer_width, buffer_height,
+                        bf
+                    );
+                    SelectObject(mem_dc, old_bm);
+                    DeleteObject(hbm);
+                    DeleteDC(mem_dc);
+                    return;
+                }
+                if (hbm) DeleteObject(hbm);
+                DeleteDC(mem_dc);
+            }
+        }
 
         SetDIBitsToDevice(
             hdc,
@@ -185,7 +224,13 @@ heliosview_buffer_presenter_t* heliosview_buffer_presenter_create_for_hwnd(void*
         return nullptr;
     }
 
-    auto* presenter = new heliosview_buffer_presenter();
+    heliosview_buffer_presenter* presenter = nullptr;
+    try {
+        presenter = new heliosview_buffer_presenter();
+    } catch (const std::bad_alloc&) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "out of memory creating buffer presenter");
+        return nullptr;
+    }
     presenter->window = nullptr;
     presenter->hwnd = hwnd;
 
@@ -290,6 +335,18 @@ void heliosview_buffer_presenter_set_paint_callback(heliosview_buffer_presenter_
 heliosview_window_t* heliosview_buffer_presenter_get_window(const heliosview_buffer_presenter_t* presenter)
 {
     return presenter ? presenter->window : nullptr;
+}
+
+int heliosview_buffer_presenter_render_to_dc(heliosview_buffer_presenter_t* presenter,
+                                            void* hdc,
+                                            int32_t clip_left, int32_t clip_top,
+                                            int32_t clip_right, int32_t clip_bottom)
+{
+    if (!presenter) return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "presenter is NULL");
+    if (!hdc) return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "hdc is NULL");
+    RECT rc{clip_left, clip_top, clip_right, clip_bottom};
+    presenter->render_to_dc(static_cast<HDC>(hdc), rc);
+    return HELIOSVIEW_SUCCESS;
 }
 
 } // extern "C"

@@ -40,8 +40,10 @@ public:
     Tray(const char* tooltip, const char* icon_path = nullptr)
         : m_tray(heliosview_tray_create(tooltip, icon_path, this))
     {
-        if (m_tray)
-            m_sink = App::instance()->addSink([this](const Event& ev) { return handleEvent(ev); });
+        if (m_tray) {
+            if (auto* app = App::instance())
+                m_sink = app->addSink([this](const Event& ev) { return handleEvent(ev); });
+        }
     }
 
     /**
@@ -56,8 +58,10 @@ public:
 
     ~Tray()
     {
-        if (m_sink != 0)
-            App::instance()->removeSink(m_sink);
+        if (m_sink != 0) {
+            if (auto* app = App::instance())
+                app->removeSink(m_sink);
+        }
         heliosview_tray_destroy(m_tray);
     }
 

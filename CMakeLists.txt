@@ -5,6 +5,8 @@ project(HeliosView
         DESCRIPTION "HeliosView - a C++ WebView windowing library"
         LANGUAGES CXX C)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -12,8 +14,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(GNUInstallDirs)
 
 if(MSVC)
-    # beast/stdexec template-heavy headers exceed the default COMDAT section limit
-    add_compile_options(/bigobj)
+    # beast/stdexec template-heavy headers exceed the default COMDAT section limit.
+    # /EHsc enables standard C++ stack unwinding and exception handling (required by Boost/STL).
+    # /utf-8 ensures UTF-8 source and execution character sets.
+    add_compile_options(/bigobj /EHsc /utf-8)
 endif()
 
 # DLLs and demo exes land in the same directory, so no manual PATH setup at runtime
@@ -123,28 +127,30 @@ endforeach()
 add_subdirectory(${HELIOSVIEW_BOOST_ROOT}/libs/json)
 set_target_properties(boost_json PROPERTIES INTERFACE_LINK_LIBRARIES "boost")
 
-# OpenSSL: prebuilt x64 from the openssl.vcpkg nuget package, downloaded at
-# configure time (like the WebView2 SDK) and cached in the build dir. Needed
-# by boost::asio::ssl for https (Http.h) — Windows has no system OpenSSL.
+# OpenSSL: prebuilt x64 from the openssl.vcpkg nuget package, managed outside
+# CMake by scripts/setup-dependencies. Needed by boost::asio::ssl for https
+# (Http.h) — Windows has no system OpenSSL.
 if(WIN32)
-    set(HELIOSVIEW_OPENSSL_VERSION "3.5.2")
-    set(HELIOSVIEW_OPENSSL_ARCHIVE "${CMAKE_BINARY_DIR}/openssl.vcpkg.${HELIOSVIEW_OPENSSL_VERSION}.nupkg")
-    set(HELIOSVIEW_OPENSSL_ROOT "${CMAKE_BINARY_DIR}/openssl")
-    if(NOT EXISTS "${HELIOSVIEW_OPENSSL_ROOT}/build/native/include/openssl/ssl.h")
-        if(NOT EXISTS "${HELIOSVIEW_OPENSSL_ARCHIVE}")
-            message(STATUS "Downloading OpenSSL ${HELIOSVIEW_OPENSSL_VERSION} (x64, ~22 MB, one-time)...")
-            file(DOWNLOAD
-                "https://api.nuget.org/v3-flatcontainer/openssl.vcpkg/${HELIOSVIEW_OPENSSL_VERSION}/openssl.vcpkg.${HELIOSVIEW_OPENSSL_VERSION}.nupkg"
-                "${HELIOSVIEW_OPENSSL_ARCHIVE}"
-                STATUS _ossl_status)
-            list(GET _ossl_status 0 _ossl_code)
-            if(NOT _ossl_code EQUAL 0)
-                list(GET _ossl_status 1 _ossl_err)
-                message(FATAL_ERROR "Failed to download OpenSSL: ${_ossl_err}")
-            endif()
+    if(NOT DEFINED HELIOSVIEW_OPENSSL_ROOT)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/build/native/include/openssl/ssl.h")
+            set(HELIOSVIEW_OPENSSL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
+        elseif(EXISTS "${CMAKE_BINARY_DIR}/openssl/build/native/include/openssl/ssl.h")
+            set(HELIOSVIEW_OPENSSL_ROOT "${CMAKE_BINARY_DIR}/openssl")
+        else()
+            set(HELIOSVIEW_OPENSSL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
         endif()
-        file(ARCHIVE_EXTRACT INPUT "${HELIOSVIEW_OPENSSL_ARCHIVE}" DESTINATION "${HELIOSVIEW_OPENSSL_ROOT}")
     endif()
+
+    if(NOT EXISTS "${HELIOSVIEW_OPENSSL_ROOT}/build/native/include/openssl/ssl.h")
+        message(FATAL_ERROR
+            "\n======================================================================\n"
+            "HeliosView: OpenSSL was not found at '${HELIOSVIEW_OPENSSL_ROOT}'.\n"
+            "Please run the setup script to download and extract dependencies:\n"
+            "  PowerShell:  .\\scripts\\setup-dependencies.ps1\n"
+            "  Or Python:   python scripts/setup-dependencies.py\n"
+            "======================================================================\n")
+    endif()
+
     add_library(openssl INTERFACE)
     target_include_directories(openssl INTERFACE
         $<BUILD_INTERFACE:${HELIOSVIEW_OPENSSL_ROOT}/build/native/include>
@@ -163,54 +169,27 @@ if(WIN32)
         "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libssl-3-x64.dll"
         "${HELIOSVIEW_OPENSSL_ROOT}/build/native/bin/x64/Release/libcrypto-3-x64.dll")
     file(COPY ${HELIOSVIEW_OPENSSL_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
     # CA bundle for TLS verification (OpenSSL on Windows does not use the
-    # system certificate store). TLS-verified download, cached, and tried from
-    # several sources in order: curl.se is canonical, but some networks
-    # (firewalled/proxied, or ones that route GitHub through a mirror such as
-    # this project's ghproxy insteadof) fail a direct TLS handshake to it, so
-    # we fall back to a content-identical copy served from a GitHub repo.
-    # Override the list entirely with -DHELIOSVIEW_CACERT_URL="<url>".
-    set(HELIOSVIEW_CACERT_PEM "${CMAKE_BINARY_DIR}/cacert.pem")
-    if(NOT EXISTS "${HELIOSVIEW_CACERT_PEM}")
-        if(HELIOSVIEW_CACERT_URL)
-            set(_cacert_sources "${HELIOSVIEW_CACERT_URL}")
+    # system certificate store). Managed by scripts/setup-dependencies.
+    if(NOT DEFINED HELIOSVIEW_CACERT_PEM)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cacert.pem")
+            set(HELIOSVIEW_CACERT_PEM "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cacert.pem")
+        elseif(EXISTS "${CMAKE_BINARY_DIR}/cacert.pem")
+            set(HELIOSVIEW_CACERT_PEM "${CMAKE_BINARY_DIR}/cacert.pem")
         else()
-            set(_cacert_sources
-                "https://curl.se/ca/cacert.pem"
-                "https://ghproxy.net/https://raw.githubusercontent.com/bagder/ca-bundle/master/ca-bundle.crt"
-                "https://raw.githubusercontent.com/bagder/ca-bundle/master/ca-bundle.crt")
+            set(HELIOSVIEW_CACERT_PEM "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cacert.pem")
         endif()
-        set(_cacert_ok FALSE)
-        foreach(_src IN LISTS _cacert_sources)
-            message(STATUS "HeliosView: fetching CA bundle from ${_src}")
-            file(DOWNLOAD "${_src}" "${HELIOSVIEW_CACERT_PEM}"
-                 STATUS _cacert_status)
-            list(GET _cacert_status 0 _cacert_code)
-            if(_cacert_code EQUAL 0 AND EXISTS "${HELIOSVIEW_CACERT_PEM}")
-                # Sanity-check it really is a PEM cert bundle (a firewall can
-                # return an HTML error page with HTTP 200). Read the first few
-                # KB: the bundle's leading "## ..." comment header puts the
-                # first ----BEGIN CERTIFICATE---- marker a little inside the
-                # file (curl.se ~2 KB, the bagder copy ~1 KB).
-                file(READ "${HELIOSVIEW_CACERT_PEM}"
-                     _cacert_head LIMIT 4096 OFFSET 0)
-                string(FIND "${_cacert_head}" "-----BEGIN CERTIFICATE-----" _cacert_idx)
-                if(NOT _cacert_idx EQUAL -1)
-                    set(_cacert_ok TRUE)
-                    break()
-                endif()
-            endif()
-            file(REMOVE "${HELIOSVIEW_CACERT_PEM}")
-        endforeach()
-        if(NOT _cacert_ok)
-            message(FATAL_ERROR
-                "Failed to download cacert.pem from any source "
-                "(${_cacert_sources}). If this is an https-certificate "
-                "verification failure on a restrictive network, either set "
-                "-DHELIOSVIEW_CACERT_URL to a reachable copy or run CMake with "
-                "-DCMAKE_TLS_VERIFY=0 (disables TLS verification only for "
-                "file(DOWNLOAD)).")
-        endif()
+    endif()
+
+    if(NOT EXISTS "${HELIOSVIEW_CACERT_PEM}")
+        message(FATAL_ERROR
+            "\n======================================================================\n"
+            "HeliosView: CA certificate bundle was not found at '${HELIOSVIEW_CACERT_PEM}'.\n"
+            "Please run the setup script to download dependencies:\n"
+            "  PowerShell:  .\\scripts\\setup-dependencies.ps1\n"
+            "  Or Python:   python scripts/setup-dependencies.py\n"
+            "======================================================================\n")
     endif()
     file(COPY "${HELIOSVIEW_CACERT_PEM}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 endif()
@@ -222,23 +201,27 @@ endif()
 include(cmake/PlatformLibs.cmake)
 
 if(WIN32)
-    # WebView2 SDK: download the Microsoft.Web.WebView2 NuGet package at
-    # configure time and extract the native headers + WebView2Loader lib/dll.
-    set(HELIOSVIEW_WEBVIEW2_VERSION "1.0.4181-prerelease")
-    set(HELIOSVIEW_WEBVIEW2_ARCHIVE "${CMAKE_BINARY_DIR}/webview2.nupkg")
-    set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_BINARY_DIR}/webview2-sdk")
-    if(NOT EXISTS "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/include/WebView2.h")
-        file(DOWNLOAD
-            "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${HELIOSVIEW_WEBVIEW2_VERSION}"
-            "${HELIOSVIEW_WEBVIEW2_ARCHIVE}"
-            STATUS _wv2_status)
-        list(GET _wv2_status 0 _wv2_code)
-        if(NOT _wv2_code EQUAL 0)
-            list(GET _wv2_status 1 _wv2_err)
-            message(FATAL_ERROR "Failed to download WebView2 SDK: ${_wv2_err}")
+    # WebView2 SDK: managed outside CMake by scripts/setup-dependencies.
+    if(NOT DEFINED HELIOSVIEW_WEBVIEW2_ROOT)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2-sdk/build/native/include/WebView2.h")
+            set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2-sdk")
+        elseif(EXISTS "${CMAKE_BINARY_DIR}/webview2-sdk/build/native/include/WebView2.h")
+            set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_BINARY_DIR}/webview2-sdk")
+        else()
+            set(HELIOSVIEW_WEBVIEW2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2-sdk")
         endif()
-        file(ARCHIVE_EXTRACT INPUT "${HELIOSVIEW_WEBVIEW2_ARCHIVE}" DESTINATION "${HELIOSVIEW_WEBVIEW2_ROOT}")
     endif()
+
+    if(NOT EXISTS "${HELIOSVIEW_WEBVIEW2_ROOT}/build/native/include/WebView2.h")
+        message(FATAL_ERROR
+            "\n======================================================================\n"
+            "HeliosView: Microsoft WebView2 SDK was not found at '${HELIOSVIEW_WEBVIEW2_ROOT}'.\n"
+            "Please run the setup script to download dependencies:\n"
+            "  PowerShell:  .\\scripts\\setup-dependencies.ps1\n"
+            "  Or Python:   python scripts/setup-dependencies.py\n"
+            "======================================================================\n")
+    endif()
+
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         set(HELIOSVIEW_WEBVIEW2_ARCH x64)
     else()
@@ -254,8 +237,12 @@ if(WIN32)
 endif()
 
 # Blend2D: unified 2D vector graphics engine (software rasterizer with JIT)
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|amd64")
     set(BLEND2D_TARGET_ARCH "X86_64" CACHE STRING "" FORCE)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+    set(BLEND2D_TARGET_ARCH "AArch64" CACHE STRING "" FORCE)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "X86|i[3-6]86")
+    set(BLEND2D_TARGET_ARCH "X86" CACHE STRING "" FORCE)
 endif()
 set(BLEND2D_STATIC ON CACHE BOOL "" FORCE)
 set(BLEND2D_TEST OFF CACHE BOOL "" FORCE)

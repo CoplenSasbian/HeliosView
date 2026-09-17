@@ -8,10 +8,35 @@
  * Supports:
  *   1. OOP Derivation (override onPaint / onMouseEvent)
  *   2. Functional / Compositional Customization (CustomWidget with lambdas)
- *   3. Built-in modern widgets (Button, Label, VStack, HStack)
+ *   3. Built-in modern widgets (Button, Label, VStack, HStack, Slider, ...)
+ *
+ * Drawing goes through the C++ painter (<HeliosViewCore/Canvas.h>), never through
+ * the C painter functions: a widget callback is handed a live painter session by
+ * the host, and wraps it as a borrowing helios::Painter (see Painter(const Handle&)
+ * in Canvas.h) whose destructor leaves the session to its owner:
+ *
+ *     widget->setPaint([](CustomWidget* w, helios::Painter& p) {
+ *         const helios::Rect r = w->bounds();
+ *         p.setFill(0xFF1E1E2E);
+ *         p.drawRoundRect(0, 0, (float)r.width, (float)r.height, 10.0f);
+ *     });
+ *
+ * On the C side every widget handle is heliosview_ui_widget_t*; here it is a Widget
+ * (or one of its subclasses), and the raw handle is only reachable through handle()
+ * for the calls this wrapper does not cover.
  */
 
+#include <HeliosView/heliosview_canvas.h>
 #include <HeliosView/heliosview_ui.h>
+
+/* Declared before <HeliosViewCore/Canvas.h>, which names this class as a friend so a
+ * widget can adopt the live painter session its host owns. */
+namespace HeliosView::UI {
+class Widget;
+}
+
+#include <HeliosViewCore/Canvas.h>
+
 #include <algorithm>
 #include <functional>
 #include <memory>
@@ -61,6 +86,14 @@ public:
         return this;
     }
 
+    // The widget's allocated box. A paint callback draws in widget-local coordinates,
+    // so it usually only needs the size: bounds().width / bounds().height.
+    helios::Rect bounds() const {
+        int x = 0, y = 0, width = 0, height = 0;
+        if (m_handle) heliosview_ui_widget_get_bounds(m_handle, &x, &y, &width, &height);
+        return helios::Rect{x, y, width, height};
+    }
+
     void requestRepaint() {
         if (m_handle) heliosview_ui_widget_request_repaint(m_handle);
     }
@@ -84,8 +117,9 @@ public:
         return this;
     }
 
-    // Customization Hooks for OOP subclasses
-    virtual void onPaint(heliosview_painter_t* painter) {}
+    // Customization Hooks for OOP subclasses. `painter` borrows the host's live
+    // session and is only valid for the duration of this call.
+    virtual void onPaint(helios::Painter& painter) {}
     virtual bool onMouseEvent(const heliosview_host_mouse_event_t* event) { return false; }
 
 protected:
@@ -96,7 +130,10 @@ protected:
 private:
     static void StaticPaint(heliosview_ui_widget_t*, heliosview_painter_t* p, void* udata) {
         auto* self = static_cast<Widget*>(udata);
-        if (self) self->onPaint(p);
+        if (self) {
+            helios::Painter painter{helios::Painter::Borrowed(p)};
+            self->onPaint(painter);
+        }
     }
 
     static int StaticEvent(heliosview_ui_widget_t*, const heliosview_host_mouse_event_t* e, void* udata) {
@@ -114,7 +151,7 @@ private:
  */
 class CustomWidget : public Widget {
 public:
-    using PaintFn = std::function<void(CustomWidget* w, heliosview_painter_t* p)>;
+    using PaintFn = std::function<void(CustomWidget* w, helios::Painter& p)>;
     using EventFn = std::function<bool(CustomWidget* w, const heliosview_host_mouse_event_t* e)>;
 
     static std::shared_ptr<CustomWidget> create() {
@@ -131,7 +168,7 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
+    void onPaint(helios::Painter& p) override {
         if (m_paintFn) m_paintFn(this, p);
     }
 
@@ -267,37 +304,39 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect r = bounds();
+        const float w = (float)r.width;
+        const float h = (float)r.height;
         float trackH = 6.0f;
         float cy = h / 2.0f;
         float padding = 12.0f;
-        float availW = (float)w - padding * 2.0f;
+        float availW = w - padding * 2.0f;
 
         // Inactive background track
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_set_stroke(p, 0, 0);
-        heliosview_painter_draw_round_rect(p, padding, cy - trackH / 2.0f, availW, trackH, trackH / 2.0f);
+        p.setFill(0xFF313244);
+        p.setStroke(0, 0);
+        p.drawRoundRect(padding, cy - trackH / 2.0f, availW, trackH, trackH / 2.0f);
 
         // Active highlighted track
         float fraction = (m_max > m_min) ? ((m_val - m_min) / (m_max - m_min)) : 0.0f;
         fraction = std::clamp(fraction, 0.0f, 1.0f);
         float fillW = availW * fraction;
-        heliosview_painter_set_fill(p, m_isDragging ? 0xFFCBA6F7 : (m_isHovered ? 0xFFB4BEFE : 0xFF8AADF4));
-        heliosview_painter_draw_round_rect(p, padding, cy - trackH / 2.0f, fillW, trackH, trackH / 2.0f);
+        p.setFill(m_isDragging ? 0xFFCBA6F7 : (m_isHovered ? 0xFFB4BEFE : 0xFF8AADF4));
+        p.drawRoundRect(padding, cy - trackH / 2.0f, fillW, trackH, trackH / 2.0f);
 
         // Thumb knob
         float thumbX = padding + fillW;
         float thumbR = m_isDragging ? 9.0f : (m_isHovered ? 8.0f : 7.0f);
-        heliosview_painter_set_fill(p, 0xFFCAD3F5);
-        heliosview_painter_set_stroke(p, 0xFFB4BEFE, 2.0f);
-        heliosview_painter_draw_ellipse(p, thumbX - thumbR, cy - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+        p.setFill(0xFFCAD3F5);
+        p.setStroke(0xFFB4BEFE, 2.0f);
+        p.drawEllipse(thumbX - thumbR, cy - thumbR, thumbR * 2.0f, thumbR * 2.0f);
     }
 
     bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        const helios::Rect r = bounds();
+        const int w = r.width;
+        const int h = r.height;
         float padding = 12.0f;
         float availW = (float)w - padding * 2.0f;
 
@@ -308,25 +347,30 @@ public:
         };
 
         if (e->action == HELIOSVIEW_HOST_MOUSE_MOVE) {
-            if (!m_isHovered) { m_isHovered = true; requestRepaint(); }
+            bool inside = (e->x >= 0 && e->x < w && e->y >= 0 && e->y < h);
             if (m_isDragging) {
                 updateFromX(e->x);
                 return true;
+            } else if (inside != m_isHovered) {
+                m_isHovered = inside;
+                requestRepaint();
             }
         } else if (e->action == HELIOSVIEW_HOST_MOUSE_DOWN && e->button == 1) {
             m_isDragging = true;
+            m_isHovered = true;
             updateFromX(e->x);
+            requestRepaint();
             return true;
-        } else if (e->action == HELIOSVIEW_HOST_MOUSE_UP && e->button == 1) {
+        } else if (e->action == HELIOSVIEW_HOST_MOUSE_UP) {
             if (m_isDragging) {
                 m_isDragging = false;
+                m_isHovered = (e->x >= 0 && e->x < w && e->y >= 0 && e->y < h);
                 requestRepaint();
                 return true;
             }
         } else if (e->action == HELIOSVIEW_HOST_MOUSE_LEAVE) {
-            if (m_isHovered || m_isDragging) {
+            if (!m_isDragging && m_isHovered) {
                 m_isHovered = false;
-                m_isDragging = false;
                 requestRepaint();
             }
         }
@@ -370,28 +414,27 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+    void onPaint(helios::Painter& p) override {
+        const float h = (float)bounds().height;
         float pillW = 46.0f;
         float pillH = 24.0f;
         float px = 4.0f;
-        float py = ((float)h - pillH) / 2.0f;
+        float py = (h - pillH) / 2.0f;
 
         // Pill background
         uint32_t bg = m_checked ? (m_isHovered ? 0xFFA6E3A1 : 0xFFA6DA95)
                                 : (m_isHovered ? 0xFF45475A : 0xFF313244);
-        heliosview_painter_set_fill(p, bg);
-        heliosview_painter_set_stroke(p, m_checked ? 0xFF8AADF4 : 0xFF585B70, 1.0f);
-        heliosview_painter_draw_round_rect(p, px, py, pillW, pillH, pillH / 2.0f);
+        p.setFill(bg);
+        p.setStroke(m_checked ? 0xFF8AADF4 : 0xFF585B70, 1.0f);
+        p.drawRoundRect(px, py, pillW, pillH, pillH / 2.0f);
 
         // Thumb circle
         float thumbR = 9.0f;
         float thumbX = m_checked ? (px + pillW - thumbR - 3.0f) : (px + thumbR + 3.0f);
         float thumbY = py + pillH / 2.0f;
-        heliosview_painter_set_fill(p, 0xFFFFFFFF);
-        heliosview_painter_set_stroke(p, 0, 0);
-        heliosview_painter_draw_ellipse(p, thumbX - thumbR, thumbY - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+        p.setFill(0xFFFFFFFF);
+        p.setStroke(0, 0);
+        p.drawEllipse(thumbX - thumbR, thumbY - thumbR, thumbR * 2.0f, thumbR * 2.0f);
     }
 
     bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
@@ -440,34 +483,32 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+    void onPaint(helios::Painter& p) override {
+        const float h = (float)bounds().height;
         float boxSize = 18.0f;
         float bx = 4.0f;
-        float by = ((float)h - boxSize) / 2.0f;
+        float by = (h - boxSize) / 2.0f;
 
         // Box
         uint32_t bg = m_checked ? 0xFF8AADF4 : (m_isHovered ? 0xFF313244 : 0xFF1E1E2E);
-        heliosview_painter_set_fill(p, bg);
-        heliosview_painter_set_stroke(p, m_isHovered ? 0xFFB4BEFE : 0xFF585B70, 1.5f);
-        heliosview_painter_draw_round_rect(p, bx, by, boxSize, boxSize, 4.0f);
+        p.setFill(bg);
+        p.setStroke(m_isHovered ? 0xFFB4BEFE : 0xFF585B70, 1.5f);
+        p.drawRoundRect(bx, by, boxSize, boxSize, 4.0f);
 
         // Vector Checkmark (✓)
         if (m_checked) {
-            heliosview_painter_set_stroke(p, 0xFF181926, 2.2f);
-            heliosview_painter_draw_line(p, bx + 4.0f, by + 9.0f, bx + 8.0f, by + 13.5f);
-            heliosview_painter_draw_line(p, bx + 8.0f, by + 13.5f, bx + 14.0f, by + 5.0f);
+            p.setStroke(0xFF181926, 2.2f);
+            p.drawLine(bx + 4.0f, by + 9.0f, bx + 8.0f, by + 13.5f);
+            p.drawLine(bx + 8.0f, by + 13.5f, bx + 14.0f, by + 5.0f);
         }
 
         // Label
         if (!m_label.empty()) {
-            heliosview_font_desc_t font{"Segoe UI", 13.0f, 0};
-            heliosview_painter_set_font(p, &font);
-            heliosview_painter_set_fill(p, m_isHovered ? 0xFFFFFFFF : 0xFFCDD6F4);
-            heliosview_text_metrics_t m{};
-            heliosview_painter_measure_text(p, m_label.c_str(), &m);
-            heliosview_painter_draw_text(p, m_label.c_str(), bx + boxSize + 10.0f, ((float)h - m.height) / 2.0f);
+            p.setFont(helios::FontDesc{"Segoe UI", 13.0f, helios::FontFlag::None});
+            p.setFill(m_isHovered ? 0xFFFFFFFF : 0xFFCDD6F4);
+            helios::TextMetrics m{};
+            p.measureText(m_label, m);
+            p.drawText(m_label, bx + boxSize + 10.0f, (h - m.height) / 2.0f);
         }
     }
 
@@ -517,21 +558,20 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
-        float trackH = (float)h;
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect r = bounds();
+        float trackH = (float)r.height;
 
         // Background track
-        heliosview_painter_set_fill(p, 0xFF313244);
-        heliosview_painter_set_stroke(p, 0, 0);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, trackH, trackH / 2.0f);
+        p.setFill(0xFF313244);
+        p.setStroke(0, 0);
+        p.drawRoundRect(0, 0, (float)r.width, trackH, trackH / 2.0f);
 
         // Filled bar
         if (m_progress > 0.001f) {
-            float fillW = (float)w * m_progress;
-            heliosview_painter_set_fill(p, m_barColor);
-            heliosview_painter_draw_round_rect(p, 0, 0, fillW, trackH, trackH / 2.0f);
+            float fillW = (float)r.width * m_progress;
+            p.setFill(m_barColor);
+            p.drawRoundRect(0, 0, fillW, trackH, trackH / 2.0f);
         }
     }
 
@@ -566,21 +606,21 @@ public:
         return this;
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect r = bounds();
+        const float w = (float)r.width;
+        const float h = (float)r.height;
         if (m_items.empty()) return;
 
         // Container background
-        heliosview_painter_set_fill(p, 0xFF181926);
-        heliosview_painter_set_stroke(p, 0xFF313244, 1.0f);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 8.0f);
+        p.setFill(0xFF181926);
+        p.setStroke(0xFF313244, 1.0f);
+        p.drawRoundRect(0, 0, w, h, 8.0f);
 
-        float tabW = (float)(w - 8) / (float)m_items.size();
-        float tabH = (float)(h - 8);
+        float tabW = (w - 8.0f) / (float)m_items.size();
+        float tabH = h - 8.0f;
 
-        heliosview_font_desc_t font{"Segoe UI", 12.0f, HELIOSVIEW_FONT_BOLD};
-        heliosview_painter_set_font(p, &font);
+        p.setFont(helios::FontDesc{"Segoe UI", 12.0f, helios::FontFlag::Bold});
 
         for (size_t i = 0; i < m_items.size(); ++i) {
             float tx = 4.0f + i * tabW;
@@ -588,29 +628,30 @@ public:
 
             if ((int)i == m_selectedIndex) {
                 // Active pill
-                heliosview_painter_set_fill(p, 0xFF8AADF4);
-                heliosview_painter_set_stroke(p, 0, 0);
-                heliosview_painter_draw_round_rect(p, tx, ty, tabW, tabH, 6.0f);
-                heliosview_painter_set_fill(p, 0xFF181926);
+                p.setFill(0xFF8AADF4);
+                p.setStroke(0, 0);
+                p.drawRoundRect(tx, ty, tabW, tabH, 6.0f);
+                p.setFill(0xFF181926);
             } else if ((int)i == m_hoveredIndex) {
                 // Hover pill
-                heliosview_painter_set_fill(p, 0xFF24273A);
-                heliosview_painter_set_stroke(p, 0, 0);
-                heliosview_painter_draw_round_rect(p, tx, ty, tabW, tabH, 6.0f);
-                heliosview_painter_set_fill(p, 0xFFCDD6F4);
+                p.setFill(0xFF24273A);
+                p.setStroke(0, 0);
+                p.drawRoundRect(tx, ty, tabW, tabH, 6.0f);
+                p.setFill(0xFFCDD6F4);
             } else {
-                heliosview_painter_set_fill(p, 0xFFA6ADC8);
+                p.setFill(0xFFA6ADC8);
             }
 
-            heliosview_text_metrics_t m{};
-            heliosview_painter_measure_text(p, m_items[i].c_str(), &m);
-            heliosview_painter_draw_text(p, m_items[i].c_str(), tx + (tabW - m.width) / 2.0f, ty + (tabH - m.height) / 2.0f);
+            helios::TextMetrics m{};
+            p.measureText(m_items[i], m);
+            p.drawText(m_items[i], tx + (tabW - m.width) / 2.0f, ty + (tabH - m.height) / 2.0f);
         }
     }
 
     bool onMouseEvent(const heliosview_host_mouse_event_t* e) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
+        const helios::Rect r = bounds();
+        const int w = r.width;
+        const int h = r.height;
         if (m_items.empty()) return false;
 
         float tabW = (float)(w - 8) / (float)m_items.size();
@@ -633,6 +674,7 @@ public:
             setSelectedIndex(idx);
             return true;
         }
+        (void)h;
         return false;
     }
 
@@ -655,12 +697,11 @@ public:
         return std::shared_ptr<Card>(new Card(width, height, bg, border));
     }
 
-    void onPaint(heliosview_painter_t* p) override {
-        int w = 0, h = 0;
-        heliosview_ui_widget_get_bounds(m_handle, nullptr, nullptr, &w, &h);
-        heliosview_painter_set_fill(p, m_bg);
-        heliosview_painter_set_stroke(p, m_border, 1.0f);
-        heliosview_painter_draw_round_rect(p, 0, 0, (float)w, (float)h, 10.0f);
+    void onPaint(helios::Painter& p) override {
+        const helios::Rect r = bounds();
+        p.setFill(m_bg);
+        p.setStroke(m_border, 1.0f);
+        p.drawRoundRect(0, 0, (float)r.width, (float)r.height, 10.0f);
     }
 
 private:

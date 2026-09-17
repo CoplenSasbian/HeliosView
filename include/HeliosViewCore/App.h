@@ -90,6 +90,14 @@ public:
     // quit(). Returns 0 on normal exit.
     int exec() { return heliosview_run(&App::loopCallback, this); }
 
+    // Per-frame hook: called on the message-loop thread once per iteration, right
+    // before the queued events of that iteration are dispatched. This is where
+    // animation state advances (the loop's own frame callback, kept in C++). Leave
+    // it empty for a purely event-driven application.
+    //
+    //   app.frameCallback = [&] { state.advance(0.016f); host->requestRepaint(); };
+    std::function<void()> frameCallback;
+
     // Request the message loop to exit. exec() returns normally.
     void quit() { heliosview_quit(); }
 
@@ -138,6 +146,17 @@ public:
     static void removeNativeFilter(uint32_t id)
     {
         heliosview_remove_native_filter(id);
+    }
+
+    // Dispatch an event to decoupled extension sinks (Menu/Tray actions).
+    // Returns true if handled by a sink.
+    bool dispatchSink(const Event& ev)
+    {
+        for (const auto& [id, sink] : m_sinks) {
+            if (sink && sink(ev))
+                return true;
+        }
+        return false;
     }
 
     /**

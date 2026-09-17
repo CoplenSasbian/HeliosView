@@ -152,6 +152,8 @@ namespace detail2 {
 /* stride: bytes per row, 4-byte aligned (engines want an aligned pitch). */
 int32_t stride_for(int32_t width, int bpp)
 {
+    if (width <= 0 || bpp <= 0 || width > (INT32_MAX - 3) / bpp)
+        return 0;
     return ((width * bpp) + 3) & ~3;
 }
 
@@ -339,6 +341,11 @@ heliosview_canvas_t* canvas_alloc(int32_t width, int32_t height, heliosview_pixe
         canvas->data.height = height;
         canvas->data.format = concrete;
         canvas->data.stride = stride_for(width, bytes_per_pixel(concrete));
+        if (canvas->data.stride <= 0) {
+            hv::hv_dealloc(canvas);
+            hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas stride overflow or invalid dimensions");
+            return nullptr;
+        }
         canvas->storage.assign(static_cast<size_t>(canvas->data.stride) * static_cast<size_t>(height), 0);
         canvas->data.pixels = canvas->storage.data();
         canvas->engine = engine;
@@ -588,6 +595,11 @@ heliosview_pixel_view_t heliosview_canvas_pixel_view(const heliosview_canvas_t* 
 {
     if (!canvas)
         return heliosview_pixel_view_t{nullptr, 0, 0, 0, HELIOSVIEW_FORMAT_AUTO};
+    if (canvas->adapter && !canvas->adapter->direct_pixels()) {
+        hv_fail(HELIOSVIEW_ERROR_UNSUPPORTED,
+                "this engine does not expose its pixels directly; use set_pixel/get_pixel");
+        return heliosview_pixel_view_t{nullptr, 0, 0, 0, HELIOSVIEW_FORMAT_AUTO};
+    }
     return heliosview_pixel_view_t{
         canvas->data.pixels,
         canvas->data.width,
@@ -616,19 +628,31 @@ int heliosview_canvas_resize(heliosview_canvas_t* canvas, int32_t width, int32_t
     if (canvas->active_painter)
         return hv_fail(HELIOSVIEW_ERROR_GENERIC, "a painter is active on the canvas");
 
-    canvas->data.width = width;
-    canvas->data.height = height;
-    canvas->data.stride = stride_for(width, hv::canvas::bytes_per_pixel(canvas->data.format));
+    const int32_t new_stride = stride_for(width, hv::canvas::bytes_per_pixel(canvas->data.format));
+    if (new_stride <= 0)
+        return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "canvas stride overflow or invalid dimensions");
+
+    std::vector<uint8_t> new_storage;
     try {
-        canvas->storage.assign(static_cast<size_t>(canvas->data.stride) * static_cast<size_t>(height), 0);
+        new_storage.assign(static_cast<size_t>(new_stride) * static_cast<size_t>(height), 0);
     } catch (const std::bad_alloc&) {
         return hv_fail(HELIOSVIEW_ERROR_GENERIC, "out of memory resizing the canvas");
     }
-    canvas->data.pixels = canvas->storage.data();
-    /* The pixels moved: the engine must be handed the new buffer. */
-    canvas->adapter = canvas->engine->create_canvas(canvas->data);
-    if (!canvas->adapter)
+
+    CanvasData new_data = canvas->data;
+    new_data.width = width;
+    new_data.height = height;
+    new_data.stride = new_stride;
+    new_data.pixels = new_storage.data();
+
+    auto new_adapter = canvas->engine->create_canvas(new_data);
+    if (!new_adapter)
         return hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas engine could not wrap the resized canvas");
+
+    canvas->storage = std::move(new_storage);
+    canvas->data = new_data;
+    canvas->data.pixels = canvas->storage.data();
+    canvas->adapter = std::move(new_adapter);
     return 0;
 }
 
@@ -751,6 +775,8 @@ int heliosview_canvas_encode(heliosview_canvas_t* canvas, const char* format, in
             std::memcpy(buffer, bytes.data(), bytes.size());
         *out_data = buffer;
     }
+    if (bytes.size() > static_cast<size_t>(INT_MAX))
+        return hv_fail(HELIOSVIEW_ERROR_GENERIC, "encoded image exceeds maximum returnable size");
     return static_cast<int>(bytes.size());
 }
 
@@ -804,6 +830,10 @@ heliosview_painter_t* heliosview_painter_begin(heliosview_canvas_t* canvas)
     }
     if (canvas->active_painter) {
         hv_fail(HELIOSVIEW_ERROR_GENERIC, "the canvas already has a painter; end it first");
+        return nullptr;
+    }
+    if (!canvas->adapter) {
+        hv_fail(HELIOSVIEW_ERROR_GENERIC, "canvas has no valid adapter");
         return nullptr;
     }
     heliosview_painter_t* painter = nullptr;
@@ -1415,6 +1445,9 @@ int heliosview_painter_draw_image(heliosview_painter_t* painter, heliosview_canv
     if (image == painter->canvas)
         return hv_fail(HELIOSVIEW_ERROR_INVALID_ARGUMENT, "a canvas cannot draw itself");
 
+    if (image->active_painter && image->active_painter->context)
+        image->active_painter->context->flush();
+
     hv::canvas::Rect src{0, 0, static_cast<float>(image->data.width),
                         static_cast<float>(image->data.height)};
     if (src_rect)
@@ -1498,6 +1531,7 @@ int heliosview_window_set_canvas_engine(heliosview_window_t*, heliosview_canvas_
 
 heliosview_canvas_engine_t heliosview_window_canvas_engine(const heliosview_window_t*)
 {
+    window_canvas_not_implemented("window drawing is not implemented yet");
     return HELIOSVIEW_ENGINE_AUTO;
 }
 
@@ -1508,6 +1542,7 @@ int heliosview_window_set_double_buffered(heliosview_window_t*, int)
 
 int heliosview_window_is_double_buffered(const heliosview_window_t*)
 {
+    window_canvas_not_implemented("window drawing is not implemented yet");
     return 0;
 }
 

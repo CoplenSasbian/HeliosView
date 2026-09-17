@@ -20,7 +20,6 @@ extern "C" {
 #endif
 
 typedef struct heliosview_host heliosview_host_t;
-typedef enum heliosview_canvas_engine heliosview_canvas_engine_t;
 
 /* ================= Generic Host (Child Window) ================= */
 
