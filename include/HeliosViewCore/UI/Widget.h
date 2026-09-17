@@ -936,8 +936,8 @@ public:
 
         // Selection behind the text
         if (m_anchor != m_cursor) {
-            const float x0 = textX + widthAt(p, std::min(m_anchor, m_cursor));
-            const float x1 = textX + widthAt(p, std::max(m_anchor, m_cursor));
+            const float x0 = textX + widthAtLive(std::min(m_anchor, m_cursor));
+            const float x1 = textX + widthAtLive(std::max(m_anchor, m_cursor));
             p.setFill(0x668AADF4);
             p.setStroke(0, 0);
             p.drawRect(x0, textY - 2.0f, x1 - x0, caretHeight + 4.0f);
@@ -949,7 +949,7 @@ public:
 
         // IME composition (pre-edit): shown where it will be inserted, underlined so
         // it reads as "not committed yet"
-        const float compositionX = textX + widthAt(p, m_cursor);
+        const float compositionX = textX + widthAtLive(m_cursor);
         if (!m_composition.empty()) {
             p.setFill(0xFFFFD479);
             p.drawText(m_composition, compositionX, textY);
@@ -1116,8 +1116,13 @@ public:
         return true;
     }
 
-private:
+protected:
+    // Protected rather than private: a field with different editing rules is a
+    // subclass (Widget's documented OOP path), and create() stays the usual way to
+    // make a plain one.
     TextField() = default;
+
+private:
 
     // ---- text access ----
 
@@ -1180,26 +1185,25 @@ private:
         return m_prefix.empty() ? 10.0f : 10.0f + m_prefixWidth + 8.0f;
     }
 
-    // Width of m_text[0, index) with the field's font. Needs a live painter; the one
-    // from the last paint is cached for hit-testing, and before the first paint (or
-    // for a detached field) the metrics are rebuilt on a scratch canvas.
-    float widthAt(helios::Painter& p, size_t index) const {
-        if (index == 0) return 0.0f;
-        const size_t at = detail::utf8ClampToBoundary(m_text, index);
-        helios::TextMetrics m{};
-        p.measureText(std::string_view(m_text).substr(0, at), m);
-        return m.width;
-    }
-
+    // Width of m_text[0, index) with the field's font.
+    //
+    // Text measurement needs a painter, and a painter is only valid inside the paint
+    // call it belongs to. Input handling (caret moves, IME caret reporting) runs
+    // outside the paint cycle, so it measures on a scratch canvas of its own rather
+    // than caching the live painter -- caching one would leave the field holding a
+    // painter whose session the host already ended.
     float widthAtLive(size_t index) const {
         if (index == 0) return 0.0f;
-        if (m_painter) return widthAt(*m_painter, index);
 
         helios::Canvas scratch(64, 32);
-        helios::Painter p(scratch);
-        if (!p.valid()) return 0.0f;
-        p.setFont(m_font);
-        return widthAt(p, index);
+        if (!scratch.valid()) return 0.0f;
+        helios::Painter painter(scratch);
+        if (!painter.valid()) return 0.0f;
+
+        painter.setFont(m_font);
+        helios::TextMetrics m{};
+        painter.measureText(std::string_view(m_text).substr(0, detail::utf8ClampToBoundary(m_text, index)), m);
+        return m.width;
     }
 
     // The caret's x inside the field: the composition start while composing, since
@@ -1239,7 +1243,6 @@ private:
     // Cache the metrics the mouse and IME paths need; called from onPaint where a
     // painter is live.
     void refreshMetrics(helios::Painter& p) {
-        m_painter = &p;
         if (!m_prefix.empty()) {
             helios::TextMetrics m{};
             p.measureText(m_prefix, m);
@@ -1263,7 +1266,6 @@ private:
     bool m_selectAllOnFocus = true;
     size_t m_maxLength = 0; /* 0 = unlimited (code points) */
 
-    helios::Painter* m_painter = nullptr; /* only valid inside onPaint */
     float m_lineHeight = 18.0f;
     float m_prefixWidth = 0.0f;
 

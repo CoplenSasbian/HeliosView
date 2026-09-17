@@ -9,6 +9,8 @@
 
 #include <commctrl.h>
 #include <imm.h>
+#include <cstdarg>
+#include <cstdio>
 #include <string>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "imm32.lib")
@@ -28,6 +30,28 @@ struct heliosview_host {
 };
 
 namespace {
+
+/* Temporary diagnostic: set HELIOSVIEW_IME_LOG=1 to trace the IME messages a host
+ * window receives. Used to verify the composition path against a real IME. */
+static bool ime_log_enabled() {
+    static const bool on = [] {
+        char buf[8] = {};
+        return GetEnvironmentVariableA("HELIOSVIEW_IME_LOG", buf, sizeof buf) > 0 && buf[0] == '1';
+    }();
+    return on;
+}
+
+static void ime_log(const char* fmt, ...) {
+    if (!ime_log_enabled()) return;
+    FILE* f = nullptr;
+    if (fopen_s(&f, "D:\\cpp\\HeliosView\\out\\ime.log", "a") != 0 || !f) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(f, fmt, args);
+    va_end(args);
+    fputc('\n', f);
+    fclose(f);
+}
 
 constexpr wchar_t kHostClassName[] = L"HeliosView_Host_Window";
 std::atomic<bool> s_class_registered{false};
@@ -118,6 +142,45 @@ static int hv_host_utf8_from_unit(wchar_t unit, wchar_t* pending_high, char* out
     if (unit >= 0xDC00 && unit <= 0xDFFF)
         return encode(0xFFFD, out); /* lone low surrogate */
     return encode(static_cast<uint32_t>(unit), out);
+}
+
+/* One committed character -> the focused widget.
+ *
+ * Two messages carry committed text and an IME may send either or both:
+ *   - WM_CHAR, which TranslateMessage derives from a key press, and
+ *   - WM_IME_CHAR, which an IME posts for the character it produced.
+ * A duplicate guard keeps a character from landing twice when both arrive.
+ */
+static bool hv_host_accepts_char(wchar_t unit) {
+    return unit >= 0x20 && unit != 0x7F;
+}
+
+static void hv_host_deliver_char(heliosview_host_t* host, wchar_t unit) {
+    static thread_local wchar_t pending_high = 0;
+    static thread_local wchar_t last_char = 0;
+    static thread_local DWORD last_tick = 0;
+
+    if (unit == last_char) {
+        const DWORD now = GetTickCount();
+        if (now - last_tick < 60) return; /* same character again within a tick: the
+                                           * other channel for it already delivered */
+        last_tick = now;
+    } else {
+        last_char = unit;
+        last_tick = GetTickCount();
+    }
+
+    char utf8[8] = {};
+    const int len = hv_host_utf8_from_unit(unit, &pending_high, utf8);
+    if (len > 0) {
+        utf8[len] = '\0';
+        heliosview_host_ui_dispatch_text(host, utf8);
+        return;
+    }
+    if (pending_high == 0 && unit >= 0xDC00 && unit <= 0xDFFF) {
+        /* lone low surrogate: report a replacement character */
+        heliosview_host_ui_dispatch_text(host, "\xEF\xBF\xBD");
+    }
 }
 
 /* Pin the IME composition window and candidate list to the caret: the app reports the
@@ -259,68 +322,107 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
     /* ---- text input (this window is the focused one, see the note above) ---- */
     case WM_CHAR: {
-        static thread_local wchar_t pending_high = 0;
         const wchar_t unit = static_cast<wchar_t>(wp);
-        if (unit < 0x20 || unit == 0x7F)
+        if (!hv_host_accepts_char(unit))
             return 0; /* backspace/tab/CR/LF/ESC are key events, not text */
-
-        char utf8[8] = {};
-        const int len = hv_host_utf8_from_unit(unit, &pending_high, utf8);
-        if (len > 0) {
-            utf8[len] = '\0';
-            heliosview_host_ui_dispatch_text(host, utf8);
-        } else if (pending_high == 0 && unit >= 0xDC00 && unit <= 0xDFFF) {
-            /* lone low surrogate: report a replacement character */
-            utf8[0] = static_cast<char>(0xEF);
-            utf8[1] = static_cast<char>(0xBF);
-            utf8[2] = static_cast<char>(0xBD);
-            utf8[3] = '\0';
-            heliosview_host_ui_dispatch_text(host, utf8);
-        }
+        hv_host_deliver_char(host, unit);
         return 0;
     }
 
     /* ---- IME: composition text and its window position ---- */
+
+    /* An IME associates itself with a window through this message: answering it is what
+     * keeps the IME locked to this window.
+     *
+     * ISC_SHOWUICOMPOSITIONWINDOW is cleared because the widget draws the pre-edit
+     * string itself, underlined, at the caret -- letting the IME draw its own
+     * composition window as well would show the pinyin twice.
+     *
+     * ISC_SHOWUICANDIDATEWINDOW is deliberately left alone: the candidate list is the
+     * IME's own UI, the user picks from it, and hiding it makes the IME look broken.
+     * Its position comes from heliosview_host_ui_set_ime_caret (ImmSetCandidateWindow). */
+    case WM_IME_SETCONTEXT:
+        ime_log("WM_IME_SETCONTEXT active=%d", (int)wp);
+        if (wp) {
+            lp &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+        }
+        return DefSubclassProc(hwnd, msg, wp, lp);
+
     case WM_IME_STARTCOMPOSITION:
+        ime_log("WM_IME_STARTCOMPOSITION");
         ui->ime_caret_set = true;
         return 0;
 
     case WM_IME_COMPOSITION: {
-        if ((lp & GCS_COMPSTR) != 0) {
-            HIMC imc = ImmGetContext(hwnd);
-            if (imc) {
-                const LONG bytes = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
-                if (bytes >= 0) {
-                    std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                    if (bytes > 0)
-                        ImmGetCompositionStringW(imc, GCS_COMPSTR, wide.data(), static_cast<DWORD>(bytes));
+        ime_log("WM_IME_COMPOSITION flags=0x%04X", (unsigned)lp);
 
-                    std::string utf8;
-                    utf8.reserve(wide.size() * 3 + 1);
-                    for (size_t i = 0; i < wide.size(); ++i) {
-                        char buf[8] = {};
-                        wchar_t high = 0;
-                        int n;
-                        if (wide[i] >= 0xD800 && wide[i] <= 0xDBFF && i + 1 < wide.size()) {
-                            n = hv_host_utf8_from_unit(wide[i], &high, buf);
-                            n = hv_host_utf8_from_unit(wide[++i], &high, buf);
-                        } else {
-                            n = hv_host_utf8_from_unit(wide[i], &high, buf);
-                        }
-                        if (n > 0) utf8.append(buf, static_cast<size_t>(n));
-                    }
-                    heliosview_host_ui_dispatch_composition(host, utf8.c_str());
+        HIMC imc = ImmGetContext(hwnd);
+        if (!imc)
+            return 0;
+
+        /* The result string is the text the IME committed. It must be taken from the
+         * context BEFORE the composition ends, which is why it is read here rather than
+         * waiting for a WM_CHAR/WM_IME_CHAR that some IMEs do not send. */
+        bool committed = false;
+        if ((lp & GCS_RESULTSTR) != 0) {
+            const LONG bytes = ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
+            if (bytes > 0) {
+                std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+                ImmGetCompositionStringW(imc, GCS_RESULTSTR, wide.data(), static_cast<DWORD>(bytes));
+                for (wchar_t unit : wide) {
+                    hv_host_deliver_char(host, unit); /* surrogate pairs pair up inside */
                 }
-                ImmReleaseContext(hwnd, imc);
+                committed = true;
             }
         }
+
+        /* The composition (pre-edit) string, previewed underlined. A message that
+         * committed text does not also preview: the widget already inserted the commit,
+         * and leaving the pre-edit behind would make the NEXT commit replace it. */
+        if (committed) {
+            /* Drop any preview still held from before this commit */
+            heliosview_host_ui_dispatch_composition(host, "");
+        } else if ((lp & GCS_COMPSTR) != 0) {
+            const LONG bytes = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
+            if (bytes >= 0) {
+                std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+                if (bytes > 0)
+                    ImmGetCompositionStringW(imc, GCS_COMPSTR, wide.data(), static_cast<DWORD>(bytes));
+
+                std::string utf8;
+                utf8.reserve(wide.size() * 3 + 1);
+                for (size_t i = 0; i < wide.size(); ++i) {
+                    char buf[8] = {};
+                    wchar_t high = 0;
+                    int n = hv_host_utf8_from_unit(wide[i], &high, buf);
+                    if (n == 0 && high != 0 && i + 1 < wide.size()) {
+                        n = hv_host_utf8_from_unit(wide[++i], &high, buf);
+                    }
+                    if (n > 0) utf8.append(buf, static_cast<size_t>(n));
+                }
+                heliosview_host_ui_dispatch_composition(host, utf8.c_str());
+            }
+        }
+
+        ImmReleaseContext(hwnd, imc);
         return 0;
     }
 
     case WM_IME_ENDCOMPOSITION:
-        /* Clear the composition; a commit arrives separately as WM_CHAR. */
+        ime_log("WM_IME_ENDCOMPOSITION");
+        /* Composition over: drop the preview. Any committed text was already taken from
+         * the context in WM_IME_COMPOSITION. */
         heliosview_host_ui_dispatch_composition(host, "");
         ui->ime_caret_set = false;
+        return 0;
+
+    case WM_IME_CHAR:
+        /* The character the IME produced. Some IMEs send this instead of WM_CHAR, so
+         * deliver it rather than passing it along (which would only loop back as
+         * WM_CHAR and land twice). */
+        ime_log("WM_IME_CHAR 0x%04X", (unsigned)wp);
+        if (hv_host_accepts_char(static_cast<wchar_t>(wp)))
+            hv_host_deliver_char(host, static_cast<wchar_t>(wp));
         return 0;
 
     default:

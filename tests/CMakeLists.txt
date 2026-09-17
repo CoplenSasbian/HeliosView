@@ -31,6 +31,30 @@ target_link_libraries(HeliosView_UiInputTest PRIVATE HeliosView::Core)
 add_test(NAME ui_input COMMAND HeliosView_UiInputTest)
 set_tests_properties(ui_input PROPERTIES LABELS "requires-desktop")
 
+# Input driven from inside the real message loop (App::exec), which is where a widget
+# that measured text outside its paint call used to crash: a painter is only valid for
+# the paint it belongs to, and typing happens between paints.
+add_executable(HeliosView_UiExecInputTest ui_exec_input_test.cpp)
+target_link_libraries(HeliosView_UiExecInputTest PRIVATE HeliosView::Core)
+add_test(NAME ui_exec_input COMMAND HeliosView_UiExecInputTest)
+set_tests_properties(ui_exec_input PROPERTIES LABELS "requires-desktop")
+
+# WM_CHAR straight at a host child window: the message a keyboard or an IME commit
+# delivers. Proves the text half of Chinese input independently of any IME.
+add_executable(HeliosView_UiWmCharTest ui_wmchar_test.cpp)
+target_link_libraries(HeliosView_UiWmCharTest PRIVATE HeliosView::Core)
+add_test(NAME ui_wmchar COMMAND HeliosView_UiWmCharTest)
+set_tests_properties(ui_wmchar PROPERTIES LABELS "requires-desktop")
+
+# The IME half: attaches an IME context to a host window, starts a composition and
+# writes a pre-edit string into that context. Windows then delivers WM_IME_COMPOSITION
+# and the host has to read the string back (ImmGetCompositionStringW) and hand UTF-8 to
+# the focused widget. Deterministic, unlike waiting for a user's IME to activate.
+add_executable(HeliosView_UiImeComposeTest ui_ime_compose_test.cpp)
+target_link_libraries(HeliosView_UiImeComposeTest PRIVATE HeliosView::Core)
+add_test(NAME ui_ime_compose COMMAND HeliosView_UiImeComposeTest)
+set_tests_properties(ui_ime_compose PROPERTIES LABELS "requires-desktop")
+
 # The same path on a live window: launches the canvas UI demo, clicks into a text field
 # and posts a Chinese WM_CHAR plus an IME composition round to the real host child
 # window, which is the part a headless test cannot reach.
