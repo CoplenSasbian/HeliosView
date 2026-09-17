@@ -198,6 +198,13 @@ void* g_session_end_userdata = nullptr;
 
 /* ================= Default native-message → event conversion (Win32 MSG → event) ================= */
 
+/* The key translation is deliberately outside the anonymous namespace below: the window
+ * converter is not the only place that receives keys. A focused child viewport (a UI
+ * host) gets WM_KEYDOWN itself and forwards it to the focused widget, and it must
+ * translate the key exactly the way this file does -- see the declarations in
+ * heliosview_win32_internal.h. */
+} // namespace
+
 heliosview_keycode_t map_vk(UINT vk)
 {
     switch (vk) {
@@ -296,6 +303,8 @@ uint32_t map_modifiers()
         m |= HELIOSVIEW_MOD_NUM_LOCK;
     return m;
 }
+
+namespace {
 
 /* UTF-8 encode one codepoint; returns the byte count (1..4). */
 int utf8_encode_cp(uint32_t cp, char* out)

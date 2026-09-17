@@ -144,31 +144,43 @@ static int hv_host_utf8_from_unit(wchar_t unit, wchar_t* pending_high, char* out
     return encode(static_cast<uint32_t>(unit), out);
 }
 
+/* Modifier state for a key message: the keyboard state, plus the one modifier the
+ * message itself carries -- bit 29 is the context bit, i.e. Alt was held (Ctrl and
+ * Shift have no bit of their own; GetKeyState is their only source, and it describes
+ * the message-time state on the thread that reads it). */
+static uint32_t hv_host_key_modifiers(LPARAM lp) {
+    uint32_t m = map_modifiers();
+    if (lp & (1 << 29)) {
+        m |= HELIOSVIEW_MOD_ALT;
+    }
+    return m;
+}
+
 /* One committed character -> the focused widget.
  *
  * Two messages carry committed text and an IME may send either or both:
  *   - WM_CHAR, which TranslateMessage derives from a key press, and
  *   - WM_IME_CHAR, which an IME posts for the character it produced.
- * A duplicate guard keeps a character from landing twice when both arrive.
+ * Nothing distinguishes "the same character through both channels" from "the user typed
+ * the same character twice", so the channels are tracked separately: the first
+ * channel to deliver a character arms the duplicate guard for the OTHER channel only,
+ * which the next character (same or not) then clears. Typing "ll" therefore inserts two
+ * characters, while a commit reported through both messages inserts one.
  */
 static bool hv_host_accepts_char(wchar_t unit) {
     return unit >= 0x20 && unit != 0x7F;
 }
 
-static void hv_host_deliver_char(heliosview_host_t* host, wchar_t unit) {
+static void hv_host_deliver_char(heliosview_host_t* host, wchar_t unit, int channel) {
     static thread_local wchar_t pending_high = 0;
-    static thread_local wchar_t last_char = 0;
-    static thread_local DWORD last_tick = 0;
+    static thread_local wchar_t last_char[2] = {0, 0};
 
-    if (unit == last_char) {
-        const DWORD now = GetTickCount();
-        if (now - last_tick < 60) return; /* same character again within a tick: the
-                                           * other channel for it already delivered */
-        last_tick = now;
-    } else {
-        last_char = unit;
-        last_tick = GetTickCount();
+    if (last_char[1 - channel] == unit) {
+        last_char[1 - channel] = 0; /* the other channel already delivered it */
+        return;
     }
+    last_char[channel] = unit;
+    last_char[1 - channel] = 0;
 
     char utf8[8] = {};
     const int len = hv_host_utf8_from_unit(unit, &pending_high, utf8);
@@ -320,12 +332,37 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         RemoveWindowSubclass(hwnd, UiSubclassProc, uIdSubclass);
         return DefSubclassProc(hwnd, msg, wp, lp);
 
+    /* ---- keyboard ----
+     *
+     * The host child window holds the focus (SetFocus in WM_LBUTTONDOWN), so the key
+     * messages arrive HERE, not at the parent window -- the parent's event converter
+     * never sees them, which is why keys are forwarded to the focused widget from this
+     * procedure rather than from the window's event dispatch. Translation uses the same
+     * map_vk the window converter does, so a key means the same thing on both paths.
+     *
+     * Modifiers come from the message's own extended bits (Ctrl / Alt / Shift in
+     * lParam) when they are present, falling back to the keyboard state. The bits
+     * describe the keystroke itself, which is what a shortcut should act on, and they
+     * survive a posted message -- GetKeyState only reflects the state of the thread
+     * that is reading it. */
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                        hv_host_key_modifiers(lp), 1);
+        return 0;
+
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        heliosview_host_ui_dispatch_key(host, static_cast<int>(map_vk(static_cast<UINT>(wp))),
+                                        hv_host_key_modifiers(lp), 0);
+        return 0;
+
     /* ---- text input (this window is the focused one, see the note above) ---- */
     case WM_CHAR: {
         const wchar_t unit = static_cast<wchar_t>(wp);
         if (!hv_host_accepts_char(unit))
             return 0; /* backspace/tab/CR/LF/ESC are key events, not text */
-        hv_host_deliver_char(host, unit);
+        hv_host_deliver_char(host, unit, 0);
         return 0;
     }
 
@@ -370,7 +407,7 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 std::wstring wide(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
                 ImmGetCompositionStringW(imc, GCS_RESULTSTR, wide.data(), static_cast<DWORD>(bytes));
                 for (wchar_t unit : wide) {
-                    hv_host_deliver_char(host, unit); /* surrogate pairs pair up inside */
+                    hv_host_deliver_char(host, unit, 1); /* surrogate pairs pair up inside */
                 }
                 committed = true;
             }
@@ -421,8 +458,10 @@ LRESULT CALLBACK UiSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
          * deliver it rather than passing it along (which would only loop back as
          * WM_CHAR and land twice). */
         ime_log("WM_IME_CHAR 0x%04X", (unsigned)wp);
+        /* The IME's own char message shares a channel with its result string: the two
+         * are the same character, so the second one is the duplicate */
         if (hv_host_accepts_char(static_cast<wchar_t>(wp)))
-            hv_host_deliver_char(host, static_cast<wchar_t>(wp));
+            hv_host_deliver_char(host, static_cast<wchar_t>(wp), 1);
         return 0;
 
     default:

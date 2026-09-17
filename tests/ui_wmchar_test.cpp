@@ -50,6 +50,23 @@ int main() {
                         field->text().c_str(), field->text().size());
             std::fflush(stdout);
         } else if (frames == 9) {
+            /* The same character typed twice in a row must insert twice. This is the
+             * case a "drop a repeated character" guard silently eats, which turns fast
+             * typing into text that gets shorter the more you type. */
+            SendMessageW(hostHwnd, WM_CHAR, (WPARAM)L'\u4e2d', 0); // 中
+            SendMessageW(hostHwnd, WM_CHAR, (WPARAM)L'\u4e2d', 0); // 中 again
+            std::printf("posted WM_CHAR 中中 -> \"%s\" (%zu bytes)\n",
+                        field->text().c_str(), field->text().size());
+            std::fflush(stdout);
+        } else if (frames == 12) {
+            /* The other half: one character an IME reports through BOTH of its channels
+             * must insert once, not twice. */
+            SendMessageW(hostHwnd, WM_IME_CHAR, (WPARAM)L'\u6587', 0); // 文 via the IME
+            SendMessageW(hostHwnd, WM_IME_CHAR, (WPARAM)L'\u6587', 0); // 文 again: a second char
+            std::printf("posted WM_IME_CHAR 文文 -> \"%s\" (%zu bytes)\n",
+                        field->text().c_str(), field->text().size());
+            std::fflush(stdout);
+        } else if (frames == 15) {
             window->close();
         }
         host.requestRepaint();
@@ -59,10 +76,17 @@ int main() {
     window->show();
     const int code = app.exec();
 
-    const std::string expected = "\xE4\xB8\xAD\xE6\x96\x87" "A";
+    /* 中文A + 中中 + 文文 */
+    const std::string expected = "\xE4\xB8\xAD\xE6\x96\x87" "A"
+                                 "\xE4\xB8\xAD\xE4\xB8\xAD"
+                                 "\xE6\x96\x87\xE6\x96\x87";
     const bool ok = field->text() == expected;
-    std::printf("%s  WM_CHAR path delivered 中文A (got \"%s\", %zu bytes)\n",
+    std::printf("%s  WM_CHAR/WM_IME_CHAR delivered 中文A中中文文 (got \"%s\", %zu bytes)\n",
                 ok ? "ok  " : "FAIL", field->text().c_str(), field->text().size());
+    const bool well_formed = field->text().size() == expected.size();
+    std::printf("%s  repeated characters were not dropped (no shrinking)\n",
+                well_formed ? "ok  " : "FAIL");
+    const bool all_ok = ok && well_formed;
 
     host.clearRoot();
     field.reset();
@@ -70,6 +94,6 @@ int main() {
     window->close();
     window.reset();
 
-    std::printf("=== %s ===\n", ok ? "PASS" : "FAIL");
-    return ok && code == 0 ? 0 : 1;
+    std::printf("=== %s ===\n", all_ok ? "PASS" : "FAIL");
+    return all_ok && code == 0 ? 0 : 1;
 }

@@ -1,4 +1,4 @@
-if(MSVC)
+﻿if(MSVC)
     add_compile_options(/utf-8 /EHsc)
 endif()
 
@@ -55,6 +55,14 @@ target_link_libraries(HeliosView_UiImeComposeTest PRIVATE HeliosView::Core)
 add_test(NAME ui_ime_compose COMMAND HeliosView_UiImeComposeTest)
 set_tests_properties(ui_ime_compose PROPERTIES LABELS "requires-desktop")
 
+# Editing keys with real keyboard input (SendInput): Backspace, Delete, Home, End,
+# arrows and the Ctrl+A/C/V clipboard shortcuts. The widget reads the Ctrl/Shift state
+# from the message-time keyboard state, which only real input can set.
+add_executable(HeliosView_UiKeysTest ui_keys_test.cpp)
+target_link_libraries(HeliosView_UiKeysTest PRIVATE HeliosView::Core)
+add_test(NAME ui_keys COMMAND HeliosView_UiKeysTest)
+set_tests_properties(ui_keys PROPERTIES LABELS "requires-desktop")
+
 # The same path on a live window: launches the canvas UI demo, clicks into a text field
 # and posts a Chinese WM_CHAR plus an IME composition round to the real host child
 # window, which is the part a headless test cannot reach.
@@ -66,3 +74,10 @@ add_dependencies(HeliosView_UiLiveInputTest HeliosView_CanvasUiDemo)
 add_test(NAME ui_live_input COMMAND HeliosView_UiLiveInputTest)
 set_tests_properties(ui_live_input PROPERTIES LABELS "requires-desktop")
 
+
+# TextField buffer integrity with mixed ASCII / multi-byte text: byte loss when editing
+# in the middle of a string is what a byte-oriented edit does to UTF-8.
+add_executable(HeliosView_UiTextFieldTest ui_textfield_test.cpp)
+target_link_libraries(HeliosView_UiTextFieldTest PRIVATE HeliosView::Core)
+add_test(NAME ui_textfield COMMAND HeliosView_UiTextFieldTest)
+set_tests_properties(ui_textfield PROPERTIES LABELS "requires-desktop")

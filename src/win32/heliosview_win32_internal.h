@@ -394,6 +394,18 @@ inline HWND hv_window_hwnd(heliosview_window_t* window)
     return reinterpret_cast<HWND>(heliosview_window_id(window));
 }
 
+/* ================= Native key translation =================
+ *
+ * The Win32 -> heliosview keycode/modifier mapping used by the window's own message
+ * converter. Declared here because the keyboard messages do not all arrive at the
+ * same window: the focused child (a host viewport) receives WM_KEYDOWN/WM_CHAR, so it
+ * translates the keys it forwards to the focused widget with exactly this mapping
+ * instead of growing a second, drifting copy. Defined in heliosview_window_win32.cpp.
+ */
+
+heliosview_keycode_t map_vk(UINT vk);
+uint32_t map_modifiers();
+
 /* ================= Host handle (HWND) & Subclass Helpers ================= */
 struct heliosview_host;
 heliosview_host* hv_host_create_raw(heliosview_window_t* parent, int x, int y, int width, int height);
